@@ -58,7 +58,8 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         String uri=getIntent().getStringExtra(EXTRA_GAME_URI);
         org.xeniaae.emulator.Emulator.Path path=org.xeniaae.emulator.Emulator.Path.from(uri,-1);
         Emulator.get.setup_context(this);
-        Emulator.get.setup_document_file_tree(DocumentFile.fromTreeUri(this,MainActivity.load_pref_game_dir( this)));
+        android.net.Uri gameDirUri = MainActivity.load_pref_game_dir(this);
+        Emulator.get.setup_document_file_tree(gameDirUri != null ? DocumentFile.fromTreeUri(this, gameDirUri) : null);
         Emulator.get.setup_game_path(path);
         Emulator.get.setup_launch_args(new String[]{
                 "--storage_root="+Application.get_app_data_dir().getAbsolutePath(),
