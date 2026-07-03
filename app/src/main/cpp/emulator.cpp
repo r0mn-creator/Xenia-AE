@@ -422,7 +422,7 @@ int register_Emulator$Config(JNIEnv* env){
             { "native_save_config_entry_ty_arr", "(JLjava/lang/String;[Ljava/lang/String;)V", (void *) j_save_config_entry_ty_arr },
             { "native_close_config_file", "(JLjava/lang/String;)V", (void *) j_close_config_file },
     };
-    jclass clazz = env->FindClass("aenu/emulator/Emulator$Config");
+    jclass clazz = env->FindClass("org/xeniaae/emulator/Emulator$Config");
     return env->RegisterNatives(clazz,methods, sizeof(methods)/sizeof(methods[0]));
 }
 
@@ -431,7 +431,7 @@ int register_Emulator$Config(JNIEnv* env){
 static void j_setup_game_path(JNIEnv* env,jobject self,jobject path ){
 
     jclass path_cls;
-    if(env->IsInstanceOf(path,path_cls=env->FindClass("aenu/emulator/Emulator$Path"))){
+    if(env->IsInstanceOf(path,path_cls=env->FindClass("org/xeniaae/emulator/Emulator$Path"))){
         jfieldID f_fd  = env->GetFieldID(path_cls, "fd", "I");
         ae::boot_game_fd=env->GetIntField(path, f_fd);
         if(ae::boot_game_fd!=-1)
@@ -498,7 +498,7 @@ static void j_quit(JNIEnv* env,jobject self){
 int register_Emulator(JNIEnv* env){
     static const JNINativeMethod methods[] = {
             { "setup_game_path", "(Ljava/lang/String;)V", (void *) j_setup_game_path },
-            { "setup_game_path", "(Laenu/emulator/Emulator$Path;)V", (void *) j_setup_game_path },
+            { "setup_game_path", "(Lorg/xeniaae/emulator/Emulator$Path;)V", (void *) j_setup_game_path },
             { "setup_surface", "(Landroid/view/Surface;)V", (void *) j_setup_surface },
             { "boot", "()V", (void *) j_boot },
             { "key_event", "(IZI)V", (void *) j_key_event },
@@ -509,5 +509,5 @@ int register_Emulator(JNIEnv* env){
             { "resume", "()V", (void *) j_resume },
             { "change_surface", "(II)V", (void *) j_change_surface },
     };
-    return env->RegisterNatives(env->FindClass("aenu/emulator/Emulator"),methods, sizeof(methods)/sizeof(methods[0]));
+    return env->RegisterNatives(env->FindClass("org/xeniaae/emulator/Emulator"),methods, sizeof(methods)/sizeof(methods[0]));
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: WTFPL
 
-package aenu.ax360e;
+package org.xeniaae;
 
 import android.content.SharedPreferences;
 import android.os.Bundle;
@@ -34,7 +34,7 @@ import android.view.*;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
 
-import aenu.view.SVListView;
+import org.xeniaae.view.SVListView;
 
 public class KeyMapActivity extends AppCompatActivity {
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: WTFPL
-package aenu.preference;
+package org.xeniaae.preference;
 
 import android.content.Context;
 import android.content.res.TypedArray;
@@ -11,21 +11,22 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.preference.PreferenceViewHolder;
 
-public class ListPreference extends androidx.preference.ListPreference{
-    public ListPreference(@NonNull Context context){
+public class CheckBoxPreference extends androidx.preference.CheckBoxPreference{
+    public CheckBoxPreference(@NonNull Context context) {
         this(context, null);
     }
-
-    public ListPreference(@NonNull Context context, @Nullable AttributeSet attrs){
-        this(context, attrs, androidx.preference.R.attr.dialogPreferenceStyle);
+    public CheckBoxPreference(@NonNull Context context, @Nullable AttributeSet attrs) {
+        this(context, attrs, androidx.preference.R.attr.checkBoxPreferenceStyle);
     }
-    public ListPreference(@NonNull Context context, @Nullable AttributeSet attrs, int defStyleAttr){
+    public CheckBoxPreference(@NonNull Context context, @Nullable AttributeSet attrs, int defStyleAttr) {
         this(context, attrs, defStyleAttr, 0);
     }
-    public ListPreference(@NonNull Context context, @Nullable AttributeSet attrs, int defStyleAttr, int defStyleRes){
-        super(context,attrs,defStyleAttr,defStyleRes);
-        final TypedArray a = context.obtainStyledAttributes(attrs,
-                        new int[]{android.R.attr.textColorPrimary, android.R.attr.textColorSecondary}, defStyleAttr, defStyleRes);
+    public CheckBoxPreference(@NonNull Context context, @Nullable AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+
+        final TypedArray
+                a = context.obtainStyledAttributes(attrs,
+                new int[]{android.R.attr.textColorPrimary, android.R.attr.textColorSecondary}, defStyleAttr, defStyleRes);
         title_color=a.getColor(0, Color.RED);
         summary_color=a.getColor(1, Color.RED);
         a.recycle();
@@ -58,19 +59,13 @@ public class ListPreference extends androidx.preference.ListPreference{
 
         TextView title_v=(TextView) holder.itemView.findViewById(android.R.id.title);
         TextView summary_v=(TextView) holder.itemView.findViewById(android.R.id.summary);
-
         if(is_modify_color){
-            if(title_v!=null)
-                title_v.setTextColor(modify_color);
-            if(summary_v!=null)
-                summary_v.setTextColor(modify_color);
+            if(title_v!=null) title_v.setTextColor(modify_color);
+            if(summary_v!=null) summary_v.setTextColor(modify_color);
         }
         else{
-
-            if(title_v!=null)
-                title_v.setTextColor(title_v.isEnabled()?title_color:Color.GRAY);
-            if(summary_v!=null)
-                summary_v.setTextColor(summary_v.isEnabled()?summary_color:Color.GRAY);
+            if(title_v!=null) title_v.setTextColor(title_v.isEnabled()?title_color:Color.GRAY);
+            if(summary_v!=null) summary_v.setTextColor(summary_v.isEnabled()?summary_color:Color.GRAY);
         }
     }
 }

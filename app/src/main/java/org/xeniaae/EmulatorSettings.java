@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: WTFPL
-package aenu.ax360e;
+package org.xeniaae;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
@@ -26,9 +26,9 @@ import androidx.preference.PreferenceScreen;
 
 import org.json.JSONObject;
 
-import aenu.preference.CheckBoxPreference;
-import aenu.preference.ListPreference;
-import aenu.preference.SeekBarPreference;
+import org.xeniaae.preference.CheckBoxPreference;
+import org.xeniaae.preference.ListPreference;
+import org.xeniaae.preference.SeekBarPreference;
 
 
 import java.io.File;

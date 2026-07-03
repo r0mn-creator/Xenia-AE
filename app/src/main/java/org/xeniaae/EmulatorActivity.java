@@ -1,4 +1,4 @@
-package aenu.ax360e;
+package org.xeniaae;
 
 import android.app.Activity;
 import android.app.AlertDialog;
@@ -56,7 +56,7 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
     });
     void on_create(){
         String uri=getIntent().getStringExtra(EXTRA_GAME_URI);
-        aenu.emulator.Emulator.Path path=aenu.emulator.Emulator.Path.from(uri,-1);
+        org.xeniaae.emulator.Emulator.Path path=org.xeniaae.emulator.Emulator.Path.from(uri,-1);
         Emulator.get.setup_context(this);
         Emulator.get.setup_document_file_tree(DocumentFile.fromTreeUri(this,MainActivity.load_pref_game_dir( this)));
         Emulator.get.setup_game_path(path);
@@ -64,8 +64,8 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
                 "--storage_root="+Application.get_app_data_dir().getAbsolutePath(),
                 "--config="+Application.get_global_config_file().getAbsolutePath(),
                 "--log_file="+Application.get_app_data_dir().getAbsolutePath()+"/xe.log",
-                /*"--storage_root=/storage/emulated/0/Download/ax360e",
-                "--log_file=/storage/emulated/0/Download/ax360e/xe.log",*/
+                /*"--storage_root=/storage/emulated/0/Download/xeniaae",
+                "--log_file=/storage/emulated/0/Download/xeniaae/xe.log",*/
         });
         Emulator.get.setup_uri_info_list_file(Application.get_uri_info_list_file().getAbsolutePath());
         setContentView(R.layout.activity_emulator);
@@ -219,7 +219,7 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
             Emulator.get.setup_surface(holder.getSurface());
             try {
                 Emulator.get.boot();
-            } catch (aenu.emulator.Emulator.BootException e) {
+            } catch (org.xeniaae.emulator.Emulator.BootException e) {
                 throw new RuntimeException(e);
             }
         }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: WTFPL
-package aenu.ax360e;
+package org.xeniaae;
 
 import android.content.Context;
 import android.net.Uri;
@@ -13,7 +13,7 @@ import org.json.JSONObject;
 
 import java.util.Base64;
 
-public class Emulator extends aenu.emulator.Emulator{
+public class Emulator extends org.xeniaae.emulator.Emulator{
     public static Emulator get=null;
     public static void load_library(){
         if(get!=null)
@@ -41,7 +41,7 @@ public class Emulator extends aenu.emulator.Emulator{
             pfd_.close();
             return game_fd;
         } catch (Exception e) {
-            Log.e("ax360e",e.toString());
+            Log.e("XeniaAE",e.toString());
             return -1;
         }
     }

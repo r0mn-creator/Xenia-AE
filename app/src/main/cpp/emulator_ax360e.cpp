@@ -136,7 +136,7 @@ static jstring j_simple_device_info(JNIEnv* env, jobject thiz)
 }
 
 static jobject j_meta_info_from_god_game(JNIEnv* env,jobject self,jobject context,jstring uri_str ) {
-    jclass cls_Emulator$GameInfo = env->FindClass("aenu/ax360e/Emulator$GameInfo");
+    jclass cls_Emulator$GameInfo = env->FindClass("org/xeniaae/Emulator$GameInfo");
     jmethodID mid_Emulator$GameInfo = env->GetMethodID(cls_Emulator$GameInfo, "<init>", "()V");
     jfieldID fid_name = env->GetFieldID(cls_Emulator$GameInfo, "name", "Ljava/lang/String;");
     jfieldID fid_uri = env->GetFieldID(cls_Emulator$GameInfo, "uri", "Ljava/lang/String;");
@@ -205,7 +205,7 @@ static jobject j_meta_info_from_uri(JNIEnv* env,jobject self,jstring uri_str ){
         public int fd;
         public byte[] icon;
      */
-    jclass cls_Emulator$GameInfo = env->FindClass("aenu/ax360e/Emulator$GameInfo");
+    jclass cls_Emulator$GameInfo = env->FindClass("org/xeniaae/Emulator$GameInfo");
     jmethodID mid_Emulator$GameInfo = env->GetMethodID(cls_Emulator$GameInfo, "<init>", "()V");
     jobject game_info = env->NewObject(cls_Emulator$GameInfo, mid_Emulator$GameInfo);
     jfieldID fid_name = env->GetFieldID(cls_Emulator$GameInfo, "name", "Ljava/lang/String;");
@@ -423,9 +423,9 @@ static const std::pair<std::string,range> gen_seekbar[]={
         //{"Video|internal_display_resolution_y",{1,1080}},
 };
 
-#define SEEKBAR_PREF_TAG "aenu.preference.SeekBarPreference"
-#define CHECKBOX_PREF_TAG "aenu.preference.CheckBoxPreference"
-#define LIST_PREF_TAG "aenu.preference.ListPreference"
+#define SEEKBAR_PREF_TAG "org.xeniaae.preference.SeekBarPreference"
+#define CHECKBOX_PREF_TAG "org.xeniaae.preference.CheckBoxPreference"
+#define LIST_PREF_TAG "org.xeniaae.preference.ListPreference"
 #if 1
 
 static jstring generate_config_xml(JNIEnv* env,jobject self,jstring toml_path){
@@ -688,7 +688,7 @@ int register_ax360e_Emulator(JNIEnv* env){
     g_class_DocumentFile=env->FindClass("androidx/documentfile/provider/DocumentFile");
     g_class_DocumentFile=(jclass)env->NewGlobalRef(g_class_DocumentFile);
 
-    g_class_Emulator = env->FindClass("aenu/ax360e/Emulator");
+    g_class_Emulator = env->FindClass("org/xeniaae/Emulator");
     g_class_Emulator = (jclass)env->NewGlobalRef(g_class_Emulator);
 
     //public static int nc_open_uri_fd(Context ctx,String uri)
@@ -698,7 +698,7 @@ int register_ax360e_Emulator(JNIEnv* env){
             { "setup_context", "(Landroid/content/Context;)V", (void *) j_setup_context },
             { "setup_document_file_tree", "(Landroidx/documentfile/provider/DocumentFile;)V", (void *) j_setup_document_file_tree },
             { "setup_launch_args", "([Ljava/lang/String;)V", (void *) j_setup_launch_args },
-            { "meta_info_from_god_game", "(Landroid/content/Context;Ljava/lang/String;)Laenu/ax360e/Emulator$GameInfo;", (void *) j_meta_info_from_god_game },
+            { "meta_info_from_god_game", "(Landroid/content/Context;Ljava/lang/String;)Lorg/xeniaae/Emulator$GameInfo;", (void *) j_meta_info_from_god_game },
             { "setup_uri_info_list_file", "(Ljava/lang/String;)V", (void *) j_setup_uri_info_list_file },
             {"simple_device_info", "()Ljava/lang/String;", (void *) j_simple_device_info}
             ,{"generate_config_xml", "(Ljava/lang/String;)Ljava/lang/String;", (void *) generate_config_xml}

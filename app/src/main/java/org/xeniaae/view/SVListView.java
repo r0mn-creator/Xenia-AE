@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: WTFPL
-package aenu.view;
+package org.xeniaae.view;
 
 import android.widget.ListView;
 

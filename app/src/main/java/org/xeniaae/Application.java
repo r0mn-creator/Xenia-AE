@@ -1,4 +1,4 @@
-package aenu.ax360e;
+package org.xeniaae;
 
 import android.content.Context;
 
@@ -6,17 +6,17 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 
-import aenu.hardware.ProcessorInfo;
+import org.xeniaae.hardware.ProcessorInfo;
 
 // Created by aenu on 2025/7/31.
 // SPDX-License-Identifier: WTFPL
 public class Application extends android.app.Application{
     static File get_app_data_dir(){
-        return ctx.getExternalFilesDir("ax360e");
+        return ctx.getExternalFilesDir("xeniaae");
     }
     public static File get_internal_data_dir()
     {
-        return new File(ctx.getApplicationInfo().dataDir,"ax360e");
+        return new File(ctx.getApplicationInfo().dataDir,"xeniaae");
     }
     //sdcardfs文件系统无法创建可执行文件，只能放在内部存储(ext4)
     public static File get_custom_driver_dir()

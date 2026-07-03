@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools" >
-<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-<uses-permission android:name="android.permission.INTERNET" />
 
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
@@ -13,7 +11,7 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
 
     <application
-        android:name="aenu.ax360e.Application"
+        android:name="org.xeniaae.Application"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -25,15 +23,13 @@
         android:requestLegacyExternalStorage="true"
         android:allowNativeHeapPointerTagging="false"
         tools:targetApi="31" >
-<meta-data android:name="com.google.android.gms.ads.APPLICATION_ID"
-android:value="ca-app-pub-5412294626339113~5712703744" />
 
 
 
 
 
 
-        <activity android:name="aenu.ax360e.MainActivity"
+        <activity android:name="org.xeniaae.MainActivity"
 
             android:exported="true"
             android:launchMode="singleTask"
@@ -45,7 +41,7 @@ android:value="ca-app-pub-5412294626339113~5712703744" />
             </intent-filter>
         </activity>
 
-        <activity android:name="aenu.ax360e.EmulatorActivity"
+        <activity android:name="org.xeniaae.EmulatorActivity"
 
             android:screenOrientation="sensorLandscape"
             android:launchMode="singleTask"
@@ -55,7 +51,7 @@ android:value="ca-app-pub-5412294626339113~5712703744" />
             android:process=":emu"
             >
             <intent-filter>
-                <action android:name="aenu.intent.action.AX360E" />
+                <action android:name="org.xeniaae.intent.action.EMULATE" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <intent-filter>
@@ -63,21 +59,21 @@ android:value="ca-app-pub-5412294626339113~5712703744" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
-        <activity android:name="aenu.ax360e.EmulatorSettings"
+        <activity android:name="org.xeniaae.EmulatorSettings"
             android:exported="false"
             android:label="@string/settings"/>
-        <activity android:name="aenu.ax360e.KeyMapActivity"
+        <activity android:name="org.xeniaae.KeyMapActivity"
             android:exported="false"
             android:label="@string/key_mappers"/>
-        <activity android:name="aenu.ax360e.VirtualControlEdit"
+        <activity android:name="org.xeniaae.VirtualControlEdit"
             android:screenOrientation="sensorLandscape"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
             android:exported="false"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:launchMode="singleTask"/>
-        <activity android:name="aenu.ax360e.AboutActivity" android:exported="false" android:label="@string/about"> </activity>
+        <activity android:name="org.xeniaae.AboutActivity" android:exported="false" android:label="@string/about"> </activity>
         <provider
-            android:name="aenu.ax360e.DocumentsProvider"
+            android:name="org.xeniaae.DocumentsProvider"
             android:authorities="${applicationId}.DocumentsProvider"
             android:exported="true"
             android:grantUriPermissions="true"

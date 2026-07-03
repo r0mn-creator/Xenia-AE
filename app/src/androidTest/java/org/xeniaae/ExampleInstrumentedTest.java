@@ -1,4 +1,4 @@
-package aenu.ax360e;
+package org.xeniaae;
 
 import android.content.Context;
 
@@ -21,6 +21,6 @@ public class ExampleInstrumentedTest {
     public void useAppContext() {
         // Context of the app under test.
         Context appContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        assertEquals("aenu.ax360e", appContext.getPackageName());
+        assertEquals("org.xeniaae", appContext.getPackageName());
     }
 }

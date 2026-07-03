@@ -1,4 +1,4 @@
-package aenu.ax360e;
+package org.xeniaae;
 
 import android.annotation.TargetApi;
 import android.app.Activity;
@@ -84,7 +84,7 @@ public class MainActivity extends AppCompatActivity {
 
             Emulator.GameInfo meta_info=((GameMetaInfoAdapter)l.getAdapter()).getMetaInfo(position);
 
-            Intent intent = new Intent("aenu.intent.action.AX360E");
+            Intent intent = new Intent("org.xeniaae.intent.action.EMULATE");
             intent.setPackage(getPackageName());
 
             intent.putExtra(EmulatorActivity.EXTRA_GAME_URI,meta_info.uri);
@@ -140,8 +140,8 @@ public class MainActivity extends AppCompatActivity {
         //FIXME
         Emulator.get.setup_document_file_tree(DocumentFile.fromTreeUri(this,MainActivity.load_pref_game_dir( this)));
         Emulator.get.setup_launch_args(new String[]{
-                "--storage_root=/storage/emulated/0/Download/ax360e",
-                "--log_file=/storage/emulated/0/Download/ax360e/xe.log",
+                "--storage_root=/storage/emulated/0/Download/xeniaae",
+                "--log_file=/storage/emulated/0/Download/xeniaae/xe.log",
         });*/
         setContentView(R.layout.activity_main);
         
@@ -156,7 +156,7 @@ public class MainActivity extends AppCompatActivity {
         list_view.setOnItemClickListener(item_click_l);
         list_view.setEmptyView(findViewById(R.id.game_list_is_empty));
 
-        if(getPackageName().equals("aenu.ax360e"))
+        if(getPackageName().equals("org.xeniaae"))
         registerForContextMenu(list_view);
         //refresh_game_list();
         show_game_list();
@@ -166,16 +166,9 @@ public class MainActivity extends AppCompatActivity {
         Utils.save_string(config_file,config_str);*/
     }
 
-    void on_create(){com.google.android.gms.ads.MobileAds.initialize(this, initializationStatus -> {
-final AppOpenAdManager app_open_ad_manager=AppOpenAdManager.getInstance(this);
-app_open_ad_manager.loadAd(this, new AppOpenAdManager.OnLoadAdCompleteListener() {
-@Override
-public void onLoadAdComplete() {
-app_open_ad_manager.showAdIfAvailable( MainActivity.this, new AppOpenAdManager.OnShowAdCompleteListener() {
-@Override
-public void onShowAdComplete() {
-_on_create();
-}});}});});}
+    void on_create(){
+        _on_create();
+    }
 
 
     @Override
@@ -211,8 +204,9 @@ _on_create();
     }
 
     @Override
-    protected void onStart() {super.onStart();
-AppOpenAdManager.getInstance(this).showAdIfAvailable( this);}
+    protected void onStart() {
+        super.onStart();
+    }
 
     @Override
     protected void onDestroy() {

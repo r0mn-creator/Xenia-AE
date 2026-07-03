@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "ax360e"
+rootProject.name = "Xenia-AE"
 include ':app'

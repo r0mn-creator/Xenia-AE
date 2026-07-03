@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: WTFPL
-package aenu.emulator;
+package org.xeniaae.emulator;
 
 import android.os.Build;
 import android.os.ParcelFileDescriptor;

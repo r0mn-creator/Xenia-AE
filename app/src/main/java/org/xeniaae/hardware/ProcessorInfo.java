@@ -1,4 +1,4 @@
-package aenu.hardware;
+package org.xeniaae.hardware;
 
 // Created by aenu on 2025/7/21.
 // SPDX-License-Identifier: WTFPL

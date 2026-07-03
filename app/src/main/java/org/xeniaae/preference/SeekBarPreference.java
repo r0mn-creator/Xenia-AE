@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: WTFPL
-package aenu.preference;
+package org.xeniaae.preference;
 
 import android.content.Context;
 import android.content.DialogInterface;
@@ -209,7 +209,7 @@ public class SeekBarPreference extends DialogPreference {
     public SeekBarPreference(@NonNull Context context, @Nullable AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         super(context, attrs, defStyleAttr, defStyleRes);
 
-        setDialogLayoutResource(aenu.ax360e.R.layout.edit_seek_bar);
+        setDialogLayoutResource(org.xeniaae.R.layout.edit_seek_bar);
         TypedArray a = context.obtainStyledAttributes(
                 attrs, R.styleable.SeekBarPreference, defStyleAttr, defStyleRes);
 

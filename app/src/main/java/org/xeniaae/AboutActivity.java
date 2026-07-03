@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: WTFPL
-package aenu.ax360e;
+package org.xeniaae;
 
 import android.app.Activity;
 import android.content.DialogInterface;
