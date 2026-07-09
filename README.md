@@ -75,7 +75,7 @@ it compiles the entire native emulator core.
 Built on the work of others:
 
 - [**Xenia**](https://xenia.jp/) and **Xenia Canary** — the Xbox 360 emulator core.
-- The **aX360e** project — the original Android port and ARM64 JIT this project grew from.
+- [**aX360e**](https://github.com/aenu1/ax360e) by **aenu1** — the original Android port and ARM64 JIT this project grew from.
 
 Xenia AE keeps its own Android front‑end and applies fixes on top of the core.
 
