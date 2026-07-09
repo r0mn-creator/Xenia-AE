@@ -151,10 +151,11 @@ VulkanUploadBufferPool::CreatePageImplementation() {
     memory_dedicated_allocate_info.buffer = buffer;
   }
   VkDeviceMemory memory;
-  if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr, &memory) !=
-      VK_SUCCESS) {
-    XELOGE("Failed to allocate {} bytes of Vulkan upload buffer memory",
-           allocation_size_);
+  VkResult alloc_result =
+      dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr, &memory);
+  if (alloc_result != VK_SUCCESS) {
+    XELOGE("Failed to allocate {} bytes of Vulkan upload buffer memory: VkResult={}",
+           allocation_size_, int(alloc_result));
     dfn.vkDestroyBuffer(device, buffer, nullptr);
     return nullptr;
   }

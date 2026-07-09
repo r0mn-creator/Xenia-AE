@@ -1,5 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
+    <!-- Xbox 360 dashboard green accent — same value in light and dark mode.
+         Shifted hue from ~80deg (yellow-green/lime) to ~98deg (true green). -->
+    <color name="xenia_green">#FF71CA3E</color>
+    <color name="xenia_green_dark">#FF4D9C1F</color>
+
+    <!-- Light mode (default): white background, near-black text. -->
+    <color name="xenia_background">#FFFFFFFF</color>
+    <color name="xenia_surface">#FFF5F5F5</color>
+    <color name="xenia_on_background">#FF1A1A1A</color>
+    <color name="xenia_on_background_secondary">#FF6B6B6B</color>
+
+    <!-- Destructive-action red (e.g. "Exit Game") — same value in light and dark mode. -->
+    <color name="xenia_danger">#FFE53935</color>
 </resources>

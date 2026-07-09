@@ -4,12 +4,15 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Context;
-import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Looper;
 import android.os.Message;
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.preference.PreferenceManager;
@@ -18,16 +21,22 @@ import android.util.SparseIntArray;
 import android.view.InputDevice;
 import android.view.InputEvent;
 import android.view.KeyEvent;
+import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.widget.ProgressBar;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.documentfile.provider.DocumentFile;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
+import java.io.RandomAccessFile;
 
 // Created by aenu on 2025/7/29.
 // SPDX-License-Identifier: WTFPL
@@ -35,12 +44,123 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
 
     static final int DELAY_ON_CREATE=0xaeae0001;
     public static final String EXTRA_GAME_URI="game_uri";
+    public static final String EXTRA_GAME_TITLE="game_title";
+    public static final String EXTRA_GAME_TITLE_ID="game_title_id";
+    public static final String EXTRA_PRECACHE_MODE="precache_mode";
+
+    // How long a "Pre-cache Shaders" session runs before auto-stopping and saving.
+    private static final long PRECACHE_DURATION_MS = 120_000;
+
+    /** Builds the intent used to launch a game, matching the manifest's EMULATE action. */
+    static Intent createInternalIntent(Context context, String gameUri, String gameTitle){
+        return createInternalIntent(context, gameUri, gameTitle, null);
+    }
+
+    /** Same as above, but also threads through the game's XEX title ID (e.g. "4D5307E6")
+     *  when the caller already has it, so the in-game Settings menu can open the correct
+     *  per-game config file without re-deriving it. Pass null if not known yet. */
+    static Intent createInternalIntent(Context context, String gameUri, String gameTitle, String titleId){
+        Intent intent=new Intent("org.xeniaae.intent.action.EMULATE");
+        intent.setPackage(context.getPackageName());
+        intent.putExtra(EXTRA_GAME_URI,gameUri);
+        intent.putExtra(EXTRA_GAME_TITLE,gameTitle);
+        intent.putExtra(EXTRA_GAME_TITLE_ID,titleId);
+        return intent;
+    }
+
+    /** Same as {@link #createInternalIntent}, but boots into a timed shader pre-cache session. */
+    static Intent createPrecacheIntent(Context context, String gameUri, String gameTitle){
+        Intent intent = createInternalIntent(context, gameUri, gameTitle);
+        intent.putExtra(EXTRA_PRECACHE_MODE, true);
+        return intent;
+    }
     static SurfaceView sf=null;
     private SparseIntArray keysMap = new SparseIntArray();
     private Vibrator vibrator=null;
     private VibrationEffect vibrationEffect=null;
     boolean started=false;
     Dialog delay_dialog=null;
+
+    // In-game pause menu (Resume / Settings / Exit).
+    private String game_uri_;
+    private String game_title_id_;
+    private AlertDialog pause_dialog_;
+    private boolean returning_from_game_settings_;
+
+    private TextView status_overlay;
+    // Stat reads below block on /proc and log-file I/O, so they run on a
+    // dedicated background thread — not the UI thread — to avoid stealing
+    // CPU time from rendering/JIT once per second during gameplay.
+    private HandlerThread overlay_thread;
+    private Handler overlay_bg_handler;
+    private Handler overlay_ui_handler;
+    private static final int OVERLAY_INTERVAL_MS = 1000;
+
+    private long[] prev_cpu_ticks = null;
+
+    private final Runnable overlay_updater = new Runnable() {
+        @Override
+        public void run() {
+            final String ram = read_ram_mb();
+            final String cpu = read_cpu_pct();
+            final String last_log = read_last_log_line();
+            final String text = "RAM:" + ram + "MB  CPU:" + cpu + "%\n" + last_log;
+            overlay_ui_handler.post(() -> status_overlay.setText(text));
+            overlay_bg_handler.postDelayed(this, OVERLAY_INTERVAL_MS);
+        }
+    };
+
+    private static String read_ram_mb() {
+        try (BufferedReader br = new BufferedReader(new FileReader("/proc/self/status"))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith("VmRSS:")) {
+                    String[] parts = line.trim().split("\\s+");
+                    if (parts.length >= 2) return String.valueOf(Long.parseLong(parts[1]) / 1024);
+                }
+            }
+        } catch (Exception ignored) {}
+        return "?";
+    }
+
+    // Returns process CPU% across all cores since last call (reads /proc/self/stat + /proc/stat).
+    private String read_cpu_pct() {
+        try (BufferedReader proc = new BufferedReader(new FileReader("/proc/self/stat"));
+             BufferedReader sys  = new BufferedReader(new FileReader("/proc/stat"))) {
+            String[] p = proc.readLine().trim().split("\\s+");
+            long proc_ticks = Long.parseLong(p[13]) + Long.parseLong(p[14]); // utime + stime
+            String[] s = sys.readLine().trim().split("\\s+"); // "cpu  ..."
+            long total_ticks = 0;
+            for (int i = 1; i < s.length; i++) total_ticks += Long.parseLong(s[i]);
+            long[] cur = {proc_ticks, total_ticks};
+            if (prev_cpu_ticks != null) {
+                long d_proc  = cur[0] - prev_cpu_ticks[0];
+                long d_total = cur[1] - prev_cpu_ticks[1];
+                prev_cpu_ticks = cur;
+                if (d_total > 0) return String.valueOf((int)(100L * d_proc / d_total));
+            }
+            prev_cpu_ticks = cur;
+        } catch (Exception ignored) {}
+        return "?";
+    }
+
+    private String read_last_log_line() {
+        String log_path = Application.get_app_data_dir().getAbsolutePath() + "/xe.log";
+        try (RandomAccessFile raf = new RandomAccessFile(log_path, "r")) {
+            long len = raf.length();
+            if (len == 0) return "";
+            long pos = Math.max(0, len - 512);
+            raf.seek(pos);
+            byte[] buf = new byte[(int) (len - pos)];
+            raf.readFully(buf);
+            String[] lines = new String(buf).split("\n");
+            for (int i = lines.length - 1; i >= 0; i--) {
+                String l = lines[i].trim();
+                if (!l.isEmpty()) return l;
+            }
+        } catch (Exception ignored) {}
+        return "";
+    }
     final Handler delay_on_create=new Handler(new Handler.Callback(){
         @Override
         public boolean handleMessage(@NonNull Message msg) {
@@ -56,6 +176,8 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
     });
     void on_create(){
         String uri=getIntent().getStringExtra(EXTRA_GAME_URI);
+        game_uri_=uri;
+        game_title_id_=getIntent().getStringExtra(EXTRA_GAME_TITLE_ID);
         org.xeniaae.emulator.Emulator.Path path=org.xeniaae.emulator.Emulator.Path.from(uri,-1);
         Emulator.get.setup_context(this);
         android.net.Uri gameDirUri = MainActivity.load_pref_game_dir(this);
@@ -78,7 +200,65 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         sf.requestFocus();
         sf.setOnGenericMotionListener(this);
 
+        status_overlay = (TextView) findViewById(R.id.status_overlay);
+        final SharedPreferences sPrefs2 = PreferenceManager.getDefaultSharedPreferences(this);
+        if (sPrefs2.getBoolean("show_status_overlay", false)) {
+            status_overlay.setVisibility(View.VISIBLE);
+            overlay_ui_handler = new Handler(Looper.getMainLooper());
+            overlay_thread = new HandlerThread("EmulatorOverlayStats");
+            overlay_thread.start();
+            overlay_bg_handler = new Handler(overlay_thread.getLooper());
+            overlay_bg_handler.post(overlay_updater);
+        }
+
+        if (getIntent().getBooleanExtra(EXTRA_PRECACHE_MODE, false)) {
+            start_precache_session(getIntent().getStringExtra(EXTRA_GAME_TITLE));
+        }
+
         load_key_map_and_vibrator();
+    }
+
+    private Handler precache_handler;
+    private long precache_start_time_ms;
+
+    private void start_precache_session(String game_title) {
+        final View overlay = findViewById(R.id.precache_overlay);
+        final TextView title_view = (TextView) findViewById(R.id.precache_title);
+        final ProgressBar progress = (ProgressBar) findViewById(R.id.precache_progress);
+
+        title_view.setText(game_title != null ? game_title : "");
+        overlay.setVisibility(View.VISIBLE);
+
+        precache_start_time_ms = SystemClock.elapsedRealtime();
+        precache_handler = new Handler(Looper.getMainLooper());
+
+        final Runnable ticker = new Runnable() {
+            @Override
+            public void run() {
+                final long elapsed = SystemClock.elapsedRealtime() - precache_start_time_ms;
+                if (elapsed >= PRECACHE_DURATION_MS) {
+                    finish_precache_session(overlay, game_title);
+                    return;
+                }
+                progress.setProgress((int) (100 * elapsed / PRECACHE_DURATION_MS));
+                precache_handler.postDelayed(this, 250);
+            }
+        };
+        precache_handler.post(ticker);
+    }
+
+    private void finish_precache_session(View overlay, String game_title) {
+        overlay.setVisibility(View.GONE);
+        final int seconds_ran = (int) (PRECACHE_DURATION_MS / 1000);
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.precache_complete_title)
+                .setMessage(getString(R.string.precache_complete_message, game_title, seconds_ran))
+                .setCancelable(false)
+                .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                    dialog.dismiss();
+                    finish();
+                })
+                .show();
     }
     void vibrator(){
         if(vibrator!=null) {
@@ -128,62 +308,101 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
     @Override
     public void onBackPressed()
     {
-
         if(delay_dialog!=null)
             return;
 
-        AlertDialog.Builder ab=new AlertDialog.Builder(this);
-        ab.setPositiveButton(R.string.quit, new DialogInterface.OnClickListener(){
+        if(pause_dialog_!=null && pause_dialog_.isShowing())
+            return;
 
-            @Override
-            public void onClick(DialogInterface p1, int p2)
-            {
-                p1.cancel();
-                finish();
-            }
-
-
-        });
-
-        /*ab.setNegativeButton("TE", new DialogInterface.OnClickListener(){
-
-                @Override
-                public void onClick(DialogInterface p1, int p2)
-                {
-                    if(Emulator.get.is_running())
-                         Emulator.get.pause();
-                     else if(Emulator.get.is_paused())
-                         Emulator.get.resume();
-                }
-
-
-        });*/
-        //if(Emulator.get.is_running())
-        //Emulator.get.pause();
-        ab.create().show();
+        showPauseMenu();
     }
 
-    /*@Override
-    protected void onPause()
+    /** Dolphin-style pause menu: Resume Game / Settings / Exit Game (red). */
+    private void showPauseMenu()
     {
-        super.onPause();
-        if(started)
-            if(Emulator.get.is_running())
-                Emulator.get.pause();;
+        if(Emulator.get.is_running())
+            Emulator.get.pause();
+
+        View view=LayoutInflater.from(this).inflate(R.layout.dialog_pause_menu,null);
+        ((TextView) view.findViewById(R.id.pause_menu_title))
+                .setText(getIntent().getStringExtra(EXTRA_GAME_TITLE));
+
+        final boolean[] suppress_resume_on_dismiss={false};
+
+        pause_dialog_=new AlertDialog.Builder(this)
+                .setView(view)
+                .setCancelable(true)
+                .setOnDismissListener(d->{
+                    pause_dialog_=null;
+                    if(!suppress_resume_on_dismiss[0] && Emulator.get.is_paused())
+                        Emulator.get.resume();
+                })
+                .create();
+
+        view.findViewById(R.id.row_resume).setOnClickListener(v->pause_dialog_.dismiss());
+
+        view.findViewById(R.id.row_settings).setOnClickListener(v->{
+            suppress_resume_on_dismiss[0]=true;
+            pause_dialog_.dismiss();
+            openGameSettings();
+        });
+
+        view.findViewById(R.id.row_exit).setOnClickListener(v->{
+            suppress_resume_on_dismiss[0]=true;
+            pause_dialog_.dismiss();
+            finish();
+        });
+
+        pause_dialog_.show();
+    }
+
+    /** Opens the existing raw-cvar Settings screen pointed at this game's own
+     *  per-title config file (created empty on first use), so changes only
+     *  affect this game and are saved automatically when the screen closes -
+     *  the native engine already layers <title_id>.config.toml on top of the
+     *  global config on boot (see config::LoadGameConfig in the engine). */
+    private void openGameSettings()
+    {
+        String title_id=game_title_id_;
+        if(title_id==null && game_uri_!=null){
+            // Rare fallback: caller didn't already know the title ID (e.g. launched
+            // via a raw VIEW intent rather than the library grid) - derive it now.
+            title_id=GameScanner.peekTitleId(this,Uri.parse(game_uri_));
+            game_title_id_=title_id;
+        }
+        if(title_id==null){
+            Toast.makeText(this,"Couldn't identify this game yet - try again shortly.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        File config_file=Application.ensure_game_config_file(title_id);
+
+        Intent intent=new Intent(this,EmulatorSettings.class);
+        intent.putExtra(EmulatorSettings.EXTRA_CONFIG_PATH,config_file.getAbsolutePath());
+        intent.putExtra(EmulatorSettings.EXTRA_GAME_TITLE,getIntent().getStringExtra(EXTRA_GAME_TITLE));
+        returning_from_game_settings_=true;
+        startActivity(intent);
     }
 
     @Override
     protected void onResume()
     {
         super.onResume();
-        if(started)
-            if(Emulator.get.is_paused())
-                Emulator.get.resume();
-    }*/
+        if(returning_from_game_settings_){
+            returning_from_game_settings_=false;
+            // Still paused from before - reopen the pause menu so the user
+            // explicitly chooses Resume rather than snapping back into gameplay.
+            showPauseMenu();
+        }
+    }
 
     @Override
     protected void onDestroy()
     {
+        if (overlay_bg_handler != null) overlay_bg_handler.removeCallbacks(overlay_updater);
+        if (overlay_thread != null) overlay_thread.quitSafely();
+        if (precache_handler != null) precache_handler.removeCallbacksAndMessages(null);
         super.onDestroy();
         System.exit(0);
     }
@@ -226,7 +445,10 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         }
         else{
             Emulator.get.setup_surface(holder.getSurface());
-            if(Emulator.get.is_paused())
+            // Don't auto-resume if the pause menu (or the Settings screen launched
+            // from it) is the reason we're paused - only the user's explicit
+            // "Resume Game" tap should do that in that case.
+            if(Emulator.get.is_paused() && pause_dialog_==null && !returning_from_game_settings_)
                 Emulator.get.resume();
         }
 

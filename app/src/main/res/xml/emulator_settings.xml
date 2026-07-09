@@ -2,6 +2,11 @@
 <PreferenceScreen
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
+    <org.xeniaae.preference.CheckBoxPreference
+        app:title="@string/show_status_overlay"
+        app:key="show_status_overlay"
+        app:summary="@string/hint_show_status_overlay" />
+
     <PreferenceScreen app:title="@string/es_vulkan"
         app:key="Vulkan" >
         <org.xeniaae.preference.CheckBoxPreference app:title="@string/es_vulkan_vulkan_sparse_shared_memory"

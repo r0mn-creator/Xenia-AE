@@ -10,6 +10,7 @@
 #include "xenia/kernel/xthread.h"
 
 #if !XE_PLATFORM_WIN32
+#include <pthread.h>
 #include <signal.h>
 #endif
 
@@ -506,10 +507,19 @@ X_STATUS XThread::Exit(int exit_code) {
   xe::Profiler::ThreadExit();
 
   running_ = false;
-  ReleaseHandle();
+  // ReleaseHandle() must NOT be called before Thread::Exit(). If refcount hits
+  // zero here, ~XThread() runs synchronously, deleting the PosixThread and its
+  // state_mutex_ — but Terminate() (called inside Thread::Exit) still needs to
+  // lock state_mutex_. Register ReleaseHandle as a pthread cleanup handler so
+  // it fires after pthread_exit() inside Terminate(), not before.
+  pthread_cleanup_push([](void* arg) {
+    static_cast<XThread*>(arg)->ReleaseHandle();
+  }, this);
 
   // NOTE: this does not return!
   xe::threading::Thread::Exit(exit_code);
+
+  pthread_cleanup_pop(1);  // unreachable; balances push above
   return X_STATUS_SUCCESS;
 }
 
@@ -526,8 +536,13 @@ X_STATUS XThread::Terminate(int exit_code) {
 
   running_ = false;
   if (XThread::IsInThread(this)) {
-    ReleaseHandle();
+    // Same ordering hazard as XThread::Exit() — defer ReleaseHandle until
+    // after pthread_exit() fires inside Terminate().
+    pthread_cleanup_push([](void* arg) {
+      static_cast<XThread*>(arg)->ReleaseHandle();
+    }, this);
     xe::threading::Thread::Exit(exit_code);
+    pthread_cleanup_pop(1);  // unreachable; balances push above
   } else {
     thread_->Terminate(exit_code);
     ReleaseHandle();
@@ -568,14 +583,23 @@ void XThread::Execute() {
   // When Reenter() is called (e.g., by KeSetCurrentStackPointers), it
   // unwinds back here to re-enter at a new guest address.
   //
-  // On Linux, C++ exceptions are used so that DWARF unwind info (registered
-  // for JIT code via __register_frame) allows proper destructor/RAII cleanup
-  // through both JIT and host C++ frames.
+  // On desktop Linux, C++ exceptions are used so that DWARF unwind info
+  // (registered for JIT code via __register_frame) allows proper
+  // destructor/RAII cleanup through both JIT and host C++ frames.
   //
   // On Windows, setjmp/longjmp is used because MSVC's longjmp performs SEH
   // stack unwinding which already calls destructors.
+  //
+  // On AX360E (Android), setjmp/longjmp is used for the same reason as the
+  // exception-based approach was found unreliable there: __register_frame
+  // registered unwind info for JIT frames is not always found by the
+  // unwinder, causing an uncaught FiberReentryException crash on games that
+  // exercise this path (e.g. Halo 3). Guest JIT frames never have C++
+  // destructors, and the host frames between Execute() and the JIT call
+  // site hold no RAII guards across the boundary, so skipping unwind there
+  // is safe.
   uint32_t next_address;
-#if !XE_PLATFORM_WIN32
+#if !XE_PLATFORM_WIN32 && !XE_PLATFORM_AX360E
   try {
     exit_code = static_cast<int>(kernel_state()->processor()->Execute(
         thread_state_, address, args.data(), args.size()));
@@ -610,6 +634,13 @@ void XThread::Execute() {
   }
 #else
   if (setjmp(reentry_jmp_buf_) != 0) {
+#if XE_PLATFORM_AX360E
+    // Ensure SIGRTMIN (used for thread suspend) is not left blocked.
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGRTMIN);
+    pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+#endif
     next_address = reentry_address_;
   } else {
     exit_code = static_cast<int>(kernel_state()->processor()->Execute(
@@ -619,6 +650,12 @@ void XThread::Execute() {
 
   while (next_address != 0) {
     if (setjmp(reentry_jmp_buf_) != 0) {
+#if XE_PLATFORM_AX360E
+      sigset_t set;
+      sigemptyset(&set);
+      sigaddset(&set, SIGRTMIN);
+      pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+#endif
       next_address = reentry_address_;
     } else {
       kernel_state()->processor()->ExecuteRaw(thread_state_, next_address);
@@ -637,16 +674,16 @@ void XThread::Execute() {
 
 void XThread::Reenter(uint32_t address) {
   // Called when the game switches fiber stacks (e.g., via
-  // KeSetCurrentStackPointers in games like Forza Horizon 2).
+  // KeSetCurrentStackPointers in games like Forza Horizon 2 and Halo 3).
   // Must unwind through all frames between here and Execute().
-#if !XE_PLATFORM_WIN32
+#if !XE_PLATFORM_WIN32 && !XE_PLATFORM_AX360E
   // Throw a C++ exception that unwinds through JIT frames (using DWARF
   // .eh_frame info) and host frames (using compiler-generated DWARF),
   // calling destructors properly along the way.
   throw FiberReentryException{address};
 #else
   reentry_address_ = address;
-  std::longjmp(reentry_jmp_buf_, 1);
+  longjmp(reentry_jmp_buf_, 1);
 #endif
 }
 

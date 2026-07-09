@@ -22,6 +22,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <ctime>
 
@@ -212,12 +213,24 @@ class PosixConditionBase {
 #endif
   }
 
-  virtual ~PosixConditionBase() = default;
+  virtual ~PosixConditionBase() {
+    is_destroyed_.store(true, std::memory_order_seq_cst);
+    cond_.notify_all();
+    // Drain all in-progress Wait() calls before the mutex is destroyed.
+    // Without this, pthread_mutex_destroy fires FORTIFY on Android if any
+    // thread is still blocked in pthread_mutex_lock on this mutex.
+    while (waiter_count_.load(std::memory_order_acquire) > 0) {
+      std::this_thread::yield();
+    }
+  }
   virtual bool Signal() = 0;
 
   WaitResult Wait(std::chrono::milliseconds timeout) {
-    bool executed;
-    auto predicate = [this] { return this->signaled(); };
+    waiter_count_.fetch_add(1, std::memory_order_relaxed);
+
+    auto predicate = [this] {
+      return this->signaled() || is_destroyed_.load(std::memory_order_relaxed);
+    };
 
 #if !XE_PLATFORM_AX360E
     // Handle robust mutex locking
@@ -227,6 +240,7 @@ class PosixConditionBase {
       // Recover from dead owner
       pthread_mutex_consistent(native_mutex);
     } else if (lock_result != 0) {
+      waiter_count_.fetch_sub(1, std::memory_order_release);
       return WaitResult::kFailed;
     }
 
@@ -235,21 +249,26 @@ class PosixConditionBase {
     std::unique_lock<std::mutex> lock(mutex_);
 #endif
 
+    bool predicate_met;
     if (predicate()) {
-      executed = true;
+      predicate_met = true;
+    } else if (timeout == std::chrono::milliseconds::max()) {
+      cond_.wait(lock, predicate);
+      predicate_met = true;
     } else {
-      if (timeout == std::chrono::milliseconds::max()) {
-        cond_.wait(lock, predicate);
-        executed = true;  // Did not time out;
-      } else {
-        executed = cond_.wait_for(lock, timeout, predicate);
-      }
+      predicate_met = cond_.wait_for(lock, timeout, predicate);
     }
-    if (executed) {
+
+    bool destroyed = is_destroyed_.load(std::memory_order_relaxed);
+    if (predicate_met && !destroyed) {
       post_execution();
-      return WaitResult::kSuccess;
     }
-    return WaitResult::kTimeout;
+    lock.unlock();
+    waiter_count_.fetch_sub(1, std::memory_order_release);
+
+    if (!predicate_met) return WaitResult::kTimeout;
+    if (destroyed) return WaitResult::kFailed;
+    return WaitResult::kSuccess;
   }
 
   static std::pair<WaitResult, size_t> WaitMultiple(
@@ -283,6 +302,10 @@ class PosixConditionBase {
       bool all_locked = true;
 
       for (size_t i = 0; i < handles.size(); ++i) {
+        if (handles[i]->is_destroyed_.load(std::memory_order_relaxed)) {
+          locks.clear();
+          return {WaitResult::kFailed, i};
+        }
         // Try to lock, handling robust mutex EOWNERDEAD case
         auto native_mutex =
             static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
@@ -364,10 +387,19 @@ class PosixConditionBase {
         return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
       }
 
-      // Sleep for a short time before polling again
+      // Brief spin-wait before sleeping — catches quick signals with no syscall.
+      for (int spin = 0; spin < 32; spin++) {
+#if XE_ARCH_ARM64 == 1
+        __asm volatile("yield" ::: "memory");
+#elif XE_ARCH_AMD64 == 1
+        _mm_pause();
+#endif
+      }
+      // Sleep for a short time before polling again. 200µs (vs 1ms) reduces
+      // multi-handle wait latency 5x for the slow-signal path.
       auto remaining =
-          std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
-      auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
+          std::chrono::duration_cast<std::chrono::microseconds>(end_time - now);
+      auto sleep_time = std::min(remaining, std::chrono::microseconds(200));
       std::this_thread::sleep_for(sleep_time);
     }
   }
@@ -381,6 +413,8 @@ class PosixConditionBase {
   inline virtual void post_execution() = 0;
   std::condition_variable cond_;
   std::mutex mutex_;
+  std::atomic<bool> is_destroyed_{false};
+  std::atomic<int> waiter_count_{0};
 };
 
 // There really is no native POSIX handle for a single wait/signal construct

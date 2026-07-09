@@ -97,6 +97,13 @@ void VulkanCommandProcessor::ClearCaches() {
   cache_clear_requested_ = true;
 }
 
+void VulkanCommandProcessor::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id, bool blocking) {
+  if (pipeline_cache_) {
+    pipeline_cache_->InitializePipelineCache(cache_root, title_id);
+  }
+}
+
 void VulkanCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
                                                       uint32_t length) {
   shared_memory_->MemoryInvalidationCallback(base_ptr, length, true);
@@ -2000,6 +2007,18 @@ VulkanCommandProcessor::GetPipelineLayout(size_t texture_count_pixel,
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
 
+  // Available to pipelines that use the generic tessellation passthrough
+  // vertex shader / tessellation-control shader (see TessellationPushConstants
+  // above) - unreferenced, and therefore inert, for all other (non-
+  // tessellated, or tessellated-with-a-real-guest-domain-shader) pipelines
+  // sharing this same layout.
+  VkPushConstantRange tessellation_push_constant_range;
+  tessellation_push_constant_range.stageFlags =
+      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+  tessellation_push_constant_range.offset = 0;
+  tessellation_push_constant_range.size =
+      sizeof(TessellationPushConstants);
+
   VkPipelineLayoutCreateInfo pipeline_layout_create_info;
   pipeline_layout_create_info.sType =
       VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -2008,8 +2027,9 @@ VulkanCommandProcessor::GetPipelineLayout(size_t texture_count_pixel,
   pipeline_layout_create_info.setLayoutCount =
       uint32_t(xe::countof(descriptor_set_layouts));
   pipeline_layout_create_info.pSetLayouts = descriptor_set_layouts;
-  pipeline_layout_create_info.pushConstantRangeCount = 0;
-  pipeline_layout_create_info.pPushConstantRanges = nullptr;
+  pipeline_layout_create_info.pushConstantRangeCount = 1;
+  pipeline_layout_create_info.pPushConstantRanges =
+      &tessellation_push_constant_range;
   VkPipelineLayout pipeline_layout;
   if (dfn.vkCreatePipelineLayout(device, &pipeline_layout_create_info, nullptr,
                                  &pipeline_layout) != VK_SUCCESS) {
@@ -2287,13 +2307,30 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // Nothing to draw.
       return true;
     }
-    // TODO(Triang3l): Tessellation, geometry-type-specific vertex shader,
-    // vertex shader as compute.
+    // TODO(Triang3l): Geometry-type-specific vertex shader, vertex shader as
+    // compute.
+    // Tessellated draws (domain shader modes - CP-indexed or patch-indexed,
+    // triangle/quad/line) only have a SPIR-V translation path for the
+    // adaptive triangle patch case (kTriangleDomainPatchIndexed + kAdaptive -
+    // the one actually used by Halo 3 / NFS Carbon's water/terrain
+    // rendering; see VulkanPipelineCache::
+    // EnsureTessellationShadersAdaptiveTriangleCreated and
+    // SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain). Other
+    // domain types/modes still cleanly no-op (matching the "this draw has no
+    // effect" convention used elsewhere in this function) rather than fail
+    // repeatedly, which was indistinguishable from a hang to the user even
+    // though the command processor was correctly moving on.
+    bool is_adaptive_triangle_tessellation =
+        primitive_processing_result.host_vertex_shader_type ==
+            Shader::HostVertexShaderType::kTriangleDomainPatchIndexed &&
+        regs.Get<reg::VGT_HOS_CNTL>().tess_mode ==
+            xenos::TessellationMode::kAdaptive;
     if (primitive_processing_result.host_vertex_shader_type !=
             Shader::HostVertexShaderType::kVertex &&
         primitive_processing_result.host_vertex_shader_type !=
-            Shader::HostVertexShaderType::kPointListAsTriangleStrip) {
-      return false;
+            Shader::HostVertexShaderType::kPointListAsTriangleStrip &&
+        !is_adaptive_triangle_tessellation) {
+      return true;
     }
 
     // Shader modifications.
@@ -2466,6 +2503,38 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       current_graphics_descriptor_sets_bound_up_to_date_ = 0;
     }
     current_guest_graphics_pipeline_layout_ = pipeline_layout;
+  }
+
+  if (primitive_processing_result.host_vertex_shader_type ==
+          Shader::HostVertexShaderType::kTriangleDomainPatchIndexed &&
+      regs.Get<reg::VGT_HOS_CNTL>().tess_mode ==
+          xenos::TessellationMode::kAdaptive) {
+    // Data for the generic tessellation passthrough vertex shader and
+    // tessellation-control shader - see VulkanCommandProcessor::
+    // TessellationPushConstants and VulkanPipelineCache::
+    // EnsureTessellationShadersAdaptiveTriangleCreated. Same register
+    // sources as the D3D12 backend's equivalent system constants
+    // (d3d12_command_processor.cc's UpdateSystemConstantValues).
+    TessellationPushConstants tessellation_push_constants;
+    tessellation_push_constants.vertex_index_endian =
+        uint32_t(primitive_processing_result.host_shader_index_endian);
+    tessellation_push_constants.vertex_index_offset =
+        uint32_t(regs.Get<reg::VGT_INDX_OFFSET>().indx_offset);
+    tessellation_push_constants.vertex_index_min =
+        regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
+    tessellation_push_constants.vertex_index_max =
+        regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
+    // Tessellation factors are biased by 1.0 relative to the raw guest
+    // values (matching the D3D12 backend and the images referenced in
+    // adaptive_triangle.hs.hlsl).
+    tessellation_push_constants.tessellation_factor_min =
+        regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) + 1.0f;
+    tessellation_push_constants.tessellation_factor_max =
+        regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f;
+    deferred_command_buffer_.CmdVkPushConstants(
+        pipeline_layout->GetPipelineLayout(),
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
+        0, sizeof(tessellation_push_constants), &tessellation_push_constants);
   }
 
   bool host_render_targets_used = render_target_cache_->GetPath() ==
@@ -3548,7 +3617,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
           dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
     }
     if (submit_result != VK_SUCCESS) {
-      XELOGE("Failed to submit a Vulkan command buffer");
+      XELOGE("Failed to submit a Vulkan command buffer: VkResult={}", int(submit_result));
       if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
         device_lost_ = true;
         graphics_system_->OnHostGpuLossFromAnyThread(true);

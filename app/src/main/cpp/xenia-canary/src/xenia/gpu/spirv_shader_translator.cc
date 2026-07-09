@@ -110,6 +110,8 @@ void SpirvShaderTranslator::Reset() {
 
   uniform_float_constants_ = spv::NoResult;
 
+  input_tess_coord_ = spv::NoResult;
+  input_tess_control_point_index_ = spv::NoResult;
   input_point_coordinates_ = spv::NoResult;
   input_fragment_coordinates_ = spv::NoResult;
   input_front_facing_ = spv::NoResult;
@@ -706,6 +708,13 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
       builder_->addExecutionMode(function_main_,
                                  spv::ExecutionModeEarlyFragmentTests);
     }
+    // A fragment shader that writes the depth output must declare DepthReplacing;
+    // omitting it is undefined behavior in Vulkan (some drivers tolerate it, others
+    // - e.g. Adreno - render incorrectly). Ported from upstream Xenia-Canary.
+    if (current_shader().writes_depth()) {
+      builder_->addExecutionMode(function_main_,
+                                 spv::ExecutionModeDepthReplacing);
+    }
     if (edram_fragment_shader_interlock_) {
       // Accessing per-sample values, so interlocking just when there's common
       // coverage is enough if the device exposes that.
@@ -1195,6 +1204,30 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
     builder_->addDecoration(input_primitive_id_, spv::DecorationBuiltIn,
                             spv::BuiltInPrimitiveId);
     main_interface_.push_back(input_primitive_id_);
+    if (GetSpirvShaderModification().vertex.host_vertex_shader_type ==
+        Shader::HostVertexShaderType::kTriangleDomainPatchIndexed) {
+      // Barycentric domain location, from the fixed-function tessellator -
+      // matches the generic tessellation-control shader's Triangles
+      // execution mode (see VulkanPipelineCache::
+      // EnsureTessellationShadersAdaptiveTriangleCreated).
+      input_tess_coord_ = builder_->createVariable(
+          spv::NoPrecision, spv::StorageClassInput, type_float3_,
+          "gl_TessCoord");
+      builder_->addDecoration(input_tess_coord_, spv::DecorationBuiltIn,
+                              spv::BuiltInTessCoord);
+      main_interface_.push_back(input_tess_coord_);
+      // The single output control point's "index" from the generic
+      // tessellation-control shader (xe_out_index there) - per-vertex TES
+      // input, arrayed to match the control shader's OutputVertices(1).
+      spv::Id type_float_array1 =
+          builder_->makeArrayType(type_float_, builder_->makeUintConstant(1), 0);
+      input_tess_control_point_index_ = builder_->createVariable(
+          spv::NoPrecision, spv::StorageClassInput, type_float_array1,
+          "xe_in_tess_control_point_index");
+      builder_->addDecoration(input_tess_control_point_index_,
+                              spv::DecorationLocation, 0);
+      main_interface_.push_back(input_tess_control_point_index_);
+    }
   } else {
     input_vertex_index_ = builder_->createVariable(
         spv::NoPrecision, spv::StorageClassInput, type_int_, "gl_VertexIndex");
@@ -1511,6 +1544,74 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
                                   vertex_index),
           builder_->createAccessChain(spv::StorageClassFunction,
                                       var_main_registers_, id_vector_temp_));
+    } else if (IsSpirvTessEvalShader() &&
+               shader_modification.vertex.host_vertex_shader_type ==
+                   Shader::HostVertexShaderType::kTriangleDomainPatchIndexed) {
+      // Adaptive triangle patch domain shader (water/terrain in games like
+      // Halo 3 and NFS Carbon) - see dxbc_shader_translator.cc's
+      // StartVertexOrDomainShader, kTriangleDomainPatchIndexed case, which
+      // this mirrors exactly (same register layout, so the guest ucode -
+      // identical between backends - interprets it the same way).
+      spv::Id tess_coord =
+          builder_->createLoad(input_tess_coord_, spv::NoPrecision);
+      // r0.xyz = domain location, ZYX swizzle (empirically required to avoid
+      // cracks in tessellated water - see adaptive_triangle.hs.hlsl).
+      spv::Id tess_coord_z =
+          builder_->createCompositeExtract(tess_coord, type_float_, 2);
+      spv::Id tess_coord_y =
+          builder_->createCompositeExtract(tess_coord, type_float_, 1);
+      spv::Id tess_coord_x =
+          builder_->createCompositeExtract(tess_coord, type_float_, 0);
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(const_int_0_);
+      id_vector_temp_.push_back(const_int_0_);
+      builder_->createStore(
+          tess_coord_z,
+          builder_->createAccessChain(spv::StorageClassFunction,
+                                      var_main_registers_, id_vector_temp_));
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(const_int_0_);
+      id_vector_temp_.push_back(builder_->makeIntConstant(1));
+      builder_->createStore(
+          tess_coord_y,
+          builder_->createAccessChain(spv::StorageClassFunction,
+                                      var_main_registers_, id_vector_temp_));
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(const_int_0_);
+      id_vector_temp_.push_back(builder_->makeIntConstant(2));
+      builder_->createStore(
+          tess_coord_x,
+          builder_->createAccessChain(spv::StorageClassFunction,
+                                      var_main_registers_, id_vector_temp_));
+      if (register_count() >= 2) {
+        // r1.x = the single output control point's index (already computed
+        // and endian-swapped by the generic tessellation-control/vertex
+        // shaders).
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(const_int_0_);
+        spv::Id control_point_index = builder_->createLoad(
+            builder_->createAccessChain(spv::StorageClassInput,
+                                        input_tess_control_point_index_,
+                                        id_vector_temp_),
+            spv::NoPrecision);
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(builder_->makeIntConstant(1));
+        id_vector_temp_.push_back(const_int_0_);
+        builder_->createStore(
+            control_point_index,
+            builder_->createAccessChain(spv::StorageClassFunction,
+                                        var_main_registers_, id_vector_temp_));
+        // r1.y = 0.0f (selects the identity barycentric swizzle in the guest
+        // ucode - see the D3D12 reference comment for the full swizzle table
+        // this constant sidesteps).
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(builder_->makeIntConstant(1));
+        id_vector_temp_.push_back(builder_->makeIntConstant(1));
+        builder_->createStore(
+            const_float_0_,
+            builder_->createAccessChain(spv::StorageClassFunction,
+                                        var_main_registers_, id_vector_temp_));
+      }
     }
   }
 }

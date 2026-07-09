@@ -37,6 +37,8 @@ import java.util.Set;
 public class EmulatorSettings extends AppCompatActivity {
 
     static final String EXTRA_CONFIG_PATH="config_path";
+    // Optional - when set (per-game settings), shown in the toolbar as "<title> Settings".
+    static final String EXTRA_GAME_TITLE="game_title";
 
     static final int WARNING_COLOR=0xffff8000;
     static final String Vulkan$vulkan_lib_path="Vulkan|vulkan_lib_path";
@@ -48,13 +50,21 @@ public class EmulatorSettings extends AppCompatActivity {
 
         boolean is_global;
         String config_path;
+        // Fallback toolbar title for the root screen only (e.g. "Halo 3 Settings"
+        // for a per-game config); null keeps the plain generic "Settings" title.
+        CharSequence root_title;
         Emulator.Config original_config;
         Emulator.Config config;
         PreferenceScreen root_pref;
 
         SettingsFragment(String config_path,boolean is_global){
+            this(config_path,is_global,null);
+        }
+
+        SettingsFragment(String config_path,boolean is_global,CharSequence root_title){
             this.config_path=config_path;
             this.is_global=is_global;
+            this.root_title=root_title;
         }
 
         OnBackPressedCallback back_callback=new OnBackPressedCallback(true) {
@@ -194,7 +204,7 @@ public class EmulatorSettings extends AppCompatActivity {
             super.setPreferenceScreen(preferenceScreen);
             CharSequence title=preferenceScreen.getTitle();
             if(title==null)
-                title=getString(R.string.settings);
+                title=root_title!=null?root_title:getString(R.string.settings);
             EmulatorSettings settings=(EmulatorSettings) requireActivity();
             if(settings.getSupportActionBar()!=null) {
                 settings.getSupportActionBar().setTitle(title);
@@ -659,10 +669,11 @@ public class EmulatorSettings extends AppCompatActivity {
         toolbar.setNavigationOnClickListener(v -> onBackPressed());
 
         String config_path=getIntent().getStringExtra(EXTRA_CONFIG_PATH);
-
+        String game_title=getIntent().getStringExtra(EXTRA_GAME_TITLE);
 
         if(config_path!=null) {
-            fragment=new SettingsFragment(config_path,false);
+            CharSequence root_title=game_title!=null?(game_title+" "+getString(R.string.settings)):null;
+            fragment=new SettingsFragment(config_path,false,root_title);
         }
         else{
             fragment=new SettingsFragment(Application.get_global_config_file().getAbsolutePath(),true);

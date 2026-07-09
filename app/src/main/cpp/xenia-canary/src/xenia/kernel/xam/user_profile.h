@@ -101,7 +101,7 @@ class UserProfile {
   uint32_t signin_state() const {
     return static_cast<uint32_t>(SignInState::SignedInLocally);
   };
-  uint32_t type() const { return 1 | 2; /* local | online profile? */ }
+  uint32_t type() const { return 1; /* local only — suppress Xbox Live attempts */ }
 
   uint32_t GetReservedFlags() const {
     return account_info_.GetReservedFlags();

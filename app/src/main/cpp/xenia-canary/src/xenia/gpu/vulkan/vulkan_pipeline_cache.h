@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <unordered_map>
@@ -58,6 +59,11 @@ class VulkanPipelineCache {
 
   bool Initialize();
   void Shutdown();
+
+  // Called from the command processor thread when a title starts.
+  // Creates or loads the VkPipelineCache from disk.
+  void InitializePipelineCache(const std::filesystem::path& cache_root,
+                               uint32_t title_id);
 
   VulkanShader* LoadShader(xenos::ShaderType shader_type,
                            const uint32_t* host_address, uint32_t dword_count);
@@ -175,6 +181,11 @@ class VulkanPipelineCache {
     xenos::StencilOp stencil_back_pass_op : 3;           // 3
     xenos::StencilOp stencil_back_depth_fail_op : 3;     // 6
     xenos::CompareFunction stencil_back_compare_op : 3;  // 9
+    // Only relevant if primitive_topology is kPatchList (tessellated draw) -
+    // VGT_HOS_CNTL.tess_mode at draw time, needed at pipeline creation time
+    // (including from disk storage) to select the matching generic
+    // tessellation-control shader and passthrough vertex shader.
+    xenos::TessellationMode tessellation_mode : 2;  // 11
 
     // Filled only for the attachments present in the render pass object.
     PipelineRenderTarget render_targets[xenos::kMaxColorRenderTargets];
@@ -272,6 +283,11 @@ class VulkanPipelineCache {
       GeometryShaderKey& key_out);
   VkShaderModule GetGeometryShader(GeometryShaderKey key);
 
+  // Generic tessellation shaders for the adaptive triangle patch case (see
+  // tessellation_shaders_adaptive_triangle_created_ above). Both are created
+  // together on first use since a tessellated draw always needs both.
+  void EnsureTessellationShadersAdaptiveTriangleCreated();
+
   // Can be called from creation threads - all needed data must be fully set up
   // at the point of the call: shaders must be translated, pipeline layout and
   // render pass objects must be available.
@@ -318,12 +334,32 @@ class VulkanPipelineCache {
   // shader interlock when no Xenos pixel shader provided.
   VkShaderModule depth_only_fragment_shader_ = VK_NULL_HANDLE;
 
+  // Generic (non-per-game) tessellation shaders for the adaptive triangle
+  // patch case (Shader::HostVertexShaderType::kTriangleDomainPatchIndexed +
+  // xenos::TessellationMode::kAdaptive - the only tessellation mode currently
+  // implemented, since it's the one actually used by Halo 3 and NFS Carbon's
+  // water/terrain rendering). Created on first use; VK_NULL_HANDLE means
+  // creation was attempted and failed (not "not yet attempted" - see
+  // tessellation_shaders_adaptive_triangle_created_).
+  bool tessellation_shaders_adaptive_triangle_created_ = false;
+  VkShaderModule tessellation_control_shader_adaptive_triangle_ =
+      VK_NULL_HANDLE;
+  VkShaderModule tessellation_vertex_shader_adaptive_triangle_ = VK_NULL_HANDLE;
+
   std::unordered_map<PipelineDescription, Pipeline, PipelineDescription::Hasher>
       pipelines_;
 
   // Previously used pipeline, to avoid lookups if the state wasn't changed.
   const std::pair<const PipelineDescription, Pipeline>* last_pipeline_ =
       nullptr;
+
+  // Vulkan driver-level pipeline binary cache (GPU-compiled shader binaries).
+  VkPipelineCache vk_pipeline_cache_ = VK_NULL_HANDLE;
+  std::filesystem::path vk_pipeline_cache_path_;
+  uint32_t pipelines_since_last_save_ = 0;
+  static constexpr uint32_t kSaveIntervalPipelines = 5;
+
+  void FlushPipelineCacheToDisk();
 };
 
 }  // namespace vulkan

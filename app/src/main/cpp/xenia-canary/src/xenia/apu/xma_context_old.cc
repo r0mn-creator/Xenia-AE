@@ -783,11 +783,7 @@ size_t XmaContextOld::GetNextFrame(uint8_t* block, size_t size,
     // return next_packet;
     return 0;
   } else if (len >= xma::kMaxFrameLength) {
-    assert_always("TODO");
-    // *bit_offset = next_packet;
-    // return false;
     return 0;
-    // return next_packet;
   }
 
   stream.Advance(len - (15 + 1));
@@ -797,7 +793,8 @@ size_t XmaContextOld::GetNextFrame(uint8_t* block, size_t size,
   }
 
   bit_offset += len;
-  if (packet_idx < GetFramePacketNumber(block, size, bit_offset)) {
+  auto next_packet_idx = GetFramePacketNumber(block, size, bit_offset);
+  if (next_packet_idx < 0 || packet_idx < next_packet_idx) {
     return 0;
   }
   return bit_offset;
@@ -807,8 +804,6 @@ int XmaContextOld::GetFramePacketNumber(uint8_t* block, size_t size,
                                         size_t bit_offset) {
   size *= 8;
   if (bit_offset >= size) {
-    // Not good :(
-    assert_always();
     return -1;
   }
 
@@ -823,7 +818,6 @@ std::tuple<int, int> XmaContextOld::GetFrameNumber(uint8_t* block, size_t size,
   auto packet_idx = GetFramePacketNumber(block, size, bit_offset);
 
   if (packet_idx < 0 || (packet_idx + 1) * kBytesPerPacket > size) {
-    assert_always();
     return {packet_idx, -2};
   }
 

@@ -15,7 +15,7 @@
         android:theme="@style/ThemeOverlay.AppCompat.ActionBar"
         app:popupTheme="@style/ThemeOverlay.AppCompat.Light" />
 
-    <aenu.view.SVListView
+    <org.xeniaae.view.SVListView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:id="@+id/keymap_list"/>

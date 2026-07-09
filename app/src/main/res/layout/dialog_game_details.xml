@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:paddingBottom="24dp">
+
+        <ImageView
+            android:id="@+id/image_game_art"
+            android:layout_width="96dp"
+            android:layout_height="134dp"
+            android:layout_marginTop="24dp"
+            android:scaleType="centerCrop"
+            android:src="@mipmap/ic_launcher"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <TextView
+            android:id="@+id/text_game_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="24dp"
+            android:textColor="?attr/colorOnSurface"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toEndOf="@id/image_game_art"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <TextView
+            android:id="@+id/text_game_publisher"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="6dp"
+            android:textColor="?attr/colorPrimary"
+            android:textSize="13sp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toEndOf="@id/image_game_art"
+            app:layout_constraintTop_toBottomOf="@id/text_game_title" />
+
+        <TextView
+            android:id="@+id/text_game_path"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="6dp"
+            android:textColor="?attr/colorOnSurface"
+            android:textSize="11sp"
+            android:alpha="0.5"
+            android:ellipsize="middle"
+            android:singleLine="true"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toEndOf="@id/image_game_art"
+            app:layout_constraintTop_toBottomOf="@id/text_game_publisher" />
+
+        <com.google.android.material.divider.MaterialDivider
+            android:id="@+id/divider_1"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/image_game_art" />
+
+        <TextView android:id="@+id/label_title_id"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Title ID" android:textColor="?attr/colorOnSurface" android:alpha="0.6" android:textSize="13sp"
+            app:layout_constraintStart_toStartOf="parent" app:layout_constraintTop_toBottomOf="@id/divider_1" />
+        <TextView android:id="@+id/text_title_id"
+            android:layout_width="0dp" android:layout_height="wrap_content"
+            android:text="—" android:textColor="?attr/colorOnSurface" android:textSize="13sp" android:textAlignment="viewEnd"
+            app:layout_constraintBaseline_toBaselineOf="@id/label_title_id"
+            app:layout_constraintEnd_toEndOf="parent" app:layout_constraintStart_toEndOf="@id/label_title_id" />
+
+        <TextView android:id="@+id/label_region"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Region" android:textColor="?attr/colorOnSurface" android:alpha="0.6" android:textSize="13sp"
+            app:layout_constraintStart_toStartOf="parent" app:layout_constraintTop_toBottomOf="@id/label_title_id" />
+        <TextView android:id="@+id/text_region"
+            android:layout_width="0dp" android:layout_height="wrap_content"
+            android:text="—" android:textColor="?attr/colorOnSurface" android:textSize="13sp" android:textAlignment="viewEnd"
+            app:layout_constraintBaseline_toBaselineOf="@id/label_region"
+            app:layout_constraintEnd_toEndOf="parent" app:layout_constraintStart_toEndOf="@id/label_region" />
+
+        <TextView android:id="@+id/label_format"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Format" android:textColor="?attr/colorOnSurface" android:alpha="0.6" android:textSize="13sp"
+            app:layout_constraintStart_toStartOf="parent" app:layout_constraintTop_toBottomOf="@id/label_region" />
+        <TextView android:id="@+id/text_format"
+            android:layout_width="0dp" android:layout_height="wrap_content"
+            android:text="—" android:textColor="?attr/colorOnSurface" android:textSize="13sp" android:textAlignment="viewEnd"
+            app:layout_constraintBaseline_toBaselineOf="@id/label_format"
+            app:layout_constraintEnd_toEndOf="parent" app:layout_constraintStart_toEndOf="@id/label_format" />
+
+        <com.google.android.material.divider.MaterialDivider
+            android:id="@+id/divider_2"
+            android:layout_width="0dp" android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            app:layout_constraintEnd_toEndOf="parent" app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/label_format" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/button_launch"
+            android:layout_width="0dp" android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Launch Game"
+            app:backgroundTint="?attr/colorPrimary"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/divider_2" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/button_remove"
+            android:layout_width="0dp" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Remove from Library"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            app:strokeColor="?attr/colorPrimary"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/button_launch" />
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+</ScrollView>

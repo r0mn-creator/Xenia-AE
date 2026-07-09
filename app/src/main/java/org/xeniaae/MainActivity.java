@@ -1,109 +1,84 @@
 package org.xeniaae;
 
-import android.annotation.TargetApi;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.PackageManager;
-import android.content.pm.ShortcutInfo;
-import android.content.pm.ShortcutManager;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.Canvas;
-import android.graphics.ColorMatrix;
-import android.graphics.ColorMatrixColorFilter;
-import android.graphics.Paint;
-import android.graphics.drawable.Icon;
+import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Message;
-import android.os.ParcelFileDescriptor;
 import android.preference.PreferenceManager;
 import android.provider.DocumentsContract;
+import android.provider.MediaStore;
+import android.provider.OpenableColumns;
+import android.provider.Settings;
 import android.util.Log;
-import android.view.ContextMenu;
 import android.view.KeyEvent;
-import android.view.LayoutInflater;
-import android.view.Menu;
-import android.view.MenuItem;
 import android.view.View;
-import android.view.ViewGroup;
 import android.view.Window;
-import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
-import android.widget.BaseAdapter;
-import android.widget.ImageView;
-import android.widget.ListView;
-import android.widget.ProgressBar;
-import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.appcompat.widget.Toolbar;
-import androidx.core.graphics.Insets;
-import androidx.core.view.ViewCompat;
-import androidx.core.view.WindowInsetsCompat;
 import androidx.documentfile.provider.DocumentFile;
+import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentActivity;
+import androidx.viewpager2.adapter.FragmentStateAdapter;
+import androidx.viewpager2.widget.ViewPager2;
+
+import com.google.android.material.appbar.MaterialToolbar;
+import com.google.android.material.floatingactionbutton.FloatingActionButton;
+import com.google.android.material.snackbar.Snackbar;
+import com.google.android.material.tabs.TabLayout;
+import com.google.android.material.tabs.TabLayoutMediator;
 
 import org.json.JSONArray;
-import org.json.JSONException;
 import org.json.JSONObject;
-import org.w3c.dom.Text;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileFilter;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.PrintStream;
 import java.util.ArrayList;
-import java.util.Base64;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements GamePropertiesDialog.Listener {
 
-    public static final int REQUEST_SELECT_GAME_DIR=6004;
-    static final int DELAY_ON_CREATE=0xaeae0000;
-    public static final String PREF_GAME_DIR="game_dir";
-    /*public static File get_game_list_file(){
-        return new File(Application.get_app_data_dir(),"game_list.json");
-    }*/
+    private static final int REQUEST_OPEN_GAME   = 1;
+    private static final int REQUEST_PICK_ART    = 3;
+    private static final int REQUEST_OPEN_FOLDER = 4;
 
+    static final int TAB_PROFILES = 0;
+    static final int TAB_GAMES    = 1;
+    static final int TAB_SETTINGS = 2;
 
-    private final AdapterView.OnItemClickListener item_click_l=new AdapterView.OnItemClickListener(){
-        @Override
-        public void onItemClick(AdapterView<?> l, View v, int position,long id)
-        {
+    private static final String TAG = "MainActivity";
 
-            Emulator.GameInfo meta_info=((GameMetaInfoAdapter)l.getAdapter()).getMetaInfo(position);
+    /** SharedPreferences key for the set of folder tree URIs the user has imported. */
+    static final String PREF_WATCHED_FOLDERS = "watched_folders";
+    /** SharedPreferences key for the serialized game library (JSON array). */
+    private static final String PREF_GAME_LIBRARY = "game_library";
+    /** Legacy pref key: single folder tree the old file-list UI auto-scanned. */
+    private static final String PREF_GAME_DIR = "game_dir";
 
-            Intent intent = new Intent("org.xeniaae.intent.action.EMULATE");
-            intent.setPackage(getPackageName());
+    private int mPendingArtIndex = -1;
 
-            intent.putExtra(EmulatorActivity.EXTRA_GAME_URI,meta_info.uri);
-            startActivity(intent);
-        }
-    };
+    static final List<GameEntry> sGames = new ArrayList<>();
 
-    ListView list_view;
-    ProgressBar progress;
-    ProgressTask progress_task;
-    Emulator.Config config;
-    Dialog delay_dialog=null;
-    final Handler delay_on_create=new Handler(new Handler.Callback() {
+    static final int DELAY_ON_CREATE = 0xaeae0000;
+    Dialog delay_dialog = null;
+    final Handler delay_on_create = new Handler(new Handler.Callback() {
         @Override
         public boolean handleMessage(@NonNull Message msg) {
-            if(msg.what!=DELAY_ON_CREATE) return false;
-            if(delay_dialog!=null){
+            if (msg.what != DELAY_ON_CREATE) return false;
+            if (delay_dialog != null) {
                 delay_dialog.dismiss();
-                delay_dialog=null;
+                delay_dialog = null;
             }
             on_create();
             return true;
@@ -111,18 +86,14 @@ public class MainActivity extends AppCompatActivity {
     });
 
     void show_device_unsupport_vulkan_dialog(){
-
         AlertDialog.Builder ab=new AlertDialog.Builder(this);
         ab.setPositiveButton(R.string.quit, new DialogInterface.OnClickListener(){
-
             @Override
             public void onClick(DialogInterface p1, int p2)
             {
                 p1.cancel();
                 finish();
             }
-
-
         });
         Dialog d=ab.create();
         d.setCanceledOnTouchOutside(false);
@@ -135,41 +106,48 @@ public class MainActivity extends AppCompatActivity {
         d.show();
     }
 
-    void _on_create(){
-        /*Emulator.get.setup_context(this);
-        //FIXME
-        Emulator.get.setup_document_file_tree(DocumentFile.fromTreeUri(this,MainActivity.load_pref_game_dir( this)));
-        Emulator.get.setup_launch_args(new String[]{
-                "--storage_root=/storage/emulated/0/Download/xeniaae",
-                "--log_file=/storage/emulated/0/Download/xeniaae/xe.log",
-        });*/
-        setContentView(R.layout.activity_main);
-        
-        // Setup Toolbar
-        Toolbar toolbar = findViewById(R.id.toolbar);
-        setSupportActionBar(toolbar);
-        if(getSupportActionBar() != null) {
-            getSupportActionBar().setTitle(R.string.app_name);
+    boolean storage_permission_pending = false;
+
+    private boolean ensure_all_files_permission() {
+        if (Build.VERSION.SDK_INT < 30) return true; // pre-Android 11: legacy storage is fine
+        return Environment.isExternalStorageManager();
+    }
+
+    private void request_all_files_permission() {
+        storage_permission_pending = true;
+        Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:" + getPackageName()));
+        startActivity(intent);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (storage_permission_pending) {
+            storage_permission_pending = false;
+            on_create();
+            return;
         }
-        
-        list_view=findViewById(R.id.game_list);
-        list_view.setOnItemClickListener(item_click_l);
-        list_view.setEmptyView(findViewById(R.id.game_list_is_empty));
-
-        if(getPackageName().equals("org.xeniaae"))
-        registerForContextMenu(list_view);
-        //refresh_game_list();
-        show_game_list();
-        /*if(!new File(Application.get_app_data_dir(),"xenia.config.toml").exists()) return;
-        String config_str=Emulator.get.generate_config_xml(new File(Application.get_app_data_dir(),"xenia.config.toml").getAbsolutePath());
-        File config_file=new File(Application.get_app_data_dir(),"xenia.config.xml");
-        Utils.save_string(config_file,config_str);*/
+        refreshAllGridFragments();
     }
 
-    void on_create(){
-        _on_create();
+    // The launcher's own background work (box art fetching, game scanning) has no
+    // reason to run once a game is launched — EmulatorActivity runs in a separate
+    // process and owns the device from here. Pause it while backgrounded so it
+    // never competes with the emulator for CPU/network; resume when back in view.
+    @Override
+    protected void onStart() {
+        super.onStart();
+        BoxArtManager.resume();
+        GameScanner.resume();
     }
 
+    @Override
+    protected void onStop() {
+        super.onStop();
+        BoxArtManager.pause();
+        GameScanner.pause();
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -178,6 +156,11 @@ public class MainActivity extends AppCompatActivity {
 
         if(!Application.device_support_vulkan()){
             show_device_unsupport_vulkan_dialog();
+            return;
+        }
+
+        if (!ensure_all_files_permission()) {
+            request_all_files_permission();
             return;
         }
 
@@ -203,220 +186,174 @@ public class MainActivity extends AppCompatActivity {
         }.start();
     }
 
-    @Override
-    protected void onStart() {
-        super.onStart();
+    void on_create(){
+        _on_create();
     }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        if(progress_task!=null){
-            progress_task.force_close();
-            progress_task=null;
-        }
-    }
+    void _on_create(){
+        setContentView(R.layout.activity_main);
 
-    @Override
-    public boolean onCreateOptionsMenu(Menu menu){
-        super.onCreateOptionsMenu(menu);
-        getMenuInflater().inflate(R.menu.main,menu);
-        return true;
-    }
-    @Override
-    public boolean onKeyDown(int keyCode,KeyEvent event){
-        if(keyCode==KeyEvent.KEYCODE_BACK){
-            finish();
-            return true;
+        if (sGames.isEmpty()) {
+            loadLibrary(this);
         }
-        if (keyCode == KeyEvent.KEYCODE_MENU) {
-            openOptionsMenu();
-            return true;
+        if (sGames.isEmpty()) {
+            migrateLegacyGameList();
         }
-        Toolbar toolbar = findViewById(R.id.toolbar);
 
-        if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-            ListView listView = findViewById(R.id.game_list);
-            if (listView != null && listView.getSelectedItemPosition() <= 0) {
-                if (toolbar != null && toolbar.getChildCount() > 0) {
-                    View lastChild = toolbar.getChildAt(toolbar.getChildCount() - 1);
-                    if (lastChild instanceof ViewGroup) {
-                        ViewGroup group = (ViewGroup) lastChild;
-                        if (group.getChildCount() > 0) {
-                            View lastMenuItem = group.getChildAt(group.getChildCount() - 1);
-                            lastMenuItem.setFocusable(true);
-                            lastMenuItem.setFocusableInTouchMode(true);
-                            lastMenuItem.requestFocus();
-                            return true;
-                        }
-                    }
-                }
+        final MaterialToolbar toolbar = findViewById(R.id.toolbar);
+        setSupportActionBar(toolbar);
+
+        final ViewPager2 pager = findViewById(R.id.pager);
+        final TabLayout tabs = findViewById(R.id.tabs);
+
+        pager.setAdapter(new PagerAdapter(this));
+        new TabLayoutMediator(tabs, pager, (tab, position) -> {
+            switch (position) {
+                case 0: tab.setText(R.string.tab_profiles); break;
+                case 1: tab.setText(R.string.tab_games); break;
+                case 2: tab.setText(R.string.tab_settings); break;
             }
-        }
-        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-            if (toolbar != null && toolbar.hasFocus()) {
-                ListView listView = findViewById(R.id.game_list);
-                if (listView != null) {
-                    listView.requestFocus();
-                    listView.setSelection(0);
-                    return true;
-                }
+        }).attach();
+        pager.setCurrentItem(TAB_GAMES, false);
+
+        final FloatingActionButton fab = findViewById(R.id.fab_add_games);
+        fab.setOnClickListener(v -> showAddDialog());
+        fab.setVisibility(View.VISIBLE);
+
+        pager.registerOnPageChangeCallback(new ViewPager2.OnPageChangeCallback() {
+            @Override
+            public void onPageSelected(int position) {
+                fab.setVisibility(position == TAB_GAMES ? View.VISIBLE : View.GONE);
             }
-        }
-
-        return super.onKeyDown(keyCode,event);
+        });
     }
 
-    @Override
-    public void onCreateContextMenu(ContextMenu menu, View v, ContextMenu.ContextMenuInfo menuInfo) {
-        super.onCreateContextMenu(menu, v, menuInfo);
-        AdapterView.AdapterContextMenuInfo info = (AdapterView.AdapterContextMenuInfo) menuInfo;
-        getMenuInflater().inflate(R.menu.game_options, menu);
+    /** Persists a folder tree URI so future launches remember it was imported. */
+    static void saveWatchedFolder(Context context, Uri treeUri) {
+        final SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
+        final HashSet<String> folders = new HashSet<>(
+                prefs.getStringSet(PREF_WATCHED_FOLDERS, Collections.emptySet()));
+        folders.add(treeUri.toString());
+        prefs.edit().putStringSet(PREF_WATCHED_FOLDERS, folders).apply();
     }
 
-    @Override
-    public boolean onContextItemSelected(MenuItem item) {
-        AdapterView.AdapterContextMenuInfo info = (AdapterView.AdapterContextMenuInfo) item.getMenuInfo();
-
-        int position = info.position;
-        int item_id = item.getItemId();
-        if(item_id==R.id.create_shortcut){
-            ShortcutManager shortcutManager=getSystemService(ShortcutManager.class);
-            Emulator.GameInfo meta_info=adapter.getMetaInfo(position);
-            Bitmap icon;
-            if(meta_info.icon!=null)
-                icon=BitmapFactory.decodeByteArray(meta_info.icon,0,meta_info.icon.length);
-            else
-                icon=BitmapFactory.decodeResource(getResources(),R.drawable.app_icon);
-
-            Intent intent=new Intent(this,EmulatorActivity.class);
-            {
-                intent.setAction(Intent.ACTION_VIEW);
-                intent.putExtra(EmulatorActivity.EXTRA_GAME_URI, meta_info.uri);
+    /** Serializes sGames to SharedPreferences as a JSON array. */
+    static void saveLibrary(Context context) {
+        try {
+            final JSONArray array = new JSONArray();
+            for (final GameEntry e : sGames) {
+                final JSONObject obj = new JSONObject();
+                obj.put("title", e.title);
+                obj.put("uri", e.uri);
+                obj.put("region", e.region);
+                if (e.titleId != null)     obj.put("titleId", e.titleId);
+                if (e.customArtUri != null) obj.put("customArtUri", e.customArtUri);
+                array.put(obj);
             }
-            shortcutManager.requestPinShortcut(new ShortcutInfo.Builder(this, meta_info.name)
-                    .setShortLabel(meta_info.name)
-                    .setIcon(Icon.createWithBitmap( icon))
-                    .setIntent(intent)
-                    .build(), null);
-        }
-
-        return super.onContextItemSelected(item);
-    }
-
-
-    static Intent get_file_manager_intent(String pkg_name)
-    {
-        Intent it=new Intent(Intent.ACTION_VIEW);
-        it.setClassName(pkg_name, "com.android.documentsui.files.FilesActivity");
-        it.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        return it;
-    }
-
-    static void open_file_manager(Activity activity)
-    {
-        try{
-            activity.startActivity(get_file_manager_intent("com.android.documentsui"));
-            return;
-        }
-        catch(Exception e){
-        }
-        try{
-            activity.startActivity(get_file_manager_intent("com.google.android.documentsui"));
-            return;
-        }
-        catch(Exception e){
+            PreferenceManager.getDefaultSharedPreferences(context)
+                    .edit().putString(PREF_GAME_LIBRARY, array.toString()).apply();
+        } catch (Exception e) {
+            Log.w(TAG, "saveLibrary failed: " + e.getMessage());
         }
     }
-    @Override
-    public boolean onOptionsItemSelected(MenuItem item){
 
-        int item_id=item.getItemId();
-        if(item_id==R.id.menu_refresh_list){
-            refresh_game_list();
-            return true;
+    /** Restores sGames from SharedPreferences. Call once on a fresh launch. */
+    private static void loadLibrary(Context context) {
+        final String json = PreferenceManager.getDefaultSharedPreferences(context)
+                .getString(PREF_GAME_LIBRARY, null);
+        if (json == null) return;
+        try {
+            final JSONArray array = new JSONArray(json);
+            sGames.clear();
+            for (int i = 0; i < array.length(); i++) {
+                final JSONObject obj = array.getJSONObject(i);
+                final GameEntry e = new GameEntry(
+                        obj.getString("title"),
+                        obj.getString("uri"),
+                        obj.optString("region", "Xbox 360"));
+                e.titleId      = obj.has("titleId")     ? obj.getString("titleId")     : null;
+                e.customArtUri = obj.has("customArtUri") ? obj.getString("customArtUri") : null;
+                sGames.add(e);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "loadLibrary failed: " + e.getMessage());
         }
-        else if(item_id==R.id.menu_key_mappers){
-            startActivity(new Intent(this,KeyMapActivity.class));
-            return true;
-        }
-        else if(item_id==R.id.menu_set_game_dir){
-            request_game_dir_select(this);
-            return true;
-        }
-        else if(item_id==R.id.menu_open_file_mgr){
-            open_file_manager( this);
-            return true;
-        }
-        else if(item_id==R.id.menu_about){
-            startActivity(new Intent(this,AboutActivity.class));
-        }
-        else if(item_id==R.id.menu_settings){
-            startActivity(new Intent(this,EmulatorSettings.class));
-            return true;
-        }
-        else if(item_id==R.id.menu_virtual_pad_edit){
-            startActivity(new Intent(this,VirtualControlEdit.class));
-            return true;
-        }
-
-        return super.onOptionsItemSelected(item);
     }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (resultCode != RESULT_OK || data == null) return;
-
-        Uri uri = data.getData();
-
-        if(requestCode == REQUEST_SELECT_GAME_DIR){
-            save_pref_game_dir(this,uri);
-            refresh_game_list();
-            return;
+    /**
+     * First-run migration: the previous file-list UI auto-scanned a configured
+     * folder (or Downloads for *.iso) instead of maintaining an explicit
+     * library. If the persisted library is empty, run that same scan once so
+     * existing users don't lose games they already had detected.
+     */
+    private void migrateLegacyGameList() {
+        final ArrayList<Emulator.GameInfo> metas = LegacyGameScan.scan(this, load_pref_game_dir(this));
+        for (Emulator.GameInfo meta : metas) {
+            final GameEntry entry = new GameEntry(meta.name, meta.uri, "Xbox 360");
+            sGames.add(entry);
+            GameScanner.scan(this, entry, () -> {
+                saveLibrary(this);
+                refreshAllGridFragments();
+            });
         }
-    }
-    static void request_game_dir_select(Activity activity){
-        Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-        intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-        activity.startActivityForResult(intent, REQUEST_SELECT_GAME_DIR);
-    }
-    GameMetaInfoAdapter adapter=null;
-    private void refresh_game_list(){
-
-        (progress_task=new ProgressTask( this)
-                .set_progress_message(getString( R.string.game_list_loading))
-                .set_done_task(new ProgressTask.UI_Task() {
-                    @Override
-                    public void run() {
-                        show_game_list();
-                        progress_task=null;
-                    }
-                }))
-                .call( new ProgressTask.Task() {
-                    @Override
-                    public void run(ProgressTask task) {
-                        adapter=null;
-                        ArrayList<Emulator.GameInfo> metas=GameMetaInfoAdapter.refresh_game_list( MainActivity.this);
-                        adapter=new GameMetaInfoAdapter(MainActivity.this,metas);
-
-                        /*File json_file=get_game_list_file();
-                        if(json_file.exists())
-                            json_file.delete();
-                        GameMetaInfoAdapter.save_game_list_to_json_file(json_file,GameMetaInfoAdapter.refresh_game_list(MainActivity.this));
-                        */task.task_handler.sendEmptyMessage(ProgressTask.TASK_DONE);
-                    }
-                });
-        //show_game_list();
+        if (!metas.isEmpty()) saveLibrary(this);
     }
 
-    private void show_game_list(){
-        if(adapter==null){
-            refresh_game_list();
-            return;
+    /**
+     * Re-scans every watched folder (added via "Select a folder") plus the legacy
+     * auto-scan source (configured game dir, or Downloads for *.iso — the source
+     * most existing libraries were originally populated from) for game files not
+     * already in the library.
+     *
+     * MediaStore row IDs (the numeric id embedded in a content:// Downloads URI)
+     * are NOT stable — renaming or moving a file can silently reassign it a new
+     * id, orphaning the old one. A URI-only "already known?" check would then see
+     * the same physical ROM as a brand new file and add a duplicate entry. So
+     * candidates are also checked against every existing entry's Title ID (read
+     * synchronously from the XEX header — the ROM's real, stable identity).
+     */
+    void refreshGameList() {
+        final SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+        for (String folderUri : prefs.getStringSet(PREF_WATCHED_FOLDERS, Collections.emptySet())) {
+            addGamesFromTree(Uri.parse(folderUri));
         }
-        ((ListView)findViewById(R.id.game_list)).setAdapter(adapter);
+
+        // Scanning + Title ID reads touch disk — do that off the main thread.
+        // sGames itself is only ever read/mutated back on the UI thread below.
+        new Thread(() -> {
+            final ArrayList<Emulator.GameInfo> candidates =
+                    LegacyGameScan.scan(this, load_pref_game_dir(this));
+            for (Emulator.GameInfo meta : candidates) {
+                final String titleId = GameScanner.peekTitleId(this, Uri.parse(meta.uri));
+                runOnUiThread(() -> addLegacyCandidateIfNew(meta, titleId));
+            }
+        }).start();
     }
+
+    private void addLegacyCandidateIfNew(Emulator.GameInfo meta, String titleId) {
+        if (isAlreadyInLibrary(meta.uri) || isDuplicateByTitleId(titleId)) return;
+        final GameEntry entry = new GameEntry(meta.name, meta.uri, "Xbox 360");
+        entry.titleId = titleId;
+        sGames.add(entry);
+        saveLibrary(this);
+        refreshAllGridFragments();
+        GameScanner.scan(this, entry, () -> {
+            saveLibrary(this);
+            refreshAllGridFragments();
+        });
+    }
+
+    private boolean isAlreadyInLibrary(String uri) {
+        for (GameEntry e : sGames) if (e.uri.equals(uri)) return true;
+        return false;
+    }
+
+    private boolean isDuplicateByTitleId(String titleId) {
+        if (titleId == null) return false;
+        for (GameEntry e : sGames) if (titleId.equals(e.titleId)) return true;
+        return false;
+    }
+
     static void save_pref_game_dir(Context ctx,Uri uri){
         try{
             ctx.getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);
@@ -443,209 +380,231 @@ public class MainActivity extends AppCompatActivity {
             return null;
         }
     }
-    private static class GameMetaInfoAdapter extends BaseAdapter {
 
-        private static class Filter{
+    static Intent get_file_manager_intent(String pkg_name)
+    {
+        Intent it=new Intent(Intent.ACTION_VIEW);
+        it.setClassName(pkg_name, "com.android.documentsui.files.FilesActivity");
+        it.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        return it;
+    }
 
-            static boolean is_god_game(String file_name){
-                /*int file_name_len = file_name.length();
-                if(file_name_len == 20||file_name_len==42) {
-                    final String HEX_CHARS = "0123456789ABCDEF";
-                    for(int i = 0; i < file_name_len; i++){
-                        char c = file_name.charAt(i);
-                        if(HEX_CHARS.indexOf(c) == -1) return false;
-                    }
-                    return true;
+    static void open_file_manager(Activity activity)
+    {
+        try{
+            activity.startActivity(get_file_manager_intent("com.android.documentsui"));
+            return;
+        }
+        catch(Exception e){
+        }
+        try{
+            activity.startActivity(get_file_manager_intent("com.google.android.documentsui"));
+            return;
+        }
+        catch(Exception e){
+        }
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode,KeyEvent event){
+        if(keyCode==KeyEvent.KEYCODE_BACK){
+            finish();
+            return true;
+        }
+        return super.onKeyDown(keyCode,event);
+    }
+
+    @Override
+    public void onSetCustomArt(int gameIndex) {
+        mPendingArtIndex = gameIndex;
+        final Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("image/*");
+        startActivityForResult(intent, REQUEST_PICK_ART);
+    }
+
+    private void showAddDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.add_games)
+                .setItems(new String[]{"Select game files", "Select a folder"},
+                        (d, which) -> { if (which == 0) openFilePicker(); else openFolderPicker(); })
+                .show();
+    }
+
+    /** Opens the file picker with multi-select so several games can be picked at once. */
+    private void openFilePicker() {
+        final Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        startActivityForResult(intent, REQUEST_OPEN_GAME);
+    }
+
+    /** Opens the folder/tree picker; every game file found inside is added at once. */
+    private void openFolderPicker() {
+        startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQUEST_OPEN_FOLDER);
+    }
+
+    @Override
+    protected void onActivityResult(final int requestCode, final int resultCode, final Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != Activity.RESULT_OK || data == null) return;
+
+        if (requestCode == REQUEST_OPEN_GAME) {
+            // With EXTRA_ALLOW_MULTIPLE the system puts everything into ClipData.
+            final ClipData clip = data.getClipData();
+            if (clip != null && clip.getItemCount() > 0) {
+                final int count = clip.getItemCount();
+                for (int i = 0; i < count; i++) {
+                    addGameFromUri(clip.getItemAt(i).getUri(), null);
                 }
-                else return false;*/
-                return file_name.indexOf('.')==-1;
+                showScanningSnackbar(count);
+            } else if (data.getData() != null) {
+                // Single file (some pickers skip ClipData for a single selection)
+                addGameFromUri(data.getData(), null);
             }
 
-            static boolean is_iso_file(String file_name){
-                return file_name.endsWith(".iso");
-            }
-
-            static boolean is_zar_file(String file_name){
-                return file_name.endsWith(".zar");
-            }
-
-            static DocumentFile get_default_xex_file(DocumentFile dir){
-                DocumentFile[] files=dir.listFiles();
-                if(files == null) return null;
-                if(files.length == 0) return null;
-                for(DocumentFile file:files){
-                    if(!file.isFile()) continue;
-                    if(file.getName().toLowerCase().equals("default.xex")) return file;
-                }
-                return null;
-            }
-
-            static boolean is_xex_game(DocumentFile dir){
-                return get_default_xex_file(dir) != null;
-            }
-        };
-
-        ArrayList<Emulator.GameInfo> metas;
-        private final MainActivity context_;
-        private GameMetaInfoAdapter(MainActivity context,ArrayList<Emulator.GameInfo> metas){
-            context_=context;
-            this.metas=metas;
-        }
-
-        static String load_file_as_string(File file) throws IOException {
-            FileInputStream fis=new FileInputStream(file);
-            ByteArrayOutputStream baos=new ByteArrayOutputStream();
-            byte[] buffer=new byte[16384];
-            int n;
-            while ((n=fis.read(buffer))!=-1){
-                baos.write(buffer,0,n);
-            }
-            fis.close();
-            return baos.toString();
-        }
-        /*static ArrayList<Emulator.GameInfo> load_game_list_from_json_file(File json) throws JSONException, IOException {
-            String json_str=load_file_as_string(json);
-            return load_game_list_from_json(json_str);
-        }
-
-        static ArrayList<Emulator.GameInfo> load_game_list_from_json(String json_str) throws JSONException {
-            ArrayList<Emulator.GameInfo> metas=new ArrayList<Emulator.GameInfo>();
-            JSONArray game_list=new JSONArray(json_str);
-            for(int i=0;i<game_list.length();i++){
-                JSONObject game_info=game_list.getJSONObject(i);
-                Emulator.GameInfo meta=Emulator.GameInfo.from_json(game_info);
-                metas.add(meta);
-            }
-            return metas;
-        }
-
-        static void save_game_list_to_json_file(File json,ArrayList<Emulator.GameInfo> metas){
+        } else if (requestCode == REQUEST_OPEN_FOLDER) {
+            final Uri treeUri = data.getData();
+            if (treeUri == null) return;
             try {
-                FileOutputStream fos=new FileOutputStream(json);
-                fos.write(save_game_list_to_json(metas).getBytes());
-                fos.close();
-            } catch (IOException | JSONException e) {
-                e.printStackTrace();
+                getContentResolver().takePersistableUriPermission(
+                        treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (SecurityException ignored) {}
+            saveWatchedFolder(this, treeUri);
+            addGamesFromTree(treeUri);
+
+        } else if (requestCode == REQUEST_PICK_ART
+                && mPendingArtIndex >= 0 && mPendingArtIndex < sGames.size()) {
+            final Uri uri = data.getData();
+            if (uri == null) return;
+            getContentResolver().takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            sGames.get(mPendingArtIndex).customArtUri = uri.toString();
+            BoxArtManager.clearCache(this, sGames.get(mPendingArtIndex));
+            saveLibrary(this);
+            refreshAllGridFragments();
+            mPendingArtIndex = -1;
+        }
+    }
+
+    /** Persists read permission, creates a GameEntry, shows its card, and queues a background scan. */
+    private void addGameFromUri(Uri uri, String displayName) {
+        try {
+            getContentResolver().takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (SecurityException ignored) {}
+
+        final String title = (displayName != null)
+                ? displayName.replaceFirst("(?i)\\.(iso|xex|zar|xbla)$", "")
+                : resolveTitle(uri);
+
+        final GameEntry entry = new GameEntry(title, uri.toString(), "Xbox 360");
+        sGames.add(entry);
+        saveLibrary(this);
+        refreshAllGridFragments();
+        GameScanner.scan(this, entry, () -> {
+            saveLibrary(this);  // capture updated title / titleId from scanner
+            refreshAllGridFragments();
+        });
+    }
+
+    /**
+     * Lists all game files directly inside a folder tree and adds each one.
+     */
+    private void addGamesFromTree(Uri treeUri) {
+        final Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                treeUri, DocumentsContract.getTreeDocumentId(treeUri));
+
+        int added = 0;
+        try (Cursor c = getContentResolver().query(childrenUri,
+                new String[]{
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME
+                }, null, null, null)) {
+            while (c != null && c.moveToNext()) {
+                final String docId = c.getString(0);
+                final String name  = c.getString(1);
+                if (!isGameFileName(name)) continue;
+                final Uri fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
+                if (isAlreadyInLibrary(fileUri.toString())) continue;
+                addGameFromUri(fileUri, name);
+                added++;
             }
+        } catch (Exception e) {
+            Log.w(TAG, "Folder scan failed: " + e.getMessage());
         }
 
-        static String save_game_list_to_json(ArrayList<Emulator.GameInfo> metas) throws JSONException {
-            JSONArray game_list=new JSONArray();
-            for(Emulator.GameInfo meta:metas){
-                game_list.put(Emulator.GameInfo.to_json(meta));
-            }
-            return game_list.toString();
-        }*/
-
-
-
-        static ArrayList<Emulator.GameInfo> refresh_game_list(MainActivity context){
-            ArrayList<Emulator.GameInfo> metas=new ArrayList<Emulator.GameInfo>();
-            Uri uri=context.load_pref_game_dir(context);
-            if(uri==null)
-                return metas;
-            DocumentFile iso_dir=DocumentFile.fromTreeUri(context, uri);
-            if(iso_dir==null||!iso_dir.exists())
-                return metas;
-            DocumentFile[] files=iso_dir.listFiles();
-            for(DocumentFile file:files){
-                if(file.isDirectory()){
-                    DocumentFile default_xex_file=Filter.get_default_xex_file(file);
-                    if(default_xex_file==null) continue;
-                    Emulator.GameInfo meta=new Emulator.GameInfo();
-                    meta.uri=default_xex_file.getUri().toString();
-                    meta.name=file.getName();
-                    metas.add(meta);
-                }
-                else{
-                    if(Filter.is_iso_file(file.getName())){
-                        Emulator.GameInfo meta=new Emulator.GameInfo();
-                        meta.name=file.getName().substring(0,file.getName().length()-4);
-                        meta.uri=file.getUri().toString();
-                        metas.add(meta);
-                    }
-                    if(Filter.is_zar_file(file.getName())){
-                        Emulator.GameInfo meta=new Emulator.GameInfo();
-                        meta.name=file.getName().substring(0,file.getName().length()-4);
-                        meta.uri=file.getUri().toString();
-                        metas.add(meta);
-                    }
-                    else if(Filter.is_god_game(file.getName())){
-                        Emulator.GameInfo meta=Emulator.get.meta_info_from_god_game(context,file.getUri().toString());
-                        if(meta!=null)
-                        metas.add(meta);
-                    }
-                }
-            }
-
-            return metas;
+        if (added == 0) {
+            Snackbar.make(findViewById(android.R.id.content),
+                    getString(R.string.no_game_files_found), Snackbar.LENGTH_LONG).show();
+        } else {
+            showScanningSnackbar(added);
         }
+    }
 
+    private static boolean isGameFileName(String name) {
+        if (name == null) return false;
+        final String lower = name.toLowerCase();
+        return lower.endsWith(".iso") || lower.endsWith(".xex")
+                || lower.endsWith(".zar") || lower.endsWith(".xbla");
+    }
 
-        public Emulator.GameInfo getMetaInfo(int pos){
-            return metas.get(pos);
+    private void showScanningSnackbar(int count) {
+        final String msg = count == 1
+                ? getString(R.string.scanning_game)
+                : getString(R.string.scanning_games, count);
+        Snackbar.make(findViewById(android.R.id.content), msg, Snackbar.LENGTH_LONG).show();
+    }
+
+    /** Returns a clean display title for a picked game URI, using the file's actual name. */
+    private String resolveTitle(Uri uri) {
+        try (Cursor c = getContentResolver().query(
+                uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                final String name = c.getString(0);
+                if (name != null && !name.isEmpty())
+                    return name.replaceFirst("(?i)\\.(iso|xex|zar|xbla)$", "");
+            }
+        } catch (Exception ignored) {}
+        final String seg = uri.getLastPathSegment();
+        return seg != null ? seg.replaceFirst("(?i)\\.(iso|xex|zar|xbla)$", "") : "Unknown Game";
+    }
+
+    void refreshAllGridFragments() {
+        getSupportFragmentManager().getFragments().forEach(f -> {
+            if (f instanceof GameGridFragment) ((GameGridFragment) f).refresh();
+        });
+    }
+
+    static class GameEntry {
+        String title;   // may be updated by GameScanner to the canonical Wikipedia title
+        final String uri;
+        final String region;
+        String customArtUri = null;
+        String titleId = null;  // 8-char hex e.g. "454107EC", filled in by GameScanner
+
+        GameEntry(String title, String uri, String region) {
+            this.title = title;
+            this.uri = uri;
+            this.region = region;
         }
+    }
 
+    private static class PagerAdapter extends FragmentStateAdapter {
+        PagerAdapter(FragmentActivity fa) { super(fa); }
 
+        @NonNull
+        @Override
+        public Fragment createFragment(int position) {
+            switch (position) {
+                case TAB_PROFILES: return new ProfilesFragment();
+                case TAB_SETTINGS: return new SettingsFragment();
+                default: return new GameGridFragment();
+            }
+        }
 
         @Override
-        public int getCount(){
-            return metas.size();
-        }
-
-        @Override
-        public Object getItem(int p1){
-            return null;
-        }
-
-        @Override
-        public long getItemId(int p1){
-            return p1;
-        }
-
-        private LayoutInflater getLayoutInflater(){
-            return (LayoutInflater)context_.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
-        }
-
-        /*Bitmap to_gray_bmp(Bitmap src){
-            int w=src.getWidth();
-            int h=src.getHeight();
-            Bitmap bmp=Bitmap.createBitmap(w,h,src.getConfig());
-            ColorMatrix cm=new ColorMatrix();
-            cm.setSaturation(0);
-            Canvas canvas=new Canvas(bmp);
-            Paint paint=new Paint();
-            paint.setColorFilter(new ColorMatrixColorFilter(cm));
-            canvas.drawBitmap(src,0,0,paint);
-            return bmp;
-        }*/
-
-        @Override
-        public View getView(int pos,View curView,ViewGroup p3){
-
-            if(curView==null){
-                curView=getLayoutInflater().inflate(R.layout.game_item,null);
-            }
-
-            Emulator.GameInfo mi=metas.get(pos);
-
-            ImageView icon=(ImageView)curView.findViewById(R.id.game_icon);
-            if(mi.icon==null)
-                icon.setImageResource(R.drawable.app_icon);
-            else {
-                Bitmap icon_bmp= BitmapFactory.decodeByteArray(mi.icon,0,mi.icon.length);
-                icon.setImageBitmap(icon_bmp);
-            }
-
-            TextView name=(TextView)curView.findViewById(R.id.game_name);
-            if(mi.name!=null)
-                name.setText(mi.name);
-            else{
-                DocumentFile file=DocumentFile.fromSingleUri(context_,Uri.parse(mi.uri));
-                name.setText(file.getName());
-            }
-
-            return curView;
-        }
-    }//!FileAdapter
+        public int getItemCount() { return 3; }
+    }
 }

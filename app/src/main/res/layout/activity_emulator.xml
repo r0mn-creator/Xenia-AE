@@ -9,9 +9,58 @@
         android:keepScreenOn="true"
         android:id="@+id/surface_view" />
 
-    <aenu.ax360e.VirtualControl
+    <org.xeniaae.VirtualControl
         android:id="@+id/virtual_control"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
+
+    <TextView
+        android:id="@+id/status_overlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:background="#AA000000"
+        android:textColor="#FFFFFFFF"
+        android:textSize="10sp"
+        android:fontFamily="monospace"
+        android:padding="4dp"
+        android:text=""
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:id="@+id/precache_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:orientation="vertical"
+        android:background="#CC000000"
+        android:padding="16dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/precache_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#FFFFFFFF"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Pre-caching shaders…"
+            android:textColor="#FFCCCCCC"
+            android:textSize="12sp" />
+
+        <ProgressBar
+            android:id="@+id/precache_progress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:max="100" />
+
+    </LinearLayout>
 
 </FrameLayout>

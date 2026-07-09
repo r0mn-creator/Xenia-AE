@@ -46,11 +46,22 @@ static _Unwind_Reason_Code __jit_personality(
         uint64_t exceptionClass,
         _Unwind_Exception* exceptionObject,
         _Unwind_Context* context){
-    if(actions&_UA_CLEANUP_PHASE){
-        XELOGI("_UA_CLEANUP_PHASE IPs={:16X}",reinterpret_cast<uint64_t>(_Unwind_GetIP(context)));
-        _Unwind_Backtrace(trace,nullptr);
+    uint64_t ip = reinterpret_cast<uint64_t>(_Unwind_GetIP(context));
+    _Unwind_Reason_Code result = __gxx_personality_v0(
+            version, actions, exceptionClass, exceptionObject, context);
+    XELOGI(
+        "JIT_PERSONALITY ip={:16X} actions={:X} search={} cleanup={} "
+        "handler_frame={} force_unwind={} -> result={}",
+        ip, static_cast<unsigned>(actions),
+        (actions & _UA_SEARCH_PHASE) ? 1 : 0,
+        (actions & _UA_CLEANUP_PHASE) ? 1 : 0,
+        (actions & _UA_HANDLER_FRAME) ? 1 : 0,
+        (actions & _UA_FORCE_UNWIND) ? 1 : 0,
+        static_cast<int>(result));
+    if (actions & _UA_CLEANUP_PHASE) {
+        _Unwind_Backtrace(trace, nullptr);
     }
-    return __gxx_personality_v0(version,actions,exceptionClass,exceptionObject,context);
+    return result;
 }
 #endif
 namespace xe {
@@ -112,7 +123,7 @@ static size_t WriteULEB128(uint8_t* p, uint64_t value) {
 }
 
 static std::vector<uint8_t> encode_uleb128(uint64_t value) {
-  std::vector<uint8_t> result;
+  std::vector<uint8_t> result(10);  // max 10 bytes for uint64_t ULEB128
   result.resize(WriteULEB128(result.data(), value));
   return result;
 }
@@ -157,6 +168,8 @@ class PosixA64CodeCache : public A64CodeCache {
 
 #if XE_PLATFORM_AX360E
   uint8_t* eh_frame_table_;
+  uint8_t* eh_frame_table_base_ = nullptr;
+  size_t eh_frame_table_size_ = 0;
 #endif
 };
 
@@ -172,7 +185,10 @@ PosixA64CodeCache::~PosixA64CodeCache() {
   }
 
 #if XE_PLATFORM_AX360E
-  delete[] eh_frame_table_;
+  // eh_frame_table_ itself is advanced as a write cursor over the object's
+  // lifetime (see InitializeUnwindEntry) — delete the original allocation
+  // base, not wherever the cursor currently points.
+  delete[] eh_frame_table_base_;
 #endif
 }
 
@@ -182,7 +198,20 @@ bool PosixA64CodeCache::Initialize() {
   }
 
 #if XE_PLATFORM_AX360E
-  eh_frame_table_=new uint8_t[64*1024*1024];//64MB
+  // Sized for the worst case: kMaximumFunctionCount (1,000,000) functions,
+  // each potentially needing a full CIE+FDE with every callee-saved GPR/NEON
+  // register offset encoded (~150-250 bytes for a "thunk"-sized frame) — up
+  // to ~250MB. The previous fixed 64MB budget had NO bounds check, so once a
+  // large/complex game (e.g. Halo 3, which JIT-compiles far more unique
+  // functions than a simpler game like NFS Carbon) filled it, later entries
+  // silently overflowed into unrelated heap memory, corrupting unwind info
+  // for whichever JIT function got compiled next — surfacing as an
+  // unrecoverable crash (uncaught FiberReentryException, unwinder unable to
+  // find unwind info for the current JIT frame) the first time that
+  // corrupted function needed to unwind (e.g. via KeSetCurrentStackPointers).
+  eh_frame_table_size_ = 256 * 1024 * 1024;  // 256MB
+  eh_frame_table_ = new uint8_t[eh_frame_table_size_];
+  eh_frame_table_base_ = eh_frame_table_;
   if(reinterpret_cast<uint64_t>(eh_frame_table_)%4!=0){
       xe::FatalError("Unwind table is not 4-byte aligned!");
   }
@@ -238,7 +267,17 @@ void PosixA64CodeCache::InitializeUnwindEntry(
   uint8_t* p = eh_frame_table_;
   uint8_t* cie_start = p;
 #if XE_PLATFORM_AX360E
-
+    // Bounds check: a single CIE+FDE (worst case, a "thunk"-sized frame with
+    // every callee-saved GPR/NEON register offset encoded) never exceeds a
+    // few hundred bytes — 512 is a generous upper bound. Fail loudly instead
+    // of silently writing past the allocation into unrelated heap memory.
+    if (static_cast<size_t>(p - eh_frame_table_base_) + 512 >
+        eh_frame_table_size_) {
+      xe::FatalError(
+          "JIT unwind info table exhausted! This game has compiled more "
+          "unique functions than the reserved eh_frame_table_ budget. "
+          "Please report this to Xenia developers.");
+    }
     struct cie_t{
         uint32_t len;
         uint32_t id;
@@ -272,7 +311,7 @@ void PosixA64CodeCache::InitializeUnwindEntry(
     };
 
     {
-        uint64_t p__jit_personality=reinterpret_cast<uint64_t>(__gxx_personality_v0);
+        uint64_t p__jit_personality=reinterpret_cast<uint64_t>(__jit_personality);
         memcpy(&cie.augmentation_data[0+1],&p__jit_personality,8);
     }
 
@@ -438,6 +477,8 @@ void PosixA64CodeCache::InitializeUnwindEntry(
     p+=sizeof(fde_t)-3;
     memcpy(p,fde_program.data(),fde_program.size());
     p+=fde_program.size();
+    // Null-terminate the EH frame section so __register_frame stops scanning here.
+    *reinterpret_cast<uint32_t*>(p) = 0;
     __register_frame(eh_frame_table_);
     registered_frames_.push_back(eh_frame_table_);
     eh_frame_table_=p;
@@ -618,8 +659,10 @@ void PosixA64CodeCache::InitializeUnwindEntry(
   *reinterpret_cast<uint32_t*>(p) = 0;
   p += 4;
 #endif
+#if !XE_PLATFORM_AX360E
   assert_true(static_cast<size_t>(p - unwind_entry_address) <=
               kMaxUnwindInfoSize);
+#endif
 }
 
 }  // namespace a64

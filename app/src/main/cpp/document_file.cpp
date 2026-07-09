@@ -60,15 +60,31 @@ static std::unique_ptr<DocumentFile> _find_file_in_tree(JNIEnv *env, std::unique
     return nullptr;
 }
 
-std::unique_ptr<DocumentFile> DocumentFile::find(JavaVM *vm,jobject uri) {
+std::unique_ptr<DocumentFile> DocumentFile::find(JavaVM *vm, jobject uri) {
+    JNIEnv *env = get_env(vm);
 
-    if (g_doocument_file_tree == nullptr) {
-        return nullptr;
+    if (g_doocument_file_tree != nullptr) {
+        std::unique_ptr<DocumentFile> rootDocFile = std::make_unique<DocumentFile>(vm, g_doocument_file_tree);
+        std::unique_ptr<DocumentFile> found = _find_file_in_tree(env, rootDocFile, uri);
+        if (found != nullptr) return found;
     }
 
-    JNIEnv *env = get_env(vm);
-    std::unique_ptr<DocumentFile> rootDocFile=std::make_unique<DocumentFile>(vm, g_doocument_file_tree);
-    return _find_file_in_tree(env, rootDocFile, uri);
+    // Fallback: create DocumentFile directly from URI (handles MediaStore content:// URIs)
+    jmethodID fromSingleUri = env->GetStaticMethodID(
+        g_class_DocumentFile,
+        "fromSingleUri",
+        "(Landroid/content/Context;Landroid/net/Uri;)Landroidx/documentfile/provider/DocumentFile;"
+    );
+    if (fromSingleUri == nullptr) {
+        LOGE("Cannot find DocumentFile.fromSingleUri");
+        return nullptr;
+    }
+    jobject df_obj = env->CallStaticObjectMethod(g_class_DocumentFile, fromSingleUri, g_context, uri);
+    if (df_obj == nullptr) {
+        LOGE("DocumentFile.fromSingleUri returned null");
+        return nullptr;
+    }
+    return std::make_unique<DocumentFile>(vm, df_obj);
 }
 
 std::unique_ptr<DocumentFile> DocumentFile::clone(std::unique_ptr<DocumentFile>& file){

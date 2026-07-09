@@ -11,8 +11,12 @@
 
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <vector>
 
 #include "third_party/fmt/include/fmt/format.h"
+#include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -81,11 +85,101 @@ bool VulkanPipelineCache::Initialize() {
   return true;
 }
 
+void VulkanPipelineCache::InitializePipelineCache(
+    const std::filesystem::path& cache_root, uint32_t title_id) {
+  if (vk_pipeline_cache_ != VK_NULL_HANDLE) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  std::error_code ec;
+  std::filesystem::create_directories(cache_root, ec);
+
+  vk_pipeline_cache_path_ =
+      cache_root / fmt::format("pipelines_{:08X}.bin", title_id);
+
+  std::vector<uint8_t> cache_data;
+  {
+    std::ifstream f(vk_pipeline_cache_path_, std::ios::binary | std::ios::ate);
+    if (f.is_open()) {
+      auto size = f.tellg();
+      if (size > 0) {
+        cache_data.resize(static_cast<size_t>(size));
+        f.seekg(0);
+        f.read(reinterpret_cast<char*>(cache_data.data()), size);
+        if (!f) cache_data.clear();
+      }
+    }
+  }
+
+  VkPipelineCacheCreateInfo create_info = {};
+  create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+  create_info.initialDataSize = cache_data.size();
+  create_info.pInitialData = cache_data.empty() ? nullptr : cache_data.data();
+
+  if (dfn.vkCreatePipelineCache(device, &create_info, nullptr,
+                                &vk_pipeline_cache_) != VK_SUCCESS) {
+    XELOGE("VulkanPipelineCache: Failed to create VkPipelineCache");
+    vk_pipeline_cache_ = VK_NULL_HANDLE;
+    return;
+  }
+
+  if (cache_data.empty()) {
+    XELOGI("VulkanPipelineCache: Created new pipeline cache for title {:08X}",
+           title_id);
+  } else {
+    XELOGI(
+        "VulkanPipelineCache: Loaded pipeline cache ({} bytes) for title "
+        "{:08X}",
+        cache_data.size(), title_id);
+  }
+}
+
+void VulkanPipelineCache::FlushPipelineCacheToDisk() {
+  if (vk_pipeline_cache_ == VK_NULL_HANDLE || vk_pipeline_cache_path_.empty()) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  size_t cache_data_size = 0;
+  if (dfn.vkGetPipelineCacheData(device, vk_pipeline_cache_, &cache_data_size,
+                                 nullptr) != VK_SUCCESS ||
+      cache_data_size == 0) {
+    return;
+  }
+  std::vector<uint8_t> cache_data(cache_data_size);
+  if (dfn.vkGetPipelineCacheData(device, vk_pipeline_cache_, &cache_data_size,
+                                 cache_data.data()) != VK_SUCCESS) {
+    return;
+  }
+  std::ofstream f(vk_pipeline_cache_path_, std::ios::binary | std::ios::trunc);
+  if (f.is_open()) {
+    f.write(reinterpret_cast<const char*>(cache_data.data()), cache_data_size);
+    XELOGI("VulkanPipelineCache: Saved pipeline cache ({} bytes)",
+           cache_data_size);
+  }
+  pipelines_since_last_save_ = 0;
+}
+
 void VulkanPipelineCache::Shutdown() {
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
+
+  // Save and destroy VkPipelineCache.
+  if (vk_pipeline_cache_ != VK_NULL_HANDLE) {
+    FlushPipelineCacheToDisk();
+    dfn.vkDestroyPipelineCache(device, vk_pipeline_cache_, nullptr);
+    vk_pipeline_cache_ = VK_NULL_HANDLE;
+    vk_pipeline_cache_path_.clear();
+  }
 
   // Destroy all pipelines.
   last_pipeline_ = nullptr;
@@ -529,39 +623,59 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
   // without them.
   PipelineGeometryShader geometry_shader = PipelineGeometryShader::kNone;
   PipelinePrimitiveTopology primitive_topology;
-  switch (primitive_processing_result.host_primitive_type) {
-    case xenos::PrimitiveType::kPointList:
-      geometry_shader = PipelineGeometryShader::kPointList;
-      primitive_topology = PipelinePrimitiveTopology::kPointList;
-      break;
-    case xenos::PrimitiveType::kLineList:
-      primitive_topology = PipelinePrimitiveTopology::kLineList;
-      break;
-    case xenos::PrimitiveType::kLineStrip:
-      primitive_topology = PipelinePrimitiveTopology::kLineStrip;
-      break;
-    case xenos::PrimitiveType::kTriangleList:
-      primitive_topology = PipelinePrimitiveTopology::kTriangleList;
-      break;
-    case xenos::PrimitiveType::kTriangleFan:
-      // The check should be performed at primitive processing time.
-      assert_true(device_properties.triangleFans);
-      primitive_topology = PipelinePrimitiveTopology::kTriangleFan;
-      break;
-    case xenos::PrimitiveType::kTriangleStrip:
-      primitive_topology = PipelinePrimitiveTopology::kTriangleStrip;
-      break;
-    case xenos::PrimitiveType::kRectangleList:
-      geometry_shader = PipelineGeometryShader::kRectangleList;
-      primitive_topology = PipelinePrimitiveTopology::kTriangleList;
-      break;
-    case xenos::PrimitiveType::kQuadList:
-      geometry_shader = PipelineGeometryShader::kQuadList;
-      primitive_topology = PipelinePrimitiveTopology::kLineListWithAdjacency;
-      break;
-    default:
-      // TODO(Triang3l): All primitive types and tessellation.
+  // Tessellated draws (domain shader modes) always use patch list topology on
+  // the host regardless of the guest primitive type (kTriangleList/kQuadList
+  // for CP-indexed tessellation, or kTrianglePatch/kQuadPatch for
+  // patch-indexed/adaptive tessellation) - the host_primitive_type-based
+  // switch below is only meaningful for non-tessellated draws.
+  Shader::HostVertexShaderType host_vertex_shader_type =
+      SpirvShaderTranslator::Modification(vertex_shader->modification())
+          .vertex.host_vertex_shader_type;
+  if (Shader::IsHostVertexShaderTypeDomain(host_vertex_shader_type)) {
+    if (!device_properties.tessellationShader) {
+      // Fail gracefully (matching the "unsupported primitive type" pattern
+      // below) rather than let ArePipelineRequirementsMet's assert_always
+      // treat a genuinely-unsupported device as a caller bug.
       return false;
+    }
+    primitive_topology = PipelinePrimitiveTopology::kPatchList;
+    description_out.tessellation_mode =
+        regs.Get<reg::VGT_HOS_CNTL>().tess_mode;
+  } else {
+    switch (primitive_processing_result.host_primitive_type) {
+      case xenos::PrimitiveType::kPointList:
+        geometry_shader = PipelineGeometryShader::kPointList;
+        primitive_topology = PipelinePrimitiveTopology::kPointList;
+        break;
+      case xenos::PrimitiveType::kLineList:
+        primitive_topology = PipelinePrimitiveTopology::kLineList;
+        break;
+      case xenos::PrimitiveType::kLineStrip:
+        primitive_topology = PipelinePrimitiveTopology::kLineStrip;
+        break;
+      case xenos::PrimitiveType::kTriangleList:
+        primitive_topology = PipelinePrimitiveTopology::kTriangleList;
+        break;
+      case xenos::PrimitiveType::kTriangleFan:
+        // The check should be performed at primitive processing time.
+        assert_true(device_properties.triangleFans);
+        primitive_topology = PipelinePrimitiveTopology::kTriangleFan;
+        break;
+      case xenos::PrimitiveType::kTriangleStrip:
+        primitive_topology = PipelinePrimitiveTopology::kTriangleStrip;
+        break;
+      case xenos::PrimitiveType::kRectangleList:
+        geometry_shader = PipelineGeometryShader::kRectangleList;
+        primitive_topology = PipelinePrimitiveTopology::kTriangleList;
+        break;
+      case xenos::PrimitiveType::kQuadList:
+        geometry_shader = PipelineGeometryShader::kQuadList;
+        primitive_topology = PipelinePrimitiveTopology::kLineListWithAdjacency;
+        break;
+      default:
+        // TODO(Triang3l): All primitive types and tessellation.
+        return false;
+    }
   }
   description_out.geometry_shader = geometry_shader;
   description_out.primitive_topology = primitive_topology;
@@ -1767,6 +1881,467 @@ VkShaderModule VulkanPipelineCache::GetGeometryShader(GeometryShaderKey key) {
   return shader_module;
 }
 
+namespace {
+// Mirrors SpirvShaderTranslator::EndianSwap32Uint (spirv_shader_translator.cc)
+// for use outside that class, in the small standalone generic tessellation
+// shaders below, which build their own SpirvBuilder rather than going through
+// the guest ucode translator.
+spv::Id TessellationEndianSwap32Uint(SpirvBuilder& builder, spv::Id value,
+                                     spv::Id endian, spv::Id type_bool) {
+  spv::Id type = builder.getTypeId(value);
+  spv::Id const_uint_8 = builder.makeUintConstant(8);
+  spv::Id const_uint_00ff00ff = builder.makeUintConstant(0x00FF00FF);
+  spv::Id const_uint_16 = builder.makeUintConstant(16);
+
+  // 8-in-16 or one half of 8-in-32 (doing 8-in-16 swap).
+  spv::Id is_8in16 = builder.createBinOp(
+      spv::OpIEqual, type_bool, endian,
+      builder.makeUintConstant(uint32_t(xenos::Endian::k8in16)));
+  spv::Id is_8in32 = builder.createBinOp(
+      spv::OpIEqual, type_bool, endian,
+      builder.makeUintConstant(uint32_t(xenos::Endian::k8in32)));
+  spv::Id is_8in16_or_8in32 =
+      builder.createBinOp(spv::OpLogicalOr, type_bool, is_8in16, is_8in32);
+  SpirvBuilder::IfBuilder if_8in16(is_8in16_or_8in32,
+                                   spv::SelectionControlMaskNone, builder);
+  spv::Id swapped_8in16 = builder.createBinOp(
+      spv::OpBitwiseOr, type,
+      builder.createBinOp(
+          spv::OpBitwiseAnd, type,
+          builder.createBinOp(spv::OpShiftRightLogical, type, value,
+                              const_uint_8),
+          const_uint_00ff00ff),
+      builder.createBinOp(
+          spv::OpShiftLeftLogical, type,
+          builder.createBinOp(spv::OpBitwiseAnd, type, value,
+                              const_uint_00ff00ff),
+          const_uint_8));
+  if_8in16.makeEndIf();
+  value = if_8in16.createMergePhi(swapped_8in16, value);
+
+  // 16-in-32 or another half of 8-in-32 (doing 16-in-32 swap).
+  spv::Id is_16in32 = builder.createBinOp(
+      spv::OpIEqual, type_bool, endian,
+      builder.makeUintConstant(uint32_t(xenos::Endian::k16in32)));
+  spv::Id is_8in32_or_16in32 =
+      builder.createBinOp(spv::OpLogicalOr, type_bool, is_8in32, is_16in32);
+  SpirvBuilder::IfBuilder if_16in32(is_8in32_or_16in32,
+                                    spv::SelectionControlMaskNone, builder);
+  spv::Id swapped_16in32 = builder.createQuadOp(
+      spv::OpBitFieldInsert, type,
+      builder.createBinOp(spv::OpShiftRightLogical, type, value,
+                          const_uint_16),
+      value, builder.makeIntConstant(16), builder.makeIntConstant(16));
+  if_16in32.makeEndIf();
+  value = if_16in32.createMergePhi(swapped_16in32, value);
+
+  return value;
+}
+}  // namespace
+
+// Builds the two small, fixed (not per-game) SPIR-V shader modules needed to
+// render Xbox 360 adaptive-triangle-patch tessellation (used for water/
+// terrain in games like Halo 3 and NFS Carbon) on Vulkan, and caches them in
+// tessellation_vertex_shader_adaptive_triangle_/
+// tessellation_control_shader_adaptive_triangle_.
+//
+// TROUBLESHOOTING CONTEXT: on real Xbox 360 hardware / the D3D12 backend,
+// this is done with real tessellation pipeline stages: a tiny vertex shader
+// feeds a tiny hull ("tessellation control") shader, whose output patch then
+// goes through the fixed-function GPU tessellator, then the *guest's own*
+// vertex shader ucode runs again as the domain ("tessellation evaluation")
+// shader to produce final vertex positions. Only the first two of those
+// pieces are built here - the guest domain shader is handled separately in
+// spirv_shader_translator.cc (search for kTriangleDomainPatchIndexed there).
+// These two shaders are 1:1 SPIR-V ports of the reference HLSL, kept
+// deliberately close to the original for anyone diffing against it later:
+//   - shaders/tessellation_adaptive.vs.hlsl  (the vertex shader below)
+//   - shaders/adaptive_triangle.hs.hlsl      (the hull/TESC shader below)
+// If tessellated water/terrain ever looks wrong (cracks, wrong shape, wrong
+// LOD) on a NEW game, re-check this function's logic against those two HLSL
+// files line by line before assuming it's a different bug - this is the
+// single most error-prone part of the whole tessellation feature, since the
+// register/swizzle ordering here was reverse-engineered empirically (see the
+// comments inside adaptive_triangle.hs.hlsl) rather than from a spec.
+void VulkanPipelineCache::EnsureTessellationShadersAdaptiveTriangleCreated() {
+  if (tessellation_shaders_adaptive_triangle_created_) {
+    return;
+  }
+  tessellation_shaders_adaptive_triangle_created_ = true;
+
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+
+  // Both shaders share the same push constant layout (see
+  // VulkanCommandProcessor::TessellationPushConstants) - offsets here must
+  // match that struct exactly.
+  constexpr uint32_t kPushConstantOffsetVertexIndexEndian = 0;
+  constexpr uint32_t kPushConstantOffsetVertexIndexOffset = 4;
+  constexpr uint32_t kPushConstantOffsetVertexIndexMin = 8;
+  constexpr uint32_t kPushConstantOffsetVertexIndexMax = 12;
+  constexpr uint32_t kPushConstantOffsetTessFactorMin = 16;
+  constexpr uint32_t kPushConstantOffsetTessFactorMax = 20;
+
+  // ---------------------------------------------------------------------
+  // Passthrough vertex shader (mirrors shaders/tessellation_adaptive.vs.hlsl)
+  // ---------------------------------------------------------------------
+  {
+    SpirvBuilder builder(spv::Spv_1_0,
+                         (SpirvShaderTranslator::kSpirvMagicToolId << 16) | 1,
+                         nullptr);
+    builder.setMemoryModel(spv::AddressingModelLogical,
+                           spv::MemoryModelGLSL450);
+    builder.setSource(spv::SourceLanguageUnknown, 0);
+
+    std::vector<spv::Id> main_interface;
+
+    spv::Id type_void = builder.makeVoidType();
+    spv::Id type_bool = builder.makeBoolType();
+    spv::Id type_float = builder.makeFloatType(32);
+    spv::Id type_uint = builder.makeUintType(32);
+
+    // Push constant block - only the members this stage needs.
+    spv::Id type_push_constants = builder.makeStructType(
+        std::vector<spv::Id>{type_uint, type_float, type_float},
+        "XeTessVertexPushConstants");
+    builder.addMemberName(type_push_constants, 0, "vertex_index_endian");
+    builder.addMemberDecoration(type_push_constants, 0,
+                                spv::DecorationOffset,
+                                int(kPushConstantOffsetVertexIndexEndian));
+    builder.addMemberName(type_push_constants, 1, "tessellation_factor_min");
+    builder.addMemberDecoration(type_push_constants, 1,
+                                spv::DecorationOffset,
+                                int(kPushConstantOffsetTessFactorMin));
+    builder.addMemberName(type_push_constants, 2, "tessellation_factor_max");
+    builder.addMemberDecoration(type_push_constants, 2,
+                                spv::DecorationOffset,
+                                int(kPushConstantOffsetTessFactorMax));
+    builder.addDecoration(type_push_constants, spv::DecorationBlock);
+    spv::Id push_constants =
+        builder.createVariable(spv::NoPrecision, spv::StorageClassPushConstant,
+                               type_push_constants, "xe_push_constants");
+
+    // Input: gl_VertexIndex - actually the raw uint32 bit pattern of the
+    // tessellation edge factor float, smuggled through the index buffer (the
+    // Xbox 360 GPU's own trick for feeding adaptive tessellation factors,
+    // see tessellation_adaptive.vs.hlsl).
+    spv::Id in_vertex_index = builder.createVariable(
+        spv::NoPrecision, spv::StorageClassInput, type_uint, "gl_VertexIndex");
+    builder.addDecoration(in_vertex_index, spv::DecorationBuiltIn,
+                          spv::BuiltInVertexIndex);
+    main_interface.push_back(in_vertex_index);
+
+    // Output: the decoded, clamped edge factor.
+    spv::Id out_edge_factor = builder.createVariable(
+        spv::NoPrecision, spv::StorageClassOutput, type_float,
+        "xe_out_edge_factor");
+    builder.addDecoration(out_edge_factor, spv::DecorationLocation, 0);
+    main_interface.push_back(out_edge_factor);
+
+    std::vector<spv::Id> main_param_types;
+    std::vector<std::vector<spv::Decoration>> main_precisions;
+    spv::Block* main_entry;
+    spv::Function* main_function = builder.makeFunctionEntry(
+        spv::NoPrecision, type_void, "main", main_param_types,
+        main_precisions, &main_entry);
+    spv::Instruction* entry_point =
+        builder.addEntryPoint(spv::ExecutionModelVertex, main_function, "main");
+    for (spv::Id interface_id : main_interface) {
+      entry_point->addIdOperand(interface_id);
+    }
+
+    // Everything below is a direct SPIR-V translation of
+    // tessellation_adaptive.vs.hlsl's single line:
+    //   output.edge_factor = clamp(
+    //       asfloat(XeEndianSwap32(xe_edge_factor, xe_vertex_index_endian))
+    //           + 1.0f,
+    //       xe_tessellation_factor_range.x, xe_tessellation_factor_range.y);
+    // gl_VertexIndex here holds the RAW bits of a guest float, not a real
+    // index - the Xbox 360 GPU smuggles per-patch tessellation factors
+    // through what looks like an ordinary index buffer, so each "vertex"
+    // fetched is actually one float-encoded-as-uint32 edge factor.
+    std::vector<spv::Id> id_vector_temp;
+
+    spv::Id raw_index =
+        builder.createLoad(in_vertex_index, spv::NoPrecision);
+
+    // xe_vertex_index_endian (push constant member 0).
+    id_vector_temp.clear();
+    id_vector_temp.push_back(builder.makeIntConstant(0));
+    spv::Id vertex_index_endian = builder.createLoad(
+        builder.createAccessChain(spv::StorageClassPushConstant,
+                                  push_constants, id_vector_temp),
+        spv::NoPrecision);
+    // XeEndianSwap32(xe_edge_factor, xe_vertex_index_endian)
+    spv::Id swapped = TessellationEndianSwap32Uint(
+        builder, raw_index, vertex_index_endian, type_bool);
+
+    // asfloat(...) + 1.0f - the "+1.0" bias matches the D3D12 backend and is
+    // required by the hardware's own tessellation factor encoding (see the
+    // reference comment in adaptive_triangle.hs.hlsl for where this comes
+    // from - it's not an arbitrary Xenia choice).
+    spv::Id as_float =
+        builder.createUnaryOp(spv::OpBitcast, type_float, swapped);
+    spv::Id plus_one = builder.createBinOp(
+        spv::OpFAdd, type_float, as_float, builder.makeFloatConstant(1.0f));
+
+    // xe_tessellation_factor_range.x / .y (push constant members 1 and 2).
+    id_vector_temp.clear();
+    id_vector_temp.push_back(builder.makeIntConstant(1));
+    spv::Id tess_factor_min = builder.createLoad(
+        builder.createAccessChain(spv::StorageClassPushConstant,
+                                  push_constants, id_vector_temp),
+        spv::NoPrecision);
+    id_vector_temp.clear();
+    id_vector_temp.push_back(builder.makeIntConstant(2));
+    spv::Id tess_factor_max = builder.createLoad(
+        builder.createAccessChain(spv::StorageClassPushConstant,
+                                  push_constants, id_vector_temp),
+        spv::NoPrecision);
+
+    // clamp(value, min, max) via the GLSL.std.450 extended instruction set
+    // (SPIR-V has no built-in clamp opcode of its own).
+    spv::Id ext_inst_glsl_std_450 = builder.import("GLSL.std.450");
+    id_vector_temp.clear();
+    id_vector_temp.push_back(plus_one);
+    id_vector_temp.push_back(tess_factor_min);
+    id_vector_temp.push_back(tess_factor_max);
+    spv::Id clamped = builder.createBuiltinCall(
+        type_float, ext_inst_glsl_std_450, GLSLstd450NClamp, id_vector_temp);
+
+    builder.createStore(clamped, out_edge_factor);
+    builder.makeReturn(true);
+    builder.leaveFunction();
+
+    std::vector<unsigned int> shader_code;
+    builder.dump(shader_code);
+    tessellation_vertex_shader_adaptive_triangle_ =
+        ui::vulkan::util::CreateShaderModule(
+            vulkan_device, reinterpret_cast<const uint32_t*>(shader_code.data()),
+            sizeof(uint32_t) * shader_code.size());
+    if (tessellation_vertex_shader_adaptive_triangle_ == VK_NULL_HANDLE) {
+      XELOGE(
+          "VulkanPipelineCache: Failed to create the generic adaptive "
+          "triangle tessellation vertex shader");
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Tessellation control shader (mirrors shaders/adaptive_triangle.hs.hlsl)
+  // ---------------------------------------------------------------------
+  {
+    SpirvBuilder builder(spv::Spv_1_0,
+                         (SpirvShaderTranslator::kSpirvMagicToolId << 16) | 1,
+                         nullptr);
+    builder.addCapability(spv::CapabilityTessellation);
+    builder.setMemoryModel(spv::AddressingModelLogical,
+                           spv::MemoryModelGLSL450);
+    builder.setSource(spv::SourceLanguageUnknown, 0);
+
+    std::vector<spv::Id> main_interface;
+
+    spv::Id type_void = builder.makeVoidType();
+    spv::Id type_float = builder.makeFloatType(32);
+    spv::Id type_uint = builder.makeUintType(32);
+    spv::Id type_int = builder.makeIntType(32);
+
+    // Push constant block - only the members this stage needs.
+    spv::Id type_push_constants = builder.makeStructType(
+        std::vector<spv::Id>{type_uint, type_uint, type_uint},
+        "XeTessControlPushConstants");
+    builder.addMemberName(type_push_constants, 0, "vertex_index_offset");
+    builder.addMemberDecoration(type_push_constants, 0,
+                                spv::DecorationOffset,
+                                int(kPushConstantOffsetVertexIndexOffset));
+    builder.addMemberName(type_push_constants, 1, "vertex_index_min");
+    builder.addMemberDecoration(type_push_constants, 1,
+                                spv::DecorationOffset,
+                                int(kPushConstantOffsetVertexIndexMin));
+    builder.addMemberName(type_push_constants, 2, "vertex_index_max");
+    builder.addMemberDecoration(type_push_constants, 2,
+                                spv::DecorationOffset,
+                                int(kPushConstantOffsetVertexIndexMax));
+    builder.addDecoration(type_push_constants, spv::DecorationBlock);
+    spv::Id push_constants =
+        builder.createVariable(spv::NoPrecision, spv::StorageClassPushConstant,
+                               type_push_constants, "xe_push_constants");
+
+    // Input: per-control-point edge factor (3 vertices for a triangle patch),
+    // produced by the passthrough vertex shader above.
+    spv::Id type_float_array3 =
+        builder.makeArrayType(type_float, builder.makeUintConstant(3), 0);
+    spv::Id in_edge_factor = builder.createVariable(
+        spv::NoPrecision, spv::StorageClassInput, type_float_array3,
+        "xe_in_edge_factor");
+    builder.addDecoration(in_edge_factor, spv::DecorationLocation, 0);
+    main_interface.push_back(in_edge_factor);
+
+    spv::Id in_primitive_id = builder.createVariable(
+        spv::NoPrecision, spv::StorageClassInput, type_int, "gl_PrimitiveID");
+    builder.addDecoration(in_primitive_id, spv::DecorationBuiltIn,
+                          spv::BuiltInPrimitiveId);
+    main_interface.push_back(in_primitive_id);
+
+    // Outputs: tessellation levels (patch-constant) and the single output
+    // control point's "index" (see adaptive_triangle.hs.hlsl's
+    // [outputcontrolpoints(1)]).
+    spv::Id type_float_array4 =
+        builder.makeArrayType(type_float, builder.makeUintConstant(4), 0);
+    spv::Id out_tess_level_outer = builder.createVariable(
+        spv::NoPrecision, spv::StorageClassOutput, type_float_array4,
+        "gl_TessLevelOuter");
+    builder.addDecoration(out_tess_level_outer, spv::DecorationBuiltIn,
+                          spv::BuiltInTessLevelOuter);
+    builder.addDecoration(out_tess_level_outer, spv::DecorationPatch);
+    main_interface.push_back(out_tess_level_outer);
+
+    spv::Id type_float_array2 =
+        builder.makeArrayType(type_float, builder.makeUintConstant(2), 0);
+    spv::Id out_tess_level_inner = builder.createVariable(
+        spv::NoPrecision, spv::StorageClassOutput, type_float_array2,
+        "gl_TessLevelInner");
+    builder.addDecoration(out_tess_level_inner, spv::DecorationBuiltIn,
+                          spv::BuiltInTessLevelInner);
+    builder.addDecoration(out_tess_level_inner, spv::DecorationPatch);
+    main_interface.push_back(out_tess_level_inner);
+
+    spv::Id type_float_array1 =
+        builder.makeArrayType(type_float, builder.makeUintConstant(1), 0);
+    spv::Id out_index = builder.createVariable(
+        spv::NoPrecision, spv::StorageClassOutput, type_float_array1,
+        "xe_out_index");
+    builder.addDecoration(out_index, spv::DecorationLocation, 0);
+    main_interface.push_back(out_index);
+
+    std::vector<spv::Id> main_param_types;
+    std::vector<std::vector<spv::Decoration>> main_precisions;
+    spv::Block* main_entry;
+    spv::Function* main_function = builder.makeFunctionEntry(
+        spv::NoPrecision, type_void, "main", main_param_types,
+        main_precisions, &main_entry);
+    spv::Instruction* entry_point = builder.addEntryPoint(
+        spv::ExecutionModelTessellationControl, main_function, "main");
+    for (spv::Id interface_id : main_interface) {
+      entry_point->addIdOperand(interface_id);
+    }
+    builder.addExecutionMode(main_function, spv::ExecutionModeTriangles);
+    builder.addExecutionMode(main_function,
+                             spv::ExecutionModeSpacingFractionalEven);
+    builder.addExecutionMode(main_function, spv::ExecutionModeVertexOrderCw);
+    builder.addExecutionMode(main_function, spv::ExecutionModeOutputVertices,
+                             1);
+
+    std::vector<spv::Id> id_vector_temp;
+    auto load_edge_factor = [&](uint32_t index) -> spv::Id {
+      id_vector_temp.clear();
+      id_vector_temp.push_back(builder.makeIntConstant(int(index)));
+      return builder.createLoad(
+          builder.createAccessChain(spv::StorageClassInput, in_edge_factor,
+                                    id_vector_temp),
+          spv::NoPrecision);
+    };
+    auto store_tess_level_outer = [&](uint32_t index, spv::Id value) {
+      id_vector_temp.clear();
+      id_vector_temp.push_back(builder.makeIntConstant(int(index)));
+      builder.createStore(
+          value, builder.createAccessChain(spv::StorageClassOutput,
+                                           out_tess_level_outer,
+                                           id_vector_temp));
+    };
+
+    // Fork phase: edges[i] = patch[(i + 1) % 3].edge_factor - see
+    // adaptive_triangle.hs.hlsl for the empirically-validated derivation of
+    // this exact order ("no cracks in 4D5307E6 water").
+    spv::Id ef0 = load_edge_factor(0);
+    spv::Id ef1 = load_edge_factor(1);
+    spv::Id ef2 = load_edge_factor(2);
+    store_tess_level_outer(0, ef1);
+    store_tess_level_outer(1, ef2);
+    store_tess_level_outer(2, ef0);
+
+    // Join phase: inside = min(min(edges[0], edges[1]), edges[2]).
+    spv::Id ext_inst_glsl_std_450 = builder.import("GLSL.std.450");
+    id_vector_temp.clear();
+    id_vector_temp.push_back(ef1);
+    id_vector_temp.push_back(ef2);
+    spv::Id min1 = builder.createBuiltinCall(
+        type_float, ext_inst_glsl_std_450, GLSLstd450FMin, id_vector_temp);
+    id_vector_temp.clear();
+    id_vector_temp.push_back(min1);
+    id_vector_temp.push_back(ef0);
+    spv::Id inside = builder.createBuiltinCall(
+        type_float, ext_inst_glsl_std_450, GLSLstd450FMin, id_vector_temp);
+    id_vector_temp.clear();
+    id_vector_temp.push_back(builder.makeIntConstant(0));
+    builder.createStore(
+        inside, builder.createAccessChain(spv::StorageClassOutput,
+                                          out_tess_level_inner,
+                                          id_vector_temp));
+
+    // Control point: index = float(clamp((primitive_id + vertex_index_offset)
+    // & 0xFFFFFF, vertex_index_min, vertex_index_max)).
+    spv::Id primitive_id_u = builder.createUnaryOp(
+        spv::OpBitcast, type_uint,
+        builder.createLoad(in_primitive_id, spv::NoPrecision));
+
+    id_vector_temp.clear();
+    id_vector_temp.push_back(builder.makeIntConstant(0));
+    spv::Id vertex_index_offset = builder.createLoad(
+        builder.createAccessChain(spv::StorageClassPushConstant,
+                                  push_constants, id_vector_temp),
+        spv::NoPrecision);
+    spv::Id sum = builder.createBinOp(spv::OpIAdd, type_uint, primitive_id_u,
+                                      vertex_index_offset);
+    spv::Id masked = builder.createBinOp(
+        spv::OpBitwiseAnd, type_uint, sum,
+        builder.makeUintConstant(0xFFFFFFu));
+
+    id_vector_temp.clear();
+    id_vector_temp.push_back(builder.makeIntConstant(1));
+    spv::Id vertex_index_min = builder.createLoad(
+        builder.createAccessChain(spv::StorageClassPushConstant,
+                                  push_constants, id_vector_temp),
+        spv::NoPrecision);
+    id_vector_temp.clear();
+    id_vector_temp.push_back(builder.makeIntConstant(2));
+    spv::Id vertex_index_max = builder.createLoad(
+        builder.createAccessChain(spv::StorageClassPushConstant,
+                                  push_constants, id_vector_temp),
+        spv::NoPrecision);
+
+    id_vector_temp.clear();
+    id_vector_temp.push_back(masked);
+    id_vector_temp.push_back(vertex_index_min);
+    id_vector_temp.push_back(vertex_index_max);
+    spv::Id clamped = builder.createBuiltinCall(
+        type_uint, ext_inst_glsl_std_450, GLSLstd450UClamp, id_vector_temp);
+    spv::Id clamped_float =
+        builder.createUnaryOp(spv::OpConvertUToF, type_float, clamped);
+
+    id_vector_temp.clear();
+    id_vector_temp.push_back(builder.makeIntConstant(0));
+    builder.createStore(
+        clamped_float,
+        builder.createAccessChain(spv::StorageClassOutput, out_index,
+                                  id_vector_temp));
+
+    builder.makeReturn(true);
+    builder.leaveFunction();
+
+    std::vector<unsigned int> shader_code;
+    builder.dump(shader_code);
+    tessellation_control_shader_adaptive_triangle_ =
+        ui::vulkan::util::CreateShaderModule(
+            vulkan_device, reinterpret_cast<const uint32_t*>(shader_code.data()),
+            sizeof(uint32_t) * shader_code.size());
+    if (tessellation_control_shader_adaptive_triangle_ == VK_NULL_HANDLE) {
+      XELOGE(
+          "VulkanPipelineCache: Failed to create the generic adaptive "
+          "triangle tessellation control shader");
+    }
+  }
+}
+
 bool VulkanPipelineCache::EnsurePipelineCreated(
     const PipelineCreationArguments& creation_arguments) {
   if (creation_arguments.pipeline->second.pipeline != VK_NULL_HANDLE) {
@@ -1802,10 +2377,61 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
       render_target_cache_.GetPath() ==
       RenderTargetCache::Path::kPixelShaderInterlock;
 
-  std::array<VkPipelineShaderStageCreateInfo, 3> shader_stages;
+  bool is_tessellated =
+      description.primitive_topology == PipelinePrimitiveTopology::kPatchList;
+
+  std::array<VkPipelineShaderStageCreateInfo, 4> shader_stages;
   uint32_t shader_stage_count = 0;
 
-  // Vertex or tessellation evaluation shader.
+  // Tessellation vertex (passthrough) + control ("hull") shader stages. Only
+  // the adaptive triangle case (kTriangleDomainPatchIndexed + kAdaptive) is
+  // currently implemented - the only one actually used by Halo 3 / NFS
+  // Carbon's water/terrain rendering. Other tessellation modes/domain types
+  // fall through to the geometry_shader==kNone, is_tessellated==false shape
+  // below and fail EnsurePipelineCreated gracefully (no shader modules
+  // available for them yet), same as before Phase 2.
+  if (is_tessellated) {
+    Shader::HostVertexShaderType tess_host_vertex_shader_type =
+        SpirvShaderTranslator::Modification(description.vertex_shader_modification)
+            .vertex.host_vertex_shader_type;
+    if (tess_host_vertex_shader_type !=
+            Shader::HostVertexShaderType::kTriangleDomainPatchIndexed ||
+        description.tessellation_mode != xenos::TessellationMode::kAdaptive) {
+      return false;
+    }
+    EnsureTessellationShadersAdaptiveTriangleCreated();
+    if (tessellation_vertex_shader_adaptive_triangle_ == VK_NULL_HANDLE ||
+        tessellation_control_shader_adaptive_triangle_ == VK_NULL_HANDLE) {
+      return false;
+    }
+    VkPipelineShaderStageCreateInfo& shader_stage_tess_vertex =
+        shader_stages[shader_stage_count++];
+    shader_stage_tess_vertex.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stage_tess_vertex.pNext = nullptr;
+    shader_stage_tess_vertex.flags = 0;
+    shader_stage_tess_vertex.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shader_stage_tess_vertex.module =
+        tessellation_vertex_shader_adaptive_triangle_;
+    shader_stage_tess_vertex.pName = "main";
+    shader_stage_tess_vertex.pSpecializationInfo = nullptr;
+
+    VkPipelineShaderStageCreateInfo& shader_stage_tess_control =
+        shader_stages[shader_stage_count++];
+    shader_stage_tess_control.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stage_tess_control.pNext = nullptr;
+    shader_stage_tess_control.flags = 0;
+    shader_stage_tess_control.stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+    shader_stage_tess_control.module =
+        tessellation_control_shader_adaptive_triangle_;
+    shader_stage_tess_control.pName = "main";
+    shader_stage_tess_control.pSpecializationInfo = nullptr;
+  }
+
+  // Vertex or tessellation evaluation shader (the guest-translated shader -
+  // for tessellated draws, this is the domain/evaluation shader, following
+  // the passthrough vertex + control stages added above).
   assert_true(creation_arguments.vertex_shader->is_translated());
   if (!creation_arguments.vertex_shader->is_valid()) {
     return false;
@@ -1816,7 +2442,9 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
       VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   shader_stage_vertex.pNext = nullptr;
   shader_stage_vertex.flags = 0;
-  shader_stage_vertex.stage = VK_SHADER_STAGE_VERTEX_BIT;
+  shader_stage_vertex.stage = is_tessellated
+                                  ? VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
+                                  : VK_SHADER_STAGE_VERTEX_BIT;
   shader_stage_vertex.module =
       creation_arguments.vertex_shader->shader_module();
   assert_true(shader_stage_vertex.module != VK_NULL_HANDLE);
@@ -1924,6 +2552,40 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   }
   input_assembly_state.primitiveRestartEnable =
       description.primitive_restart ? VK_TRUE : VK_FALSE;
+
+  VkPipelineTessellationStateCreateInfo tessellation_state;
+  if (is_tessellated) {
+    Shader::HostVertexShaderType tess_host_vertex_shader_type =
+        SpirvShaderTranslator::Modification(description.vertex_shader_modification)
+            .vertex.host_vertex_shader_type;
+    // patchControlPoints is the number of host input vertices per patch fed
+    // into the tessellation control shader (not the 1 output control point
+    // the "hull" shaders all produce - see adaptive_triangle.hs.hlsl's
+    // InputPatch<..., 3> vs. [outputcontrolpoints(1)]).
+    uint32_t patch_control_points;
+    switch (tess_host_vertex_shader_type) {
+      case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
+      case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
+        patch_control_points = 3;
+        break;
+      case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
+      case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
+        patch_control_points = 4;
+        break;
+      case Shader::HostVertexShaderType::kLineDomainCPIndexed:
+      case Shader::HostVertexShaderType::kLineDomainPatchIndexed:
+        patch_control_points = 2;
+        break;
+      default:
+        assert_unhandled_case(tess_host_vertex_shader_type);
+        return false;
+    }
+    tessellation_state.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+    tessellation_state.pNext = nullptr;
+    tessellation_state.flags = 0;
+    tessellation_state.patchControlPoints = patch_control_points;
+  }
 
   VkPipelineViewportStateCreateInfo viewport_state;
   viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -2145,7 +2807,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   pipeline_create_info.pStages = shader_stages.data();
   pipeline_create_info.pVertexInputState = &vertex_input_state;
   pipeline_create_info.pInputAssemblyState = &input_assembly_state;
-  pipeline_create_info.pTessellationState = nullptr;
+  pipeline_create_info.pTessellationState =
+      is_tessellated ? &tessellation_state : nullptr;
   pipeline_create_info.pViewportState = &viewport_state;
   pipeline_create_info.pRasterizationState = &rasterization_state;
   pipeline_create_info.pMultisampleState = &multisample_state;
@@ -2162,7 +2825,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   VkPipeline pipeline;
-  if (dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
+  if (dfn.vkCreateGraphicsPipelines(device, vk_pipeline_cache_, 1,
                                     &pipeline_create_info, nullptr,
                                     &pipeline) != VK_SUCCESS) {
     // TODO(Triang3l): Move these error messages outside.
@@ -2178,6 +2841,11 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
     return false;
   }
   creation_arguments.pipeline->second.pipeline = pipeline;
+
+  if (++pipelines_since_last_save_ >= kSaveIntervalPipelines) {
+    FlushPipelineCacheToDisk();
+  }
+
   return true;
 }
 

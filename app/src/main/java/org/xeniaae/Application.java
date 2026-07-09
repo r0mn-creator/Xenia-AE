@@ -1,6 +1,10 @@
 package org.xeniaae;
 
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.preference.PreferenceManager;
+
+import androidx.appcompat.app.AppCompatDelegate;
 
 import java.io.File;
 import java.io.IOException;
@@ -61,6 +65,27 @@ public class Application extends android.app.Application{
     public static File get_virtual_control_config_file(){
         return new File(Application.get_app_data_dir(),"virtual_control_config.json");
     }
+
+    // Per-game config overrides live in <app_data_dir>/config/<titleId>.config.toml,
+    // matching the native engine's own LoadGameConfig() lookup path exactly, so a
+    // file written here is automatically layered on top of the global config on
+    // the next boot without any native/JNI changes.
+    public static File get_game_config_dir(){
+        return new File(Application.get_app_data_dir(),"config");
+    }
+    public static File get_game_config_file(String titleId){
+        return new File(Application.get_game_config_dir(), titleId+".config.toml");
+    }
+    /** Creates an (initially empty) per-game config override file if it doesn't exist yet. */
+    public static File ensure_game_config_file(String titleId){
+        File dir=Application.get_game_config_dir();
+        if(!dir.exists()) dir.mkdirs();
+        File f=Application.get_game_config_file(titleId);
+        if(!f.exists()){
+            Utils.save_string(f,"# Per-game overrides for "+titleId+"\n");
+        }
+        return f;
+    }
     static boolean device_support_vulkan() {
         return gpu_device_name_vk!=null;
     }
@@ -74,12 +99,32 @@ public class Application extends android.app.Application{
 
     public  static Context ctx;
     public static String gpu_device_name_vk;
+
+    static final String PREF_DARK_MODE="dark_mode_enabled";
+
+    public static boolean is_dark_mode_enabled(Context ctx){
+        return PreferenceManager.getDefaultSharedPreferences(ctx).getBoolean(PREF_DARK_MODE,false);
+    }
+
+    public static void set_dark_mode_enabled(Context ctx,boolean enabled){
+        SharedPreferences.Editor editor=PreferenceManager.getDefaultSharedPreferences(ctx).edit();
+        editor.putBoolean(PREF_DARK_MODE,enabled);
+        editor.apply();
+        apply_dark_mode(enabled);
+    }
+
+    static void apply_dark_mode(boolean enabled){
+        AppCompatDelegate.setDefaultNightMode(
+                enabled ? AppCompatDelegate.MODE_NIGHT_YES : AppCompatDelegate.MODE_NIGHT_NO);
+    }
+
     @Override
     public void onCreate()
     {
         super.onCreate();
 
         Application.ctx=this;
+        apply_dark_mode(is_dark_mode_enabled(this));
         gpu_device_name_vk= ProcessorInfo.gpu_get_physical_device_name_vk();
 
         String[] entry={"cache","cache0","cache1",};

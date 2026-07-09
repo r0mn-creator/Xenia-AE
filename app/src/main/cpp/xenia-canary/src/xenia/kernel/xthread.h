@@ -19,7 +19,7 @@
 #include <csignal>
 #include <mutex>
 #endif
-#if XE_PLATFORM_WIN32
+#if XE_PLATFORM_WIN32 || XE_PLATFORM_AX360E
 #include <csetjmp>
 #endif
 #include "xenia/base/threading.h"
@@ -519,11 +519,27 @@ class XThread : public XObject, public cpu::Thread {
 #endif
 
   // Reentry mechanism for fiber-based stack switching.
-  // On Linux, C++ exceptions are used instead of setjmp/longjmp so that
-  // destructors and RAII guards in host C++ frames are properly unwound.
-  // JIT code has DWARF .eh_frame unwind info registered via __register_frame.
+  // On desktop Linux, C++ exceptions are used instead of setjmp/longjmp so
+  // that destructors and RAII guards in host C++ frames are properly
+  // unwound. JIT code has DWARF .eh_frame unwind info registered via
+  // __register_frame.
+  //
+  // On AX360E (Android), the same exception-based mechanism was found to be
+  // unreliable: __register_frame-registered unwind info for JIT frames is
+  // not always found by the unwinder (bionic/libunwind), causing an
+  // uncaught FiberReentryException crash. Since guest JIT frames never have
+  // C++ objects with destructors (they're raw translated PPC machine code)
+  // and the host frames between Execute() and the JIT call site are thin
+  // dispatch shims with no RAII guards held across the boundary, AX360E
+  // uses the same setjmp/longjmp mechanism as Windows instead, which
+  // sidesteps DWARF unwinding through JIT frames entirely.
 #if XE_PLATFORM_WIN32
   std::jmp_buf reentry_jmp_buf_;
+  uint32_t reentry_address_ = 0;
+#elif XE_PLATFORM_AX360E
+  // Bionic's <csetjmp> does not inject jmp_buf into namespace std;
+  // use the global-namespace type from <setjmp.h> instead.
+  jmp_buf reentry_jmp_buf_;
   uint32_t reentry_address_ = 0;
 #endif
 

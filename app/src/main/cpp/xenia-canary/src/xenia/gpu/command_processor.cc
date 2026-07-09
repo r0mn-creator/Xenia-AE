@@ -280,6 +280,16 @@ void CommandProcessor::WorkerThreadMain() {
     return;
   }
 
+  // DIAGNOSTIC (temporary): rate-limited heartbeat to pin down a suspected
+  // livelock during NFS Carbon's next-level load stall - logs at most once
+  // per ~500ms, showing whether we're stuck in the "waiting for commands"
+  // spin/wait (read_ptr never catching up to write_ptr) or repeatedly
+  // executing without net progress (read_ptr not advancing across calls).
+  static auto diag_last_log = std::chrono::steady_clock::now();
+  static uint32_t diag_last_read_ptr = 0xFFFFFFFFu;
+  static uint64_t diag_wait_iterations = 0;
+  static uint64_t diag_execute_calls = 0;
+
   while (worker_running_) {
     while (!pending_fns_.empty()) {
       auto fn = std::move(pending_fns_.front());
@@ -296,16 +306,34 @@ void CommandProcessor::WorkerThreadMain() {
       PrepareForWait();
       uint32_t loop_count = 0;
       do {
-        // If we spin around too much, revert to a "low-power" state.
-        if (loop_count > 500) {
+        // On ARM/Android, sched_yield() is a full syscall (~1-5µs each).
+        // Use a brief CPU hint spin first, then block on the event which
+        // UpdateWritePointer fires via SetBoostPriority().
+        if (loop_count > 16) {
           constexpr int wait_time_ms = 2;
           xe::threading::Wait(write_ptr_index_event_.get(), true,
                               std::chrono::milliseconds(wait_time_ms));
         } else {
+#if XE_ARCH_ARM64 == 1
+          __asm volatile("yield" ::: "memory");
+#elif XE_ARCH_AMD64 == 1
+          _mm_pause();
+#else
           xe::threading::MaybeYield();
+#endif
         }
         loop_count++;
+        diag_wait_iterations++;
         write_ptr_index = write_ptr_index_.load();
+        auto diag_now = std::chrono::steady_clock::now();
+        if (diag_now - diag_last_log > std::chrono::milliseconds(500)) {
+          diag_last_log = diag_now;
+          XELOGI(
+              "REENTER_DIAG_CP wait-loop: read_ptr={:08X} write_ptr={:08X} "
+              "wait_iterations={} execute_calls={}",
+              read_ptr_index_, write_ptr_index, diag_wait_iterations,
+              diag_execute_calls);
+        }
       } while (worker_running_ && pending_fns_.empty() &&
                (write_ptr_index == 0xBAADF00D ||
                 read_ptr_index_ == write_ptr_index));
@@ -317,7 +345,21 @@ void CommandProcessor::WorkerThreadMain() {
     assert_true(read_ptr_index_ != write_ptr_index);
 
     // Execute. Note that we handle wraparound transparently.
+    diag_execute_calls++;
+    uint32_t diag_read_ptr_before = read_ptr_index_;
     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+    {
+      auto diag_now = std::chrono::steady_clock::now();
+      if (diag_now - diag_last_log > std::chrono::milliseconds(500)) {
+        diag_last_log = diag_now;
+        XELOGI(
+            "REENTER_DIAG_CP execute: read_ptr_before={:08X} "
+            "read_ptr_after={:08X} write_ptr={:08X} execute_calls={} "
+            "advancing={}",
+            diag_read_ptr_before, read_ptr_index_, write_ptr_index,
+            diag_execute_calls, diag_read_ptr_before != read_ptr_index_);
+      }
+    }
 
     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
     //     that many indices.

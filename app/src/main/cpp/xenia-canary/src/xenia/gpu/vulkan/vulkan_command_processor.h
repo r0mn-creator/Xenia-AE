@@ -14,6 +14,7 @@
 #include <climits>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -142,6 +143,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   ~VulkanCommandProcessor();
 
   void ClearCaches() override;
+
+  void InitializeShaderStorage(const std::filesystem::path& cache_root,
+                               uint32_t title_id, bool blocking) override;
 
   void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) override;
 
@@ -354,6 +358,25 @@ class VulkanCommandProcessor final : public CommandProcessor {
     bool operator!=(const PipelineLayoutKey& other_key) const {
       return !(*this == other_key);
     }
+  };
+
+  // Data needed by the generic tessellation passthrough vertex shader and
+  // tessellation-control shader (see VulkanPipelineCache::
+  // GetTessellationControlShader / GetTessellationVertexShader) - pushed via
+  // a small push constant range on the main guest pipeline layout rather than
+  // extending the shared SystemConstants uniform buffer (which every regular
+  // vertex/pixel shader also uses), to keep the blast radius of adding
+  // tessellation support contained to only the new tessellation-specific
+  // shader stages. All fields are 4-byte scalars at sequential offsets (0,
+  // 4, 8, 12, 16, 20) - shader-side SPIR-V struct generation must match this
+  // layout exactly.
+  struct TessellationPushConstants {
+    uint32_t vertex_index_endian;    // xenos::Endian - passthrough VS.
+    uint32_t vertex_index_offset;    // Patch index base - TESC.
+    uint32_t vertex_index_min;       // Patch index clamp min - TESC.
+    uint32_t vertex_index_max;       // Patch index clamp max - TESC.
+    float tessellation_factor_min;   // Edge factor clamp min - passthrough VS.
+    float tessellation_factor_max;   // Edge factor clamp max - passthrough VS.
   };
 
   class PipelineLayout : public VulkanPipelineCache::PipelineLayoutProvider {

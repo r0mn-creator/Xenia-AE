@@ -859,6 +859,13 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id input_vertex_index_;
   // VS as TES only - int.
   spv::Id input_primitive_id_;
+  // VS as TES, kTriangleDomainPatchIndexed only - float3 (barycentric domain
+  // location, SPIR-V BuiltIn TessCoord).
+  spv::Id input_tess_coord_;
+  // VS as TES, kTriangleDomainPatchIndexed only - float[1] (the single output
+  // control point's "index" value from the generic tessellation-control
+  // shader - see VulkanPipelineCache::EnsureTessellationShadersAdaptiveTriangleCreated).
+  spv::Id input_tess_control_point_index_;
   // PS, only when needed - float2.
   spv::Id input_point_coordinates_;
   // PS, only when needed - float4.
