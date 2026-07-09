@@ -7,15 +7,16 @@ android {
     compileSdk 35
 
     defaultConfig {
-        // BETA branch: distinct applicationId so the rebase build installs
-        // ALONGSIDE the stable org.xeniaae app instead of replacing it. The Java
-        // package (namespace) stays org.xeniaae; only the installed package id
-        // differs. Drop this ".beta" suffix when folding the rebase into mainline.
-        applicationId "org.xeniaae.beta"
+        // "Canary AE" — the rebase-onto-latest-Canary build. Distinct
+        // applicationId so it installs ALONGSIDE the stable org.xeniaae app
+        // instead of replacing it (the Java package/namespace stays org.xeniaae;
+        // only the installed package id differs). Keep this separate id while
+        // Canary AE is proven; fold into mainline when ready.
+        applicationId "org.xeniaae.canary"
         minSdk 28
         targetSdk 35
         versionCode 2
-        versionName "0.2.0-beta"
+        versionName "0.2.0-canary"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
