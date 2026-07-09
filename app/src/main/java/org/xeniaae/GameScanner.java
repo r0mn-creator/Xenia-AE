@@ -117,6 +117,83 @@ class GameScanner {
         }
     }
 
+    // STFS package magic values (first 4 bytes): "CON ", "LIVE", "PIRS".
+    private static final int STFS_MAGIC_CON  = 0x434F4E20;
+    private static final int STFS_MAGIC_LIVE = 0x4C495645;
+    private static final int STFS_MAGIC_PIRS = 0x50495253;
+    // Well-known STFS metadata file offsets (used by every STFS tool).
+    private static final long STFS_TITLE_ID_OFFSET     = 0x360;
+    private static final long STFS_DISPLAY_NAME_OFFSET  = 0x411;
+    private static final int  STFS_DISPLAY_NAME_MAX_CHARS = 128; // UTF-16BE units
+
+    /** Result of {@link #peekStfs}: the identity of a folder-based (XBLA/GOD)
+     *  content package. {@code displayName} may be null if unreadable. */
+    static class StfsInfo {
+        final String titleId;     // 8-hex, may be null
+        final String displayName; // human title, may be null
+        StfsInfo(String titleId, String displayName) {
+            this.titleId = titleId;
+            this.displayName = displayName;
+        }
+    }
+
+    /**
+     * If {@code uri} points at an STFS content package (an XBLA/Games-on-Demand
+     * install, e.g. {@code <titleId>/000D0000/<hash>}), reads its Title ID and
+     * display name from the STFS header. Returns null for anything that isn't an
+     * STFS package (checked cheaply via the 4-byte magic before reading further).
+     */
+    @Nullable
+    static StfsInfo peekStfs(Context context, Uri uri) {
+        try (ParcelFileDescriptor pfd =
+                     context.getContentResolver().openFileDescriptor(uri, "r");
+             FileInputStream fis = new FileInputStream(pfd.getFileDescriptor());
+             FileChannel channel = fis.getChannel()) {
+
+            channel.position(0);
+            ByteBuffer magicBuf = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN);
+            if (channel.read(magicBuf) < 4) return null;
+            magicBuf.flip();
+            int magic = magicBuf.getInt();
+            if (magic != STFS_MAGIC_CON && magic != STFS_MAGIC_LIVE
+                    && magic != STFS_MAGIC_PIRS) {
+                return null;
+            }
+
+            // Title ID (big-endian u32).
+            String titleId = null;
+            ByteBuffer tidBuf = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN);
+            channel.position(STFS_TITLE_ID_OFFSET);
+            if (channel.read(tidBuf) == 4) {
+                tidBuf.flip();
+                int tid = tidBuf.getInt();
+                if (tid != 0) titleId = String.format("%08X", tid);
+            }
+
+            // Display name (UTF-16BE, null-terminated). Sanitized + validated, so
+            // a bad read simply yields null rather than garbage.
+            String displayName = null;
+            ByteBuffer nameBuf = ByteBuffer.allocate(STFS_DISPLAY_NAME_MAX_CHARS * 2)
+                    .order(ByteOrder.BIG_ENDIAN);
+            channel.position(STFS_DISPLAY_NAME_OFFSET);
+            if (channel.read(nameBuf) > 0) {
+                nameBuf.flip();
+                StringBuilder sb = new StringBuilder();
+                while (nameBuf.remaining() >= 2) {
+                    char ch = nameBuf.getChar();
+                    if (ch == 0) break;             // null terminator
+                    if (ch >= 0x20 && ch != 0xFFFF) sb.append(ch); // printable only
+                }
+                String cleaned = sb.toString().trim();
+                if (!cleaned.isEmpty()) displayName = cleaned;
+            }
+
+            return new StfsInfo(titleId, displayName);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private static void doScan(Context context, MainActivity.GameEntry entry)
             throws Exception {
 

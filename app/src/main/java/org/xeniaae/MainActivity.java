@@ -265,6 +265,9 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
         try {
             final JSONArray array = new JSONArray(json);
             sGames.clear();
+            final HashSet<String> seenUris = new HashSet<>();
+            final HashSet<String> seenTitleIds = new HashSet<>();
+            boolean removedDupes = false;
             for (int i = 0; i < array.length(); i++) {
                 final JSONObject obj = array.getJSONObject(i);
                 final GameEntry e = new GameEntry(
@@ -273,8 +276,17 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
                         obj.optString("region", "Xbox 360"));
                 e.titleId      = obj.has("titleId")     ? obj.getString("titleId")     : null;
                 e.customArtUri = obj.has("customArtUri") ? obj.getString("customArtUri") : null;
+                // Self-healing dedup: drop entries that repeat a URI or Title ID
+                // (cleans up duplicates that may have been persisted before the
+                // scan-time dedup existed).
+                if (!seenUris.add(e.uri)
+                        || (e.titleId != null && !seenTitleIds.add(e.titleId))) {
+                    removedDupes = true;
+                    continue;
+                }
                 sGames.add(e);
             }
+            if (removedDupes) saveLibrary(context);
         } catch (Exception e) {
             Log.w(TAG, "loadLibrary failed: " + e.getMessage());
         }
@@ -490,6 +502,13 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
 
     /** Persists read permission, creates a GameEntry, shows its card, and queues a background scan. */
     private void addGameFromUri(Uri uri, String displayName) {
+        addGameFromUri(uri, displayName, null);
+    }
+
+    /** @param titleId the ROM's Title ID if already known (from a folder scan),
+     *  set on the entry immediately so duplicate detection works right away
+     *  rather than only after the async {@link GameScanner#scan} completes. */
+    private void addGameFromUri(Uri uri, String displayName, String titleId) {
         try {
             getContentResolver().takePersistableUriPermission(
                     uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
@@ -500,6 +519,7 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
                 : resolveTitle(uri);
 
         final GameEntry entry = new GameEntry(title, uri.toString(), "Xbox 360");
+        entry.titleId = titleId;
         sGames.add(entry);
         saveLibrary(this);
         refreshAllGridFragments();
@@ -512,35 +532,110 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
     /**
      * Lists all game files directly inside a folder tree and adds each one.
      */
-    private void addGamesFromTree(Uri treeUri) {
-        final Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
-                treeUri, DocumentsContract.getTreeDocumentId(treeUri));
+    /** Max directory depth to walk when scanning a chosen folder. Folder-based
+     *  games (XBLA/GOD) live at {@code <titleId>/<contentType>/<package>}, so a
+     *  few levels are needed; the cap prevents runaway recursion. */
+    private static final int SCAN_MAX_DEPTH = 6;
+    private static final int SCAN_MAX_CANDIDATES = 500;
 
-        int added = 0;
+    /** A game found during a folder scan, pending addition on the UI thread. */
+    private static class ScanCandidate {
+        final Uri uri; final String title; final boolean isStfs; final String titleId;
+        ScanCandidate(Uri uri, String title, boolean isStfs, String titleId) {
+            this.uri = uri; this.title = title; this.isStfs = isStfs; this.titleId = titleId;
+        }
+    }
+
+    private void addGamesFromTree(Uri treeUri) {
+        // Recursing the tree and reading STFS headers touches disk, so scan off
+        // the main thread and apply the results (which mutate sGames) back on it.
+        new Thread(() -> {
+            final List<ScanCandidate> found = new ArrayList<>();
+            try {
+                scanTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri), 0, found);
+            } catch (Exception e) {
+                Log.w(TAG, "Folder scan failed: " + e.getMessage());
+            }
+            runOnUiThread(() -> {
+                int added = 0;
+                for (ScanCandidate cand : found) {
+                    // Dedup by both URI and Title ID. Title ID is the important one:
+                    // the same physical game can appear under different URIs (a
+                    // MediaStore download URI vs. an externalstorage tree URI from
+                    // the folder picker), so a URI-only check would re-add it every
+                    // time the folder is scanned.
+                    if (isAlreadyInLibrary(cand.uri.toString())) continue;
+                    if (isDuplicateByTitleId(cand.titleId)) continue;
+                    if (cand.isStfs) addStfsGame(cand);
+                    else addGameFromUri(cand.uri, cand.title, cand.titleId);
+                    added++;
+                }
+                if (added == 0) {
+                    Snackbar.make(findViewById(android.R.id.content),
+                            getString(R.string.no_game_files_found), Snackbar.LENGTH_LONG).show();
+                } else {
+                    showScanningSnackbar(added);
+                }
+            });
+        }).start();
+    }
+
+    /** Recursively walks a document tree, collecting single-file games (.iso/.xex/
+     *  …) and folder-based STFS/XBLA content packages (verified by header magic). */
+    private void scanTree(Uri treeUri, String parentDocId, int depth, List<ScanCandidate> out) {
+        if (depth > SCAN_MAX_DEPTH || out.size() >= SCAN_MAX_CANDIDATES) return;
+        final Uri childrenUri =
+                DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId);
         try (Cursor c = getContentResolver().query(childrenUri,
                 new String[]{
                         DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                        DocumentsContract.Document.COLUMN_DISPLAY_NAME
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE
                 }, null, null, null)) {
-            while (c != null && c.moveToNext()) {
+            while (c != null && c.moveToNext() && out.size() < SCAN_MAX_CANDIDATES) {
                 final String docId = c.getString(0);
                 final String name  = c.getString(1);
-                if (!isGameFileName(name)) continue;
+                final String mime  = c.getString(2);
+                if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
+                    scanTree(treeUri, docId, depth + 1, out);   // descend into subfolders
+                    continue;
+                }
                 final Uri fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
-                if (isAlreadyInLibrary(fileUri.toString())) continue;
-                addGameFromUri(fileUri, name);
-                added++;
+                if (isGameFileName(name)) {
+                    // Read the ROM's stable Title ID now (cheap header read, and
+                    // we're already off the main thread) so duplicates can be
+                    // detected by identity rather than by unstable URI.
+                    final String tid = GameScanner.peekTitleId(this, fileUri);
+                    out.add(new ScanCandidate(fileUri, name, false, tid));
+                } else if (!hasExtension(name)) {
+                    // Extensionless file — could be an STFS content package. The
+                    // magic check is cheap and returns null for anything else.
+                    final GameScanner.StfsInfo info = GameScanner.peekStfs(this, fileUri);
+                    if (info != null) {
+                        String title = info.displayName != null ? info.displayName
+                                : (info.titleId != null ? info.titleId : name);
+                        out.add(new ScanCandidate(fileUri, title, true, info.titleId));
+                    }
+                }
             }
         } catch (Exception e) {
-            Log.w(TAG, "Folder scan failed: " + e.getMessage());
+            Log.w(TAG, "Subfolder scan failed: " + e.getMessage());
         }
+    }
 
-        if (added == 0) {
-            Snackbar.make(findViewById(android.R.id.content),
-                    getString(R.string.no_game_files_found), Snackbar.LENGTH_LONG).show();
-        } else {
-            showScanningSnackbar(added);
-        }
+    /** Adds a folder-based (STFS/XBLA) game. Unlike disc images, these can't be
+     *  parsed as XEX, so we use the name/Title ID already read from the STFS
+     *  header and let BoxArtManager fetch art by title when the grid renders. */
+    private void addStfsGame(ScanCandidate cand) {
+        try {
+            getContentResolver().takePersistableUriPermission(
+                    cand.uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (SecurityException ignored) {}
+        final GameEntry entry = new GameEntry(cand.title, cand.uri.toString(), "Xbox 360");
+        entry.titleId = cand.titleId;
+        sGames.add(entry);
+        saveLibrary(this);
+        refreshAllGridFragments();
     }
 
     private static boolean isGameFileName(String name) {
@@ -548,6 +643,14 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
         final String lower = name.toLowerCase();
         return lower.endsWith(".iso") || lower.endsWith(".xex")
                 || lower.endsWith(".zar") || lower.endsWith(".xbla");
+    }
+
+    /** True if the name has a short file extension (so it's clearly not an
+     *  extensionless STFS package hash name). */
+    private static boolean hasExtension(String name) {
+        if (name == null) return false;
+        final int dot = name.lastIndexOf('.');
+        return dot >= 0 && dot >= name.length() - 5 && dot < name.length() - 1;
     }
 
     private void showScanningSnackbar(int count) {
