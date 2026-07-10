@@ -92,7 +92,7 @@ class VulkanTextureCache final : public TextureCache {
 
   VkImageView GetActiveBindingOrNullImageView(uint32_t fetch_constant_index,
                                               xenos::FetchOpDimension dimension,
-                                              bool is_signed) const;
+                                              bool is_signed);
 
   SamplerParameters GetSamplerParameters(
       const VulkanShader::SamplerBinding& binding) const;
@@ -224,7 +224,7 @@ class VulkanTextureCache final : public TextureCache {
     // Takes ownership of the image and its memory.
     explicit VulkanTexture(VulkanTextureCache& texture_cache,
                            const TextureKey& key, VkImage image,
-                           VmaAllocation allocation);
+                           VmaAllocation allocation, bool track_usage = true);
     ~VulkanTexture();
 
     VkImage image() const { return image_; }
@@ -238,6 +238,13 @@ class VulkanTextureCache final : public TextureCache {
 
     VkImageView GetView(bool is_signed, uint32_t host_swizzle,
                         bool is_array = true);
+
+    // For textures with a 3D fetch constant dimension sampled as 2D (used for
+    // stacked/lightmap-style textures): lazily creates (and caches) a 2D
+    // wrapper texture holding slice 0, and returns an image view into it.
+    // Returns VK_NULL_HANDLE if unsupported or on failure.
+    VkImageView GetOrCreate3DAs2DImageView(bool is_signed,
+                                           uint32_t host_swizzle);
 
    private:
     union ViewKey {
@@ -297,6 +304,12 @@ class VulkanTextureCache final : public TextureCache {
     VmaAllocation allocation_;
 
     Usage usage_ = Usage::kUndefined;
+
+    // Lazily-created 2D wrapper texture (holding slice 0) for 3D-as-2D
+    // sampling, and its cached image views.
+    std::unique_ptr<VulkanTexture> texture_3d_as_2d_;
+    VkImageView image_view_3d_as_2d_unsigned_ = VK_NULL_HANDLE;
+    VkImageView image_view_3d_as_2d_signed_ = VK_NULL_HANDLE;
 
     std::unordered_map<ViewKey, VkImageView, ViewKey::Hasher> views_;
   };

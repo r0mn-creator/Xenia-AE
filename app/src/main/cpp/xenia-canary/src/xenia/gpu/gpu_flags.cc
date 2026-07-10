@@ -70,3 +70,22 @@ DEFINE_int32(
     "Set to higher number than query_occlusion_sample_lower_threshold. This "
     "value is ignored if query_occlusion_sample_lower_threshold is set to -1.",
     "GPU");
+
+DEFINE_int32(anisotropic_override, -1,
+             "Forces anisotropic filtering (AF) for eligible textures.\n"
+             "Higher values keep textures sharper at oblique angles at the "
+             "cost of GPU bandwidth, though most GPUs handle up to 16x fine.\n"
+             "In rare cases, forcing AF can introduce visual artifacts.\n"
+             " -1 = No override\n"
+             "  0 = Disable anisotropic filtering\n"
+             "  1 = Force 1x anisotropic filtering\n"
+             "  2 = Force 2x anisotropic filtering\n"
+             "  3 = Force 4x anisotropic filtering\n"
+             "  4 = Force 8x anisotropic filtering\n"
+             "  5 = Force 16x anisotropic filtering",
+             "GPU");
+
+DEFINE_bool(gpu_3d_to_2d_texture, true,
+            "Handle shaders that sample 3D textures as 2D by creating a 2D "
+            "texture from slice 0 of the guest memory.",
+            "GPU");
