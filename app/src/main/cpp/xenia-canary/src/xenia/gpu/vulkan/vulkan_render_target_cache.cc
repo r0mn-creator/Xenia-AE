@@ -3741,6 +3741,14 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
         }
       }
     }
+    // For stencil bit output, use stencil directly for the discard check.
+    // Without this, when the transfer source is a depth/stencil target,
+    // `packed` is never populated (it's only set on the source_is_color
+    // path above), so the stencil-bit kill check below silently no-ops and
+    // every sample passes through unfiltered.
+    if (packed == spv::NoResult && mode.output == TransferOutput::kStencilBit) {
+      packed = source_stencil[0];
+    }
     switch (mode.output) {
       case TransferOutput::kColor: {
         // Unless a special path was taken, unpack the raw 32bpp value into the
