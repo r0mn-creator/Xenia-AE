@@ -18,6 +18,7 @@
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/testrig_debug_server.h"  // TESTRIG(mem)
 #include "xenia/base/math.h"
 #include "xenia/base/threading.h"
 
@@ -307,6 +308,10 @@ bool Memory::Initialize() {
   uint32_t value_to_write = xe::byte_swap(0x2a6e3f38);
   memcpy(TranslateVirtual(0x80000000 + 0x1C), &value_to_write,
          sizeof(uint32_t));
+
+  // TESTRIG(mem): expose live per-heap page usage - see docs/TEST_HARNESS.md.
+  xe::testrig::Expose(xe::testrig::kPortMemory, "mem",
+                       [this]() { return TestrigFormatSnapshot(); });
 
   return true;
 }
@@ -752,6 +757,33 @@ void Memory::DumpMap() {
   heaps_.vC0000000.DumpMap();
   heaps_.vE0000000.DumpMap();
   XELOGE("");
+}
+
+// TESTRIG(mem): summarizes committed/reserved pages per named guest heap - see
+// docs/TEST_HARNESS.md.
+std::string Memory::TestrigFormatSnapshot() {
+  auto heap_line = [](const char* name, BaseHeap& heap) {
+    uint32_t total = heap.total_page_count();
+    uint32_t reserved = heap.reserved_page_count();
+    uint64_t reserved_bytes = uint64_t(reserved) * heap.page_size();
+    return fmt::format(
+        "{}: {}/{} pages reserved ({:.1f} MB), page_size={}\n", name,
+        reserved, total, double(reserved_bytes) / (1024.0 * 1024.0),
+        heap.page_size());
+  };
+  std::string result;
+  result += fmt::format("virtual_membase: {}\nphysical_membase: {}\n",
+                        static_cast<void*>(virtual_membase_),
+                        static_cast<void*>(physical_membase_));
+  result += heap_line("v00000000", heaps_.v00000000);
+  result += heap_line("v40000000", heaps_.v40000000);
+  result += heap_line("v80000000", heaps_.v80000000);
+  result += heap_line("v90000000", heaps_.v90000000);
+  result += heap_line("physical", heaps_.physical);
+  result += heap_line("vA0000000", heaps_.vA0000000);
+  result += heap_line("vC0000000", heaps_.vC0000000);
+  result += heap_line("vE0000000", heaps_.vE0000000);
+  return result;
 }
 
 bool Memory::Save(ByteStream* stream) {

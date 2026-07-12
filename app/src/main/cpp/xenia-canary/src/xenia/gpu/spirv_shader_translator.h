@@ -857,6 +857,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
 
   // VS as VS only - int.
   spv::Id input_vertex_index_;
+  // VS as kMemExportCompute only - uint3 (SPIR-V BuiltIn GlobalInvocationId);
+  // .x is used as the guest vertex index for compute-emulated memexport.
+  spv::Id input_global_invocation_id_;
   // VS as TES only - int.
   spv::Id input_primitive_id_;
   // VS as TES, kTriangleDomainPatchIndexed only - float3 (barycentric domain

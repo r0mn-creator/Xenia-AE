@@ -15,6 +15,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/testrig_debug_server.h"  // TESTRIG(audio)
 
 namespace xe {
 namespace apu {
@@ -72,7 +73,78 @@ bool AAudioAudioDriver::Initialize() {
     return false;
   }
 
+  // TESTRIG(audio): expose live AAudio output stream state - see
+  // docs/TEST_HARNESS.md.
+  xe::testrig::Expose(xe::testrig::kPortAudio, "audio",
+                       [this]() { return FormatDebugSnapshot(); });
+
   return true;
+}
+
+// TESTRIG(audio): live snapshot of AAudio output stream state - buffer
+// under/overrun (xrun) count, actual (not just requested) performance and
+// sharing mode (AAudio may silently fall back from EXCLUSIVE to SHARED, or
+// from LOW_LATENCY to NONE, if the requested mode isn't available), and
+// Xenia's own frame queue depth (empty queue = the callback fed silence,
+// i.e. a starvation underrun on Xenia's side even if AAudio itself has no
+// xrun to report).
+std::string AAudioAudioDriver::FormatDebugSnapshot() {
+  if (!stream_initialized_ || !stream_) {
+    return "AAudio stream not initialized";
+  }
+
+  aaudio_stream_state_t state = AAudioStream_getState(stream_);
+  int32_t xrun_count = AAudioStream_getXRunCount(stream_);
+  aaudio_performance_mode_t perf_mode = AAudioStream_getPerformanceMode(stream_);
+  aaudio_sharing_mode_t sharing_mode = AAudioStream_getSharingMode(stream_);
+  int32_t sample_rate = AAudioStream_getSampleRate(stream_);
+  int32_t channel_count = AAudioStream_getChannelCount(stream_);
+  int32_t buffer_size = AAudioStream_getBufferSizeInFrames(stream_);
+  int32_t buffer_capacity = AAudioStream_getBufferCapacityInFrames(stream_);
+  int32_t frames_per_burst = AAudioStream_getFramesPerBurst(stream_);
+  int64_t frames_written = AAudioStream_getFramesWritten(stream_);
+  int64_t frames_read = AAudioStream_getFramesRead(stream_);
+
+  size_t queued;
+  size_t unused;
+  {
+    std::unique_lock<std::mutex> guard(frames_mutex_);
+    queued = frames_queued_.size();
+    unused = frames_unused_.size();
+  }
+
+  // AAudio may silently downgrade the requested mode if it can't be granted
+  // (e.g. EXCLUSIVE falling back to SHARED, or LOW_LATENCY falling back to
+  // NONE) - decode to text so a fallback is obvious without memorizing the
+  // enum values.
+  const char* perf_mode_text =
+      perf_mode == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY   ? "LOW_LATENCY"
+      : perf_mode == AAUDIO_PERFORMANCE_MODE_POWER_SAVING ? "POWER_SAVING"
+      : perf_mode == AAUDIO_PERFORMANCE_MODE_NONE         ? "NONE"
+                                                           : "UNKNOWN";
+  const char* sharing_mode_text =
+      sharing_mode == AAUDIO_SHARING_MODE_EXCLUSIVE ? "EXCLUSIVE"
+      : sharing_mode == AAUDIO_SHARING_MODE_SHARED  ? "SHARED"
+                                                     : "UNKNOWN";
+
+  return fmt::format(
+      "state: {}\n"
+      "xrun_count: {}\n"
+      "performance_mode: {} (requested LOW_LATENCY)\n"
+      "sharing_mode: {} (requested EXCLUSIVE)\n"
+      "sample_rate: {}\n"
+      "channel_count: {}\n"
+      "buffer_size_frames: {}\n"
+      "buffer_capacity_frames: {}\n"
+      "frames_per_burst: {}\n"
+      "frames_written: {}\n"
+      "frames_read: {}\n"
+      "xenia_frames_queued: {} (0 = fed silence this callback)\n"
+      "xenia_frames_unused: {}",
+      AAudio_convertStreamStateToText(state), xrun_count, perf_mode_text,
+      sharing_mode_text, sample_rate, channel_count, buffer_size,
+      buffer_capacity, frames_per_burst, frames_written, frames_read, queued,
+      unused);
 }
 
 void AAudioAudioDriver::Pause() {

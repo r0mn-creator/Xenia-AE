@@ -13,6 +13,7 @@
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/testrig_debug_server.h"  // TESTRIG(kernel)
 #include "xenia/emulator.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/user_module.h"
@@ -75,6 +76,11 @@ KernelState::KernelState(Emulator* emulator)
       kMemoryProtectRead | kMemoryProtectWrite);
 
   xenia_assert(fixed_alloc_worked);
+
+  // TESTRIG(kernel): expose live guest-thread state - see
+  // docs/TEST_HARNESS.md.
+  xe::testrig::Expose(xe::testrig::kPortKernel, "kernel",
+                       [this]() { return TestrigFormatThreadSnapshot(); });
 }
 
 KernelState::~KernelState() {
@@ -1013,6 +1019,20 @@ std::vector<uint32_t> KernelState::GetAllThreadIDs() {
                                         thread_ids_view.end());
 
   return thread_ids;
+}
+
+// TESTRIG(kernel): live guest-thread listing - see docs/TEST_HARNESS.md.
+std::string KernelState::TestrigFormatThreadSnapshot() {
+  auto global_lock = global_critical_region_.Acquire();
+  std::string result = fmt::format("guest_thread_count: {}\n",
+                                   threads_by_id_.size());
+  for (const auto& [id, thread] : threads_by_id_) {
+    result += fmt::format(
+        "  id=0x{:08X} name=\"{}\" running={} guest={} main={} priority={}\n",
+        id, thread->thread_name(), thread->is_running(),
+        thread->is_guest_thread(), thread->main_thread(), thread->priority());
+  }
+  return result;
 }
 
 void KernelState::RegisterNotifyListener(XNotifyListener* listener) {

@@ -275,6 +275,8 @@
 
     <string name="show_status_overlay">Status Overlay</string>
     <string name="hint_show_status_overlay">Show RAM, GPU usage, and last log line on screen while running</string>
+    <string name="status_overlay_bottom">Status Overlay At Bottom</string>
+    <string name="hint_status_overlay_bottom">Place the status overlay at the bottom of the screen (off = top)</string>
 
     <string name="es_ui">UI</string>
     <string name="es_ui_headless">Headless Mode</string>

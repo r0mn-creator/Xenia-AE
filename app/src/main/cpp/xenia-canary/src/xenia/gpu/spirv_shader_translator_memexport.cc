@@ -129,15 +129,27 @@ void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
   id_vector_temp_.push_back(id_vector_temp_.back());
   spv::Id address_validation_value =
       builder_->makeCompositeConstant(type_uint4_, id_vector_temp_);
+  spv::Id address_valid_condition = builder_->createUnaryOp(
+      spv::OpAll, type_bool_,
+      builder_->createBinOp(
+          spv::OpIEqual, type_bool4_,
+          builder_->createBinOp(spv::OpShiftRightLogical, type_uint4_,
+                                eA_vector, address_validation_shift),
+          address_validation_value));
+  // TESTRIG(memexport): on the compute-emulated memexport path, the eA address
+  // is computed with float math (mad eA, r0.xxxx, cN.xyxx, cM) and this
+  // validation checks its exact bit pattern (0x1 sign/exp, 0x96 exponent). The
+  // marker tests proved the store lands the correct base address but this
+  // validation rejects the export in compute (post-marker never landed while
+  // the pre-marker at the same base did) - bypass it here to confirm the
+  // validation is the sole remaining blocker, then investigate why the eA bits
+  // differ in compute vs the graphics vertex path. Graphics path is unchanged.
+  if (IsSpirvComputeShader()) {
+    address_valid_condition = builder_->makeBoolConstant(true);
+  }
   SpirvBuilder::IfBuilder if_address_valid(
-      builder_->createUnaryOp(
-          spv::OpAll, type_bool_,
-          builder_->createBinOp(
-              spv::OpIEqual, type_bool4_,
-              builder_->createBinOp(spv::OpShiftRightLogical, type_uint4_,
-                                    eA_vector, address_validation_shift),
-              address_validation_value)),
-      spv::SelectionControlDontFlattenMask, *builder_, 2, 1);
+      address_valid_condition, spv::SelectionControlDontFlattenMask, *builder_,
+      2, 1);
 
   using EMIdArray = std::array<spv::Id, ucode::kMaxMemExportElementCount>;
 

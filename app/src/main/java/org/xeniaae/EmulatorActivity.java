@@ -202,6 +202,18 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
 
         status_overlay = (TextView) findViewById(R.id.status_overlay);
         final SharedPreferences sPrefs2 = PreferenceManager.getDefaultSharedPreferences(this);
+        // Position the status overlay at the bottom (default) or top, per the
+        // "status_overlay_bottom" preference, so it doesn't overlap other
+        // top-of-screen overlays. Kept on the left (start) either way.
+        {
+            final boolean overlay_bottom = sPrefs2.getBoolean("status_overlay_bottom", true);
+            final android.widget.FrameLayout.LayoutParams lp =
+                    (android.widget.FrameLayout.LayoutParams) status_overlay.getLayoutParams();
+            lp.gravity = (overlay_bottom ? android.view.Gravity.BOTTOM
+                                         : android.view.Gravity.TOP)
+                    | android.view.Gravity.START;
+            status_overlay.setLayoutParams(lp);
+        }
         if (sPrefs2.getBoolean("show_status_overlay", false)) {
             status_overlay.setVisibility(View.VISIBLE);
             overlay_ui_handler = new Handler(Looper.getMainLooper());

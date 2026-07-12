@@ -15,6 +15,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/testrig_debug_server.h"  // TESTRIG(gpu)
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/draw_util.h"
@@ -162,11 +163,45 @@ bool VulkanCommandProcessor::SetupContext() {
         VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT;
     guest_shader_vertex_stages_ |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
   }
-  if (!device_properties.vertexPipelineStoresAndAtomics) {
-    // For memory export from vertex shaders converted to compute shaders.
+  // Decide whether memory export from vertex shaders must be emulated with a
+  // compute dispatch. Required when vertex-stage stores are entirely
+  // unavailable, and also forced on tiled/binning GPUs (Adreno) which advertise
+  // vertexPipelineStoresAndAtomics but do not reliably run vertex-stage stores
+  // (the vertex shader executes in a position-only binning pass, so its stores
+  // are stripped/duplicated - e.g. Halo 3's memexport-generated menu geometry
+  // renders as garbage). Compute stores are reliable on all GPUs, so this is
+  // correct everywhere.
+  // Qualcomm's Vulkan vendor ID (Adreno).
+  constexpr uint32_t kVendorIdQualcomm = 0x5143;
+  memexport_use_compute_ =
+      !device_properties.vertexPipelineStoresAndAtomics ||
+      device_properties.vendorID == kVendorIdQualcomm;
+  if (memexport_use_compute_) {
+    // For memory export from vertex shaders converted to compute shaders - the
+    // shared memory and constant descriptor sets and the shared memory barriers
+    // must include the compute stage.
     guest_shader_pipeline_stages_ |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     guest_shader_vertex_stages_ |= VK_SHADER_STAGE_COMPUTE_BIT;
   }
+
+  // TESTRIG(gpu): expose live GPU command-processor state - see
+  // docs/TEST_HARNESS.md.
+  xe::testrig::Expose(
+      xe::testrig::kPortGpu, "gpu", [this, device_properties]() {
+        return fmt::format(
+            "device: {}\n"
+            "vendorID: 0x{:04X}\n"
+            "memexport_use_compute: {}\n"
+            "total_draws: {}\n"
+            "total_memexport_draws: {}\n"
+            "total_memexport_compute_dispatches: {}\n"
+            "total_memexport_compute_pipeline_failures: {}",
+            device_properties.deviceName, device_properties.vendorID,
+            memexport_use_compute_, testrig_total_draws_,
+            testrig_total_memexport_draws_,
+            testrig_total_memexport_compute_dispatches_,
+            testrig_total_memexport_compute_pipeline_failures_);
+      });
 
   // 16384 is bigger than any single uniform buffer that Xenia needs, but is the
   // minimum maxUniformBufferRange, thus the safe minimum amount.
@@ -2237,12 +2272,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return false;
   }
   pipeline_cache_->AnalyzeShaderUcode(*vertex_shader);
-  // TODO(Triang3l): If the shader uses memory export, but
-  // vertexPipelineStoresAndAtomics is not supported, convert the vertex shader
-  // to a compute shader and dispatch it after the draw if the draw doesn't use
-  // tessellation.
+  // If the shader uses memory export, collect the exported ranges. When vertex
+  // stores are reliable, the memexport happens during the graphics draw's
+  // vertex shader; when memexport_use_compute_ is set (Adreno / no vertex
+  // stores), a compute dispatch emulating the vertex shader does the export
+  // before the draw (see below).
   if (vertex_shader->memexport_eM_written() != 0 &&
-      device_properties.vertexPipelineStoresAndAtomics) {
+      (device_properties.vertexPipelineStoresAndAtomics ||
+       memexport_use_compute_)) {
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges_);
   }
 
@@ -2646,6 +2683,56 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           vfetch_constant.address << 2, vfetch_constant.size << 2);
       return false;
     }
+    // DEBUG(halo3-vtx): log the actual guest vertex data each draw fetches, at
+    // the exact fetch-constant address (no addressing guesswork). Uniform data
+    // over a large buffer = the collapse cause is bad DATA; varying data =
+    // cause is the shader/transform. Only substantial buffers, to cut spam.
+    {
+      uint32_t vaddr = vfetch_constant.address << 2;
+      uint32_t vsize = vfetch_constant.size << 2;
+      if (vsize >= 4096) {
+        const uint32_t* vd =
+            reinterpret_cast<const uint32_t*>(memory_->TranslatePhysical(vaddr));
+        uint32_t dwords = vsize / 4;
+        // Scan the WHOLE buffer for the compute-memexport marker (0xCAFEF00D)
+        // and for non-zero data, to tell whether the exported data lands where
+        // this draw fetches (marker) and whether the buffer is populated.
+        uint32_t marker_post = 0;   // 0xCAFEF00D, after eA validation
+        uint32_t marker_pre = 0;    // 0xCAFE0001, before eA validation
+        uint32_t nonzero_count = 0;
+        uint32_t v0 = vd[0];
+        bool uniform = true;
+        // First non-zero dword's index, and a sample of dwords starting there,
+        // to see whether the exported data looks like plausible vertex data
+        // (varying floats) or garbage.
+        uint32_t first_nz = 0xFFFFFFFFu;
+        for (uint32_t k = 0; k < dwords; ++k) {
+          uint32_t d = vd[k];
+          if (d == 0xCAFEF00Du) ++marker_post;
+          if (d == 0xCAFE0001u) ++marker_pre;
+          if (d != 0) {
+            ++nonzero_count;
+            if (first_nz == 0xFFFFFFFFu) first_nz = k;
+          }
+          if (d != v0) uniform = false;
+        }
+        if (marker_post || marker_pre || uniform || vsize == 573440) {
+          // Sample 6 dwords from the first non-zero region as floats.
+          uint32_t s = (first_nz == 0xFFFFFFFFu) ? 0 : first_nz;
+          if (dwords >= 6 && s > dwords - 6) s = dwords - 6;
+          XELOGI(
+              "VTXDATA idx={} addr=0x{:08X} nonzero={}/{} firstnz={} "
+              "sample[{}]= {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}",
+              vfetch_index, vaddr, nonzero_count, dwords, first_nz, s,
+              *reinterpret_cast<const float*>(&vd[s + 0]),
+              *reinterpret_cast<const float*>(&vd[s + 1]),
+              *reinterpret_cast<const float*>(&vd[s + 2]),
+              *reinterpret_cast<const float*>(&vd[s + 3]),
+              *reinterpret_cast<const float*>(&vd[s + 4]),
+              *reinterpret_cast<const float*>(&vd[s + 5]));
+        }
+      }
+    }
     vertex_buffers_resident[vfetch_index >> 6] |= uint64_t(1)
                                                   << (vfetch_index & 63);
   }
@@ -2656,6 +2743,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
     uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords
                                           << 2;
+    // DEBUG(halo3-vtx): log memexport target addresses. If 0x0574CA80 (the
+    // all-zeros vertex buffer the menu vista fetches) appears here, the menu
+    // geometry is memexport-generated -> memexport writeback is the bug.
+    XELOGI("MEMEXPORT_TARGET addr=0x{:08X} size={}",
+           memexport_range_base_bytes, memexport_range.size_bytes);
     if (!shared_memory_->RequestRange(memexport_range_base_bytes,
                                       memexport_range.size_bytes)) {
       XELOGE(
@@ -2684,12 +2776,126 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
   }
 
+  // TESTRIG(gpu): single cached toggle check reused for every counter
+  // increment below (see testrig_debug_server.h HotPathEnabledCached) - this
+  // is the actual per-draw overhead the toggle exists to remove; when off it's
+  // one atomic load, when on it costs one property lookup every ~250ms.
+  static std::atomic<bool> testrig_gpu_enabled{true};
+  static std::atomic<int64_t> testrig_gpu_next_check_ms{0};
+  bool testrig_gpu_hot = xe::testrig::HotPathEnabledCached(
+      "gpu", testrig_gpu_enabled, testrig_gpu_next_check_ms);
+
+  // Emulate vertex-shader memory export with a compute dispatch on GPUs where
+  // vertex-stage stores are unreliable (see memexport_use_compute_). The vertex
+  // shader is translated as a compute shader (kMemExportCompute) that writes the
+  // exported data to shared memory before the consuming draw fetches it - this
+  // is what makes e.g. Halo 3's memexport-generated menu geometry render. Only
+  // the plain (non-tessellated) vertex path is handled; the graphics draw still
+  // runs afterwards (its own vertex-stage stores simply do nothing on Adreno).
+  if (memexport_use_compute_ && !memexport_ranges_.empty() &&
+      vertex_shader->memexport_eM_written() != 0 &&
+      !Shader::IsHostVertexShaderTypeDomain(
+          primitive_processing_result.host_vertex_shader_type)) {
+    SpirvShaderTranslator::Modification memexport_compute_modification =
+        pipeline_cache_->GetCurrentVertexShaderModification(
+            *vertex_shader, Shader::HostVertexShaderType::kMemExportCompute,
+            interpolator_mask, ps_param_gen_pos != UINT32_MAX);
+    auto memexport_compute_translation =
+        static_cast<VulkanShader::VulkanTranslation*>(
+            vertex_shader->GetOrCreateTranslation(
+                memexport_compute_modification.value));
+    VkPipeline memexport_compute_pipeline = VK_NULL_HANDLE;
+    if (pipeline_cache_->EnsureShadersTranslated(memexport_compute_translation,
+                                                 nullptr)) {
+      memexport_compute_pipeline =
+          pipeline_cache_->GetOrCreateMemExportComputePipeline(
+              memexport_compute_translation, pipeline_layout_provider);
+    }
+    // DEBUG(halo3-vtx): confirm the compute-memexport dispatch actually runs,
+    // and that the shared-memory (set 0) and constants (set 1) descriptor sets
+    // it will bind are non-null (a null constants set => the shader reads zero
+    // constants => invalid eA => no export).
+    XELOGI(
+        "MEMEXPORT_COMPUTE hosttype={} vtxcount={} pipeline={} eM=0x{:X} "
+        "ds0={} ds1={}",
+        uint32_t(primitive_processing_result.host_vertex_shader_type),
+        primitive_processing_result.host_draw_vertex_count,
+        memexport_compute_pipeline != VK_NULL_HANDLE ? 1 : 0,
+        uint32_t(vertex_shader->memexport_eM_written()),
+        current_graphics_descriptor_sets_
+                    [SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram] !=
+                VK_NULL_HANDLE
+            ? 1
+            : 0,
+        current_graphics_descriptor_sets_
+                    [SpirvShaderTranslator::kDescriptorSetConstants] !=
+                VK_NULL_HANDLE
+            ? 1
+            : 0);
+    if (memexport_compute_pipeline == VK_NULL_HANDLE) {
+      if (testrig_gpu_hot) {  // TESTRIG(gpu)
+        ++testrig_total_memexport_compute_pipeline_failures_;
+      }
+    } else {
+      if (testrig_gpu_hot) {  // TESTRIG(gpu)
+        ++testrig_total_memexport_compute_dispatches_;
+      }
+      // The dispatch cannot run inside a render pass - end it and flush the
+      // pre-dispatch shared memory barrier queued by the Use() call above.
+      SubmitBarriers(true);
+      BindExternalComputePipeline(memexport_compute_pipeline);
+      // The compute shader reuses the guest graphics descriptor sets (the
+      // pipeline layout is the same): shared memory (written by the export),
+      // the constants, and the vertex textures if the shader samples any.
+      uint32_t memexport_descriptor_set_count =
+          SpirvShaderTranslator::kDescriptorSetConstants + 1;
+      if (!vertex_shader->GetTextureBindingsAfterTranslation().empty() ||
+          !vertex_shader->GetSamplerBindingsAfterTranslation().empty()) {
+        memexport_descriptor_set_count =
+            SpirvShaderTranslator::kDescriptorSetTexturesVertex + 1;
+      }
+      deferred_command_buffer_.CmdVkBindDescriptorSets(
+          VK_PIPELINE_BIND_POINT_COMPUTE,
+          pipeline_layout_provider->GetPipelineLayout(), 0,
+          memexport_descriptor_set_count, current_graphics_descriptor_sets_, 0,
+          nullptr);
+      // One invocation per guest vertex (the compute local size is 1, so no
+      // bounds check is needed - the invocation ID is the vertex index).
+      deferred_command_buffer_.CmdVkDispatch(
+          primitive_processing_result.host_draw_vertex_count, 1, 1);
+      // Make the exported data visible to the consuming draw's vertex fetch /
+      // index read (compute SHADER_WRITE -> vertex INDEX/SHADER_READ). Re-Use
+      // the same range so the shared memory barrier system commits the write.
+      if (memexport_extent_start < memexport_extent_end) {
+        shared_memory_->Use(
+            VulkanSharedMemory::Usage::kGuestDrawReadWrite,
+            std::make_pair(memexport_extent_start,
+                           memexport_extent_end - memexport_extent_start));
+      }
+    }
+  }
+
   // After all commands that may dispatch, copy or insert barriers, submit the
   // barriers (may end the render pass), and (re)enter the render pass before
   // drawing.
   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       render_target_cache_->last_update_render_pass(),
       render_target_cache_->last_update_framebuffer());
+
+  // DEBUG(halo3-vtx): log memexport draw vertex count (covers both paths).
+  if (!memexport_ranges_.empty()) {
+    XELOGI("MEMEXPORT_DRAW vtxcount={} prim={} idxtype={} eM=0x{:X}",
+           primitive_processing_result.host_draw_vertex_count,
+           uint32_t(primitive_processing_result.host_primitive_type),
+           uint32_t(primitive_processing_result.index_buffer_type),
+           uint32_t(vertex_shader->memexport_eM_written()));
+    if (testrig_gpu_hot) {  // TESTRIG(gpu)
+      ++testrig_total_memexport_draws_;
+    }
+  }
+  if (testrig_gpu_hot) {  // TESTRIG(gpu)
+    ++testrig_total_draws_;
+  }
 
   // Draw.
   if (primitive_processing_result.index_buffer_type ==

@@ -117,6 +117,15 @@ class CodeCacheBase : public CodeCache {
   const std::filesystem::path& file_name() const override { return file_name_; }
   size_t total_size() const override { return kGeneratedCodeSize; }
 
+  // TESTRIG(jit): live code-cache usage for the CPU/JIT debug port - see
+  // docs/TEST_HARNESS.md.
+  size_t testrig_generated_code_used_bytes() const {
+    return generated_code_offset_;
+  }
+  size_t testrig_generated_code_function_count() const {
+    return generated_code_map_.size();
+  }
+
   bool has_indirection_table() { return indirection_table_base_ != nullptr; }
 
   void set_indirection_default(uint32_t default_value) {

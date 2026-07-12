@@ -15,6 +15,7 @@
 #include "xenia/base/clock.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/testrig_debug_server.h"  // TESTRIG(jit)
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 #if XE_PLATFORM_WIN32
@@ -657,6 +658,25 @@ bool A64Backend::Initialize(Processor* processor) {
 
   // Register exception handler for MMIO access from JIT code.
   ExceptionHandler::Install(ExceptionCallbackThunk, this);
+
+  // TESTRIG(jit): expose live arm64 JIT code-cache state - see
+  // docs/TEST_HARNESS.md.
+  A64CodeCache* code_cache_ptr = code_cache_.get();
+  xe::testrig::Expose(xe::testrig::kPortCpu, "jit", [code_cache_ptr]() {
+    size_t used_bytes = code_cache_ptr->testrig_generated_code_used_bytes();
+    size_t total_bytes = code_cache_ptr->total_size();
+    size_t function_count =
+        code_cache_ptr->testrig_generated_code_function_count();
+    return fmt::format(
+        "backend: arm64 (a64)\n"
+        "jit_functions_compiled: {}\n"
+        "jit_code_cache_used_bytes: {} ({:.1f} MB)\n"
+        "jit_code_cache_total_bytes: {} ({:.1f} MB)\n"
+        "jit_code_cache_used_pct: {:.2f}%",
+        function_count, used_bytes, double(used_bytes) / (1024.0 * 1024.0),
+        total_bytes, double(total_bytes) / (1024.0 * 1024.0),
+        total_bytes ? 100.0 * double(used_bytes) / double(total_bytes) : 0.0);
+  });
 
   return true;
 }

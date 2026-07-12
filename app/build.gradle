@@ -7,11 +7,17 @@ android {
     compileSdk 35
 
     defaultConfig {
-        applicationId "org.xeniaae"
+        // "Canary AE" — the instrumented test/debug build of Xenia AE. Distinct
+        // applicationId so it installs ALONGSIDE the stable org.xeniaae app
+        // instead of replacing it (the Java package/namespace stays org.xeniaae;
+        // only the installed package id differs). Carries all test/diagnostic
+        // code (see docs/TEST_HARNESS.md); Xenia AE (main/gpu-backport) stays
+        // clean and only receives changes once proven here.
+        applicationId "org.xeniaae.canary"
         minSdk 28
         targetSdk 35
         versionCode 2
-        versionName "0.2.0"
+        versionName "0.2.0-canary"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 

@@ -6,6 +6,11 @@
         app:title="@string/show_status_overlay"
         app:key="show_status_overlay"
         app:summary="@string/hint_show_status_overlay" />
+    <org.xeniaae.preference.CheckBoxPreference
+        app:title="@string/status_overlay_bottom"
+        app:key="status_overlay_bottom"
+        app:defaultValue="true"
+        app:summary="@string/hint_status_overlay_bottom" />
 
     <PreferenceScreen app:title="@string/es_vulkan"
         app:key="Vulkan" >

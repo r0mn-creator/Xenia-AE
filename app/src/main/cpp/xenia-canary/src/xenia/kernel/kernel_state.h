@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <functional>
 #include <list>
+#include <string>
 #include <vector>
 
 #include "xenia/base/bit_map.h"
@@ -272,6 +273,10 @@ class KernelState {
   void OnThreadExit(XThread* thread);
   object_ref<XThread> GetThreadByID(uint32_t thread_id);
   std::vector<uint32_t> GetAllThreadIDs();
+
+  // TESTRIG(kernel): live guest-thread listing for the Kernel/Threads debug
+  // port - see docs/TEST_HARNESS.md.
+  std::string TestrigFormatThreadSnapshot();
 
   void RegisterNotifyListener(XNotifyListener* listener);
   void UnregisterNotifyListener(XNotifyListener* listener);

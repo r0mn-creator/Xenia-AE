@@ -35,6 +35,10 @@ class AAudioAudioDriver : public AudioDriver {
   void Shutdown();
 
  protected:
+  // TESTRIG(audio): live snapshot of AAudio output stream state, served on
+  // xe::testrig::kPortAudio - see docs/TEST_HARNESS.md.
+  std::string FormatDebugSnapshot();
+
   static aaudio_data_callback_result_t AudioCallback(
       AAudioStream* stream,
       void* userdata,

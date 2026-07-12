@@ -417,6 +417,32 @@ bool VulkanSharedMemory::UploadRanges(
           upload_buffer_mapping,
           memory().TranslatePhysical(upload_range_start << page_size_log2()),
           upload_buffer_size);
+      // DEBUG(halo3-vtx): detect uniform non-zero regions being uploaded from
+      // guest RAM (the vertex-transform corruption reads uniform 0x1D307000).
+      // If we see this here, the garbage is already in guest RAM (CPU/JIT or
+      // game-data bug), not an upload/coherency miss. Remove after diagnosis.
+      {
+        const uint32_t guest_addr = upload_range_start << page_size_log2();
+        const uint32_t* dw = reinterpret_cast<const uint32_t*>(
+            upload_buffer_mapping);
+        uint32_t v0 = dw[0];
+        if (v0 != 0) {
+          uint32_t checkable =
+              std::min<uint32_t>(16, uint32_t(upload_buffer_size) / 4);
+          bool uniform = checkable >= 4;
+          for (uint32_t k = 1; k < checkable; ++k) {
+            if (dw[k] != v0) {
+              uniform = false;
+              break;
+            }
+          }
+          if (uniform) {
+            XELOGI(
+                "UPLOAD_UNIFORM guest=0x{:08X} val=0x{:08X} size={} dw1=0x{:08X}",
+                guest_addr, v0, uint32_t(upload_buffer_size), dw[1]);
+          }
+        }
+      }
       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
         assert_true(upload_buffer_previous != VK_NULL_HANDLE);
         command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,

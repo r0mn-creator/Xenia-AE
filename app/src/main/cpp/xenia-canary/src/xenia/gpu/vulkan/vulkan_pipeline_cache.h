@@ -95,6 +95,17 @@ class VulkanPipelineCache {
       VkPipeline& pipeline_out,
       const PipelineLayoutProvider*& pipeline_layout_out);
 
+  // Creates (or returns a cached) compute pipeline that emulates memexport for
+  // a vertex shader translated as HostVertexShaderType::kMemExportCompute. Used
+  // on tiled GPUs (e.g. Adreno) where vertex-stage memory stores are
+  // unreliable. The compute shader reuses the guest graphics pipeline layout
+  // (the descriptor set layouts are compatible - same constants + shared memory
+  // bindings). Returns VK_NULL_HANDLE on failure (also cached, to avoid
+  // retrying).
+  VkPipeline GetOrCreateMemExportComputePipeline(
+      VulkanShader::VulkanTranslation* compute_shader,
+      const PipelineLayoutProvider* pipeline_layout);
+
  private:
   enum class PipelineGeometryShader : uint32_t {
     kNone,
@@ -348,6 +359,11 @@ class VulkanPipelineCache {
 
   std::unordered_map<PipelineDescription, Pipeline, PipelineDescription::Hasher>
       pipelines_;
+
+  // Compute pipelines emulating memexport (kMemExportCompute), keyed by the
+  // compute translation's shader module. Stores VK_NULL_HANDLE if creation
+  // failed. See GetOrCreateMemExportComputePipeline.
+  std::unordered_map<VkShaderModule, VkPipeline> memexport_compute_pipelines_;
 
   // Previously used pipeline, to avoid lookups if the state wasn't changed.
   const std::pair<const PipelineDescription, Pipeline>* last_pipeline_ =

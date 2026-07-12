@@ -550,6 +550,10 @@ class Memory {
   // Dumps a map of all allocated memory to the log.
   void DumpMap();
 
+  // TESTRIG(mem): live per-heap page usage for the Memory debug port - see
+  // docs/TEST_HARNESS.md.
+  std::string TestrigFormatSnapshot();
+
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
 

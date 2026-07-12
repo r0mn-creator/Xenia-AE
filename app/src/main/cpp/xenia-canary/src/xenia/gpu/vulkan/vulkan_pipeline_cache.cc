@@ -190,6 +190,14 @@ void VulkanPipelineCache::Shutdown() {
   }
   pipelines_.clear();
 
+  // Destroy the memexport compute pipelines.
+  for (const auto& memexport_pipeline_pair : memexport_compute_pipelines_) {
+    if (memexport_pipeline_pair.second != VK_NULL_HANDLE) {
+      dfn.vkDestroyPipeline(device, memexport_pipeline_pair.second, nullptr);
+    }
+  }
+  memexport_compute_pipelines_.clear();
+
   // Destroy all internal shaders.
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          depth_only_fragment_shader_);
@@ -446,6 +454,32 @@ bool VulkanPipelineCache::ConfigurePipeline(
   pipeline_out = pipeline.second.pipeline;
   pipeline_layout_out = pipeline_layout;
   return true;
+}
+
+VkPipeline VulkanPipelineCache::GetOrCreateMemExportComputePipeline(
+    VulkanShader::VulkanTranslation* compute_shader,
+    const PipelineLayoutProvider* pipeline_layout) {
+  VkShaderModule shader_module = compute_shader->shader_module();
+  if (shader_module == VK_NULL_HANDLE) {
+    return VK_NULL_HANDLE;
+  }
+  auto it = memexport_compute_pipelines_.find(shader_module);
+  if (it != memexport_compute_pipelines_.end()) {
+    return it->second;
+  }
+  // The compute shader reuses the guest graphics pipeline layout - its
+  // descriptor set layouts (system / float / bool-loop / fetch constants and
+  // the shared memory storage buffer) are the same the memexport code binds,
+  // and the compute shader references the same set/binding numbers.
+  VkPipeline pipeline = ui::vulkan::util::CreateComputePipeline(
+      command_processor_.GetVulkanDevice(),
+      pipeline_layout->GetPipelineLayout(), shader_module);
+  if (pipeline == VK_NULL_HANDLE) {
+    XELOGE("Failed to create a memexport emulation compute pipeline");
+  }
+  // Cache even a failed (VK_NULL_HANDLE) result to avoid retrying every draw.
+  memexport_compute_pipelines_.emplace(shader_module, pipeline);
+  return pipeline;
 }
 
 bool VulkanPipelineCache::TranslateAnalyzedShader(

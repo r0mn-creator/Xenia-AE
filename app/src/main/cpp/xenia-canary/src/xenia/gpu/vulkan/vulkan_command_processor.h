@@ -506,6 +506,25 @@ class VulkanCommandProcessor final : public CommandProcessor {
   VkPipelineStageFlags guest_shader_pipeline_stages_ = 0;
   VkShaderStageFlags guest_shader_vertex_stages_ = 0;
 
+  // When true, memory export from vertex shaders is emulated by dispatching the
+  // vertex shader as a compute shader (HostVertexShaderType::kMemExportCompute)
+  // instead of relying on vertex-stage memory stores. Forced on for tiled /
+  // binning GPUs (e.g. Adreno) which advertise vertexPipelineStoresAndAtomics
+  // but do not reliably execute vertex-stage stores (the vertex shader runs in a
+  // position-only binning pass), and used whenever vertex stores are entirely
+  // unavailable. When set, the shared memory and constant descriptor set layouts
+  // and the shared memory barriers include the compute stage.
+  bool memexport_use_compute_ = false;
+
+  // TESTRIG(gpu): running counters exposed live on xe::testrig::kPortGpu - see
+  // docs/TEST_HARNESS.md. Not authoritative state, just cheap running totals
+  // for external observation; safe to read without synchronization since this
+  // is debug-only and approximate counts are fine.
+  uint64_t testrig_total_draws_ = 0;
+  uint64_t testrig_total_memexport_draws_ = 0;
+  uint64_t testrig_total_memexport_compute_dispatches_ = 0;
+  uint64_t testrig_total_memexport_compute_pipeline_failures_ = 0;
+
   std::vector<VkFence> fences_free_;
   std::vector<VkSemaphore> semaphores_free_;
 
