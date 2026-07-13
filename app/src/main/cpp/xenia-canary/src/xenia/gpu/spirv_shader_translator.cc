@@ -1702,6 +1702,23 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
       const_uint_0_);
   spv::Id guest_position_w_inv = builder_->createNoContractionBinOp(
       spv::OpFDiv, type_float_, const_float_1_, position_w);
+  // A guest W of exactly 0 (observed: an unfilled/degenerate memexport-
+  // compaction slot, e.g. Halo 3's menu terrain when the compaction pass
+  // doesn't finish - see docs/HALO3_MENU_INVESTIGATION.md) reciprocates to
+  // +Infinity here. +Infinity is NOT <= 0, so it survives a standard
+  // perspective-clip W-cull check that's meant to discard degenerate
+  // vertices - letting a garbage primitive through to be rasterized instead
+  // of clipped, with behavior then depending on how a given GPU's
+  // rasterizer happens to handle infinite/NaN clip coordinates (untested,
+  // vendor-specific territory) rather than being reliably discarded
+  // everywhere. Force a safe negative sentinel instead, so a W=0 vertex is
+  // clipped the same way on every GPU instead of relying on IEEE-754
+  // divide-by-zero semantics propagating "correctly" through the clipper.
+  spv::Id position_w_is_zero = builder_->createBinOp(
+      spv::OpFOrdEqual, type_bool_, position_w, const_float_0_);
+  guest_position_w_inv = builder_->createTriOp(
+      spv::OpSelect, type_float_, position_w_is_zero,
+      builder_->makeFloatConstant(-1.0f), guest_position_w_inv);
   position_w =
       builder_->createTriOp(spv::OpSelect, type_float_, is_w_not_reciprocal,
                             position_w, guest_position_w_inv);
