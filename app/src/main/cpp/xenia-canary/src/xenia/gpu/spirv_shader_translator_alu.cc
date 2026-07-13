@@ -905,7 +905,7 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
       static_cast<unsigned int>(spv::OpNop),                   // kRcp
       static_cast<unsigned int>(spv::OpNop),                   // kRsqc
       static_cast<unsigned int>(spv::OpNop),                   // kRsqf
-      static_cast<unsigned int>(GLSLstd450InverseSqrt),        // kRsq
+      static_cast<unsigned int>(spv::OpNop),                   // kRsq
       static_cast<unsigned int>(spv::OpFOrdGreaterThanEqual),  // kMaxAs
       static_cast<unsigned int>(spv::OpFOrdGreaterThanEqual),  // kMaxAsf
       static_cast<unsigned int>(spv::OpFSub),                  // kSubs
@@ -1102,7 +1102,6 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
     case ucode::AluScalarOpcode::kFloors:
     case ucode::AluScalarOpcode::kExp:
     case ucode::AluScalarOpcode::kLog:
-    case ucode::AluScalarOpcode::kRsq:
     case ucode::AluScalarOpcode::kSqrt:
     case ucode::AluScalarOpcode::kSin:
     case ucode::AluScalarOpcode::kCos:
@@ -1111,6 +1110,23 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
           GLSLstd450(kOps[size_t(instr.scalar_opcode)]),
           GetOperandComponents(operand_storage[0], instr.scalar_operands[0],
                                0b0001));
+    case ucode::AluScalarOpcode::kRsq: {
+      // Real Xenos RSQ is a coarse hardware approximation (~15-bit seed +
+      // refinement), so no game can depend on bit-exact RSQ results across
+      // real consoles either - but GLSLstd450InverseSqrt's precision is
+      // vendor-defined, and Adreno's approximation diverges from RADV's
+      // enough to flip floor/truncs-based export-slot math in some shaders
+      // (e.g. Halo 3's menu terrain skinning pass). Compute it from IEEE
+      // sqrt + division instead, both far more consistently precise across
+      // vendors - the same precision-over-approximation tradeoff already
+      // made for kRcp below instead of a hardware reciprocal intrinsic.
+      spv::Id operand = GetOperandComponents(
+          operand_storage[0], instr.scalar_operands[0], 0b0001);
+      spv::Id sqrt_result = builder_->createUnaryBuiltinCall(
+          type_float_, ext_inst_glsl_std_450_, GLSLstd450Sqrt, operand);
+      return builder_->createNoContractionBinOp(spv::OpFDiv, type_float_,
+                                                 const_float_1_, sqrt_result);
+    }
     case ucode::AluScalarOpcode::kLogc: {
       spv::Id result = builder_->createUnaryBuiltinCall(
           type_float_, ext_inst_glsl_std_450_, GLSLstd450Log2,
@@ -1165,10 +1181,12 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
                                0b0001));
     }
     case ucode::AluScalarOpcode::kRsqc: {
-      spv::Id result = builder_->createUnaryBuiltinCall(
-          type_float_, ext_inst_glsl_std_450_, GLSLstd450InverseSqrt,
+      spv::Id rsqc_sqrt = builder_->createUnaryBuiltinCall(
+          type_float_, ext_inst_glsl_std_450_, GLSLstd450Sqrt,
           GetOperandComponents(operand_storage[0], instr.scalar_operands[0],
                                0b0001));
+      spv::Id result = builder_->createNoContractionBinOp(
+          spv::OpFDiv, type_float_, const_float_1_, rsqc_sqrt);
       result = builder_->createTriOp(
           spv::OpSelect, type_float_,
           builder_->createBinOp(spv::OpFOrdEqual, type_bool_, result,
@@ -1181,10 +1199,12 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
           builder_->makeFloatConstant(FLT_MAX), result);
     }
     case ucode::AluScalarOpcode::kRsqf: {
-      spv::Id result = builder_->createUnaryBuiltinCall(
-          type_float_, ext_inst_glsl_std_450_, GLSLstd450InverseSqrt,
+      spv::Id rsqf_sqrt = builder_->createUnaryBuiltinCall(
+          type_float_, ext_inst_glsl_std_450_, GLSLstd450Sqrt,
           GetOperandComponents(operand_storage[0], instr.scalar_operands[0],
                                0b0001));
+      spv::Id result = builder_->createNoContractionBinOp(
+          spv::OpFDiv, type_float_, const_float_1_, rsqf_sqrt);
       result = builder_->createTriOp(
           spv::OpSelect, type_float_,
           builder_->createBinOp(spv::OpFOrdEqual, type_bool_, result,
