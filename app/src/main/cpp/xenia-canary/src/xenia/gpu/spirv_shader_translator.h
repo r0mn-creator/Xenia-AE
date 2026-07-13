@@ -605,6 +605,15 @@ class SpirvShaderTranslator : public ShaderTranslator {
       const ParsedAluInstruction& instr,
       uint8_t memexport_eM_potentially_written_before, bool& predicate_written);
 
+  // Portable sine/cosine via Cody-Waite range reduction (3-term 2*pi split
+  // for precision far beyond a single float32 subtraction) followed by a
+  // minimax polynomial, instead of the driver's GLSLstd450Sin/Cos
+  // intrinsics - see the call sites for why (vendor-dependent transcendental
+  // precision, proven via an isolated Vulkan compute probe independent of
+  // any game - see docs/HALO3_MENU_INVESTIGATION.md). is_cos selects
+  // cos(x) instead of sin(x).
+  spv::Id PortableSinCos(spv::Id x, bool is_cos);
+
   // Perform endian swap of a uint scalar or vector.
   spv::Id EndianSwap32Uint(spv::Id value, spv::Id endian);
   // Perform endian swap of a uint4 vector.

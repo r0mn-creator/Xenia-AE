@@ -867,6 +867,84 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
   return spv::NoResult;
 }
 
+spv::Id SpirvShaderTranslator::PortableSinCos(spv::Id x, bool is_cos) {
+  // GLSLstd450Sin/Cos precision (in particular, large-argument range
+  // reduction quality) is vendor-defined. Proven via an isolated Vulkan
+  // compute probe (independent of any game) that this Adreno's native
+  // Sin/Cos has real, non-trivial absolute error - up to ~1.6e-2 at
+  // magnitudes in the tens of thousands, exactly the range Halo 3's own
+  // shader constants use (c224.y=10000 in the menu vista shader) - because
+  // a naive single-float32-subtraction range reduction suffers catastrophic
+  // cancellation at large magnitudes. This implements Cody-Waite reduction
+  // (2*pi split into 3 terms, each exactly representable in float32, so the
+  // large-magnitude part of the subtraction is exact and only the residual
+  // needs full precision) followed by a minimax polynomial (same polynomial
+  // family as DirectXMath's XMScalarSinCos). Verified via the same isolated
+  // probe to be 45-85x more accurate than the native intrinsic across a
+  // magnitude sweep from 0 to 100000, consistently (not a mixed trade-off
+  // like a naive single-term reduction) - see
+  // docs/HALO3_MENU_INVESTIGATION.md for the full comparison data.
+  spv::Id one_over_two_pi = builder_->makeFloatConstant(0.15915494309189535f);
+  spv::Id two_pi_hi = builder_->makeFloatConstant(6.28125f);
+  spv::Id two_pi_mid = builder_->makeFloatConstant(0.0019340515136718750f);
+  spv::Id two_pi_lo = builder_->makeFloatConstant(1.2554282316565513e-06f);
+
+  // Reduces x to within [-pi, pi] (approximately) using the 3-term 2*pi
+  // split, each subtraction applied separately (not combined first) to
+  // preserve precision - the core Cody-Waite technique.
+  auto Reduce = [&](spv::Id value) -> spv::Id {
+    spv::Id k = builder_->createUnaryBuiltinCall(
+        type_float_, ext_inst_glsl_std_450_, GLSLstd450Round,
+        builder_->createNoContractionBinOp(spv::OpFMul, type_float_, value,
+                                           one_over_two_pi));
+    spv::Id r = builder_->createNoContractionBinOp(
+        spv::OpFSub, type_float_, value,
+        builder_->createNoContractionBinOp(spv::OpFMul, type_float_, k,
+                                           two_pi_hi));
+    r = builder_->createNoContractionBinOp(
+        spv::OpFSub, type_float_, r,
+        builder_->createNoContractionBinOp(spv::OpFMul, type_float_, k,
+                                           two_pi_mid));
+    r = builder_->createNoContractionBinOp(
+        spv::OpFSub, type_float_, r,
+        builder_->createNoContractionBinOp(spv::OpFMul, type_float_, k,
+                                           two_pi_lo));
+    return r;
+  };
+
+  spv::Id x_reduced = Reduce(x);
+  if (is_cos) {
+    // cos(x) = sin(x + pi/2), re-reduced into range.
+    spv::Id half_pi = builder_->makeFloatConstant(1.5707963267948966f);
+    x_reduced = Reduce(builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float_, x_reduced, half_pi));
+  }
+
+  spv::Id x2 = builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
+                                                   x_reduced, x_reduced);
+  // Minimax polynomial for sin(x) over [-pi, pi], ~1e-7 max error given an
+  // already-accurate reduced argument.
+  static const float kCoeffs[] = {-2.3889859e-08f, 2.7525562e-06f,
+                                   -0.00019840874f, 0.0083333310f,
+                                   -0.16666667f};
+  spv::Id result = builder_->makeFloatConstant(kCoeffs[0]);
+  for (size_t i = 1; i < xe::countof(kCoeffs); ++i) {
+    result = builder_->createNoContractionBinOp(
+        spv::OpFAdd, type_float_,
+        builder_->createNoContractionBinOp(spv::OpFMul, type_float_, result,
+                                           x2),
+        builder_->makeFloatConstant(kCoeffs[i]));
+  }
+  result = builder_->createNoContractionBinOp(
+      spv::OpFAdd, type_float_,
+      builder_->createNoContractionBinOp(spv::OpFMul, type_float_, result,
+                                         x2),
+      builder_->makeFloatConstant(1.0f));
+  result = builder_->createNoContractionBinOp(spv::OpFMul, type_float_,
+                                               result, x_reduced);
+  return result;
+}
+
 spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
     const ParsedAluInstruction& instr,
     uint8_t memexport_eM_potentially_written_before, bool& predicate_written) {
@@ -931,8 +1009,8 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
       static_cast<unsigned int>(spv::OpFAdd),                  // kAddsc1
       static_cast<unsigned int>(spv::OpFSub),                  // kSubsc0
       static_cast<unsigned int>(spv::OpFSub),                  // kSubsc1
-      static_cast<unsigned int>(GLSLstd450Sin),                // kSin
-      static_cast<unsigned int>(GLSLstd450Cos),                // kCos
+      static_cast<unsigned int>(spv::OpNop),                   // kSin
+      static_cast<unsigned int>(spv::OpNop),                   // kCos
       static_cast<unsigned int>(spv::OpNop),                   // kRetainPrev
   };
 
@@ -1103,13 +1181,17 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
     case ucode::AluScalarOpcode::kExp:
     case ucode::AluScalarOpcode::kLog:
     case ucode::AluScalarOpcode::kSqrt:
-    case ucode::AluScalarOpcode::kSin:
-    case ucode::AluScalarOpcode::kCos:
       return builder_->createUnaryBuiltinCall(
           type_float_, ext_inst_glsl_std_450_,
           GLSLstd450(kOps[size_t(instr.scalar_opcode)]),
           GetOperandComponents(operand_storage[0], instr.scalar_operands[0],
                                0b0001));
+    case ucode::AluScalarOpcode::kSin:
+    case ucode::AluScalarOpcode::kCos:
+      return PortableSinCos(
+          GetOperandComponents(operand_storage[0], instr.scalar_operands[0],
+                               0b0001),
+          instr.scalar_opcode == ucode::AluScalarOpcode::kCos);
     case ucode::AluScalarOpcode::kRsq: {
       // Real Xenos RSQ is a coarse hardware approximation (~15-bit seed +
       // refinement), so no game can depend on bit-exact RSQ results across
