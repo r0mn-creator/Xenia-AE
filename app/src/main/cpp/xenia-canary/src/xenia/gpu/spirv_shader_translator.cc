@@ -525,9 +525,31 @@ void SpirvShaderTranslator::StartTranslation() {
     if (register_count()) {
       spv::Id type_register_array = builder_->makeArrayType(
           type_float4_, builder_->makeUintConstant(register_count()), 0);
-      var_main_registers_ =
-          builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction,
-                                   type_register_array, "xe_var_registers");
+      // Zero-initialize the guest general-purpose register file, matching
+      // every other local variable declared alongside it here (loop/address
+      // registers, tfetch state, memexport state all get an explicit zero
+      // initializer - this one didn't). Without an initializer, a SPIR-V
+      // Function-storage-class variable's initial value is indeterminate
+      // per spec, and different drivers fill that indeterminacy
+      // differently: some (observed: RADV) effectively zero it, others
+      // (observed: Adreno) may leave whatever was in that register-file
+      // slot from a PREVIOUS, unrelated shader invocation's scheduling
+      // history - which would be non-deterministic in exactly the way
+      // "stable within a boot, varies boot-to-boot" implies (GPU
+      // scheduling/occupancy history differs by boot timing, not by any
+      // game data). If any guest shader has a code path that reads a
+      // register before writing it (plausible in predicated/conditional
+      // execution), this divergence would silently propagate. Real Xenos
+      // hardware likely has consistent (if undocumented) behavior here
+      // that games were authored/tested against - zero is the safest
+      // portable choice, and costs nothing extra since Adreno already
+      // clears memory at allocation in the common case anyway.
+      id_vector_temp_.assign(register_count(), const_float4_0_);
+      spv::Id register_array_zero =
+          builder_->makeCompositeConstant(type_register_array, id_vector_temp_);
+      var_main_registers_ = builder_->createVariable(
+          spv::NoPrecision, spv::StorageClassFunction, type_register_array,
+          "xe_var_registers", register_array_zero);
     }
     if (memexport_used) {
       var_main_memexport_address_ = builder_->createVariable(
