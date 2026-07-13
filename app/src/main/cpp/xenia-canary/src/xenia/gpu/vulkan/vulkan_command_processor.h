@@ -157,6 +157,13 @@ class VulkanCommandProcessor final : public CommandProcessor {
         ->vulkan_device();
   }
 
+  // TESTRIG(memexport): whether memory export from vertex shaders is being
+  // emulated via a compute dispatch (see memexport_use_compute_). Exposed so
+  // the pipeline cache can make its own memexport-draw handling (rasterizer
+  // discard, "OPTION 1") mutually exclusive with the compute path instead of
+  // stacking both memexport mechanisms on the same draw.
+  bool memexport_use_compute() const { return memexport_use_compute_; }
+
   // Returns the deferred drawing command list for the currently open
   // submission.
   DeferredCommandBuffer& deferred_command_buffer() {

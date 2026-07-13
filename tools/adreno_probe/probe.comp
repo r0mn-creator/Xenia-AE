@@ -1,0 +1,23 @@
+#version 450
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer InBuf {
+    float inputs[];
+};
+layout(std430, binding = 1) writeonly buffer OutBuf {
+    // Per input: sin, cos, sqrt, inversesqrt, trunc, floor, fract (7 floats)
+    float outputs[];
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    float x = inputs[i];
+    uint base = i * 7u;
+    outputs[base + 0u] = sin(x);
+    outputs[base + 1u] = cos(x);
+    outputs[base + 2u] = sqrt(abs(x));
+    outputs[base + 3u] = inversesqrt(abs(x) + 1e-20);
+    outputs[base + 4u] = trunc(x);
+    outputs[base + 5u] = floor(x);
+    outputs[base + 6u] = fract(x);
+}

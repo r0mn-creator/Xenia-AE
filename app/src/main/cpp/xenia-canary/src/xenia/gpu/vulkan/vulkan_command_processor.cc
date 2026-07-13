@@ -18,6 +18,7 @@
 #include "xenia/base/testrig_debug_server.h"  // TESTRIG(gpu)
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/string_buffer.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/packet_disassembler.h"
@@ -173,9 +174,25 @@ bool VulkanCommandProcessor::SetupContext() {
   // correct everywhere.
   // Qualcomm's Vulkan vendor ID (Adreno).
   constexpr uint32_t kVendorIdQualcomm = 0x5143;
-  memexport_use_compute_ =
-      !device_properties.vertexPipelineStoresAndAtomics ||
-      device_properties.vendorID == kVendorIdQualcomm;
+  // TESTRIG(memexport): OPTION 2 (compute-memexport dispatch, see
+  // GetOrCreateMemExportComputePipeline / kMemExportCompute below) was tested
+  // head-to-head against OPTION 1 (rasterizer-discard vertex stores, see
+  // vulkan_pipeline_cache.cc) on the Halo 3 menu terrain buffer: 5-sample
+  // cold-boot mean 6.32% (4.82-7.14%) for compute vs. OPTION 1's established
+  // ~6.5-7.2% baseline - statistically indistinguishable, same noise band.
+  // Decisive negative result: compute dispatches never go through Adreno's
+  // unreliable position-only binning pass at all, so if store-landing
+  // reliability were the bottleneck, compute should have filled far more
+  // than vertex stores did. It didn't - which rules out "unreliable vertex
+  // stores" as the primary cause and reinforces the separate
+  // trunc()-precision-divergence theory (see
+  // project_xenia_ae_renderdoc_findings.md, July 12) as the real ceiling.
+  // Reverted to OPTION 1 (already-tested, matches the documented baseline);
+  // the compute path is left in place, working, and NFS-Carbon-regression-
+  // tested, in case it's useful for a future non-Adreno-store-reliability
+  // angle.
+  memexport_use_compute_ = false;
+  (void)kVendorIdQualcomm;
   if (memexport_use_compute_) {
     // For memory export from vertex shaders converted to compute shaders - the
     // shared memory and constant descriptor sets and the shared memory barriers
@@ -2683,6 +2700,44 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           vfetch_constant.address << 2, vfetch_constant.size << 2);
       return false;
     }
+    // TESTRIG(halo3-nondeterminism): for any LARGE (likely terrain/scene
+    // mesh, not memexport producer) draw, log every vfetch address it uses,
+    // to check whether it actually reads from the tracked memexport buffer
+    // region (0x0574xxxx) at all - vf slot NUMBERS don't correspond to the
+    // same address across different shaders, so this can't be assumed from
+    // the ucode alone.
+    {
+      uint32_t vf_addr_check = vfetch_constant.address << 2;
+      if (vf_addr_check >= 0x05700000u && vf_addr_check < 0x05800000u) {
+        XELOGI(
+            "ANYFETCH_IN_RANGE sh={:016X} vtxcount={} vf={} addr=0x{:08X} "
+            "size={} eM=0x{:X}",
+            vertex_shader->ucode_data_hash(),
+            primitive_processing_result.host_draw_vertex_count, vfetch_index,
+            vf_addr_check, vfetch_constant.size << 2,
+            uint32_t(vertex_shader->memexport_eM_written()));
+      }
+    }
+    // DEBUG(halo3-vtx): for a MEMEXPORT draw, log the SOURCE data this shader
+    // reads via vfetch (any size). If the source is already garbage/zero, the
+    // problem is an upstream pass; if the source is plausible varying data, this
+    // shader corrupts it (Adreno format-decode / float bug).
+    if (vertex_shader->memexport_eM_written() != 0) {
+      uint32_t saddr = vfetch_constant.address << 2;
+      uint32_t ssize = vfetch_constant.size << 2;
+      const uint32_t* sd =
+          reinterpret_cast<const uint32_t*>(memory_->TranslatePhysical(saddr));
+      uint32_t snz = 0;
+      uint32_t sdw = ssize / 4;
+      for (uint32_t k = 0; k < sdw; ++k) {
+        if (sd[k] != 0) ++snz;
+      }
+      if (sdw >= 4)
+      XELOGI(
+          "MEMSRC sh={:016X} vf={} addr=0x{:08X} size={} nonzero={}/{}",
+          vertex_shader->ucode_data_hash(), vfetch_index, saddr, ssize, snz,
+          sdw);
+    }
     // DEBUG(halo3-vtx): log the actual guest vertex data each draw fetches, at
     // the exact fetch-constant address (no addressing guesswork). Uniform data
     // over a large buffer = the collapse cause is bad DATA; varying data =
@@ -2702,10 +2757,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         uint32_t nonzero_count = 0;
         uint32_t v0 = vd[0];
         bool uniform = true;
-        // First non-zero dword's index, and a sample of dwords starting there,
-        // to see whether the exported data looks like plausible vertex data
-        // (varying floats) or garbage.
+        // Distribution: first/last nonzero, and how many nonzero fall in each
+        // tenth of the buffer. Clustered at the start => a count/culling limit;
+        // scattered throughout => slot scatter (precision collisions).
         uint32_t first_nz = 0xFFFFFFFFu;
+        uint32_t last_nz = 0;
+        uint32_t hist[10] = {0};
         for (uint32_t k = 0; k < dwords; ++k) {
           uint32_t d = vd[k];
           if (d == 0xCAFEF00Du) ++marker_post;
@@ -2713,23 +2770,24 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           if (d != 0) {
             ++nonzero_count;
             if (first_nz == 0xFFFFFFFFu) first_nz = k;
+            last_nz = k;
+            ++hist[(uint64_t(k) * 10) / dwords];
           }
           if (d != v0) uniform = false;
         }
         if (marker_post || marker_pre || uniform || vsize == 573440) {
-          // Sample 6 dwords from the first non-zero region as floats.
-          uint32_t s = (first_nz == 0xFFFFFFFFu) ? 0 : first_nz;
-          if (dwords >= 6 && s > dwords - 6) s = dwords - 6;
+          // TESTRIG(halo3-nondeterminism): identify the CONSUMING draw's own
+          // shader + vertex count, not just the memexport producer - this is
+          // the shader that actually rasterizes the terrain to the screen.
           XELOGI(
-              "VTXDATA idx={} addr=0x{:08X} nonzero={}/{} firstnz={} "
-              "sample[{}]= {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}",
-              vfetch_index, vaddr, nonzero_count, dwords, first_nz, s,
-              *reinterpret_cast<const float*>(&vd[s + 0]),
-              *reinterpret_cast<const float*>(&vd[s + 1]),
-              *reinterpret_cast<const float*>(&vd[s + 2]),
-              *reinterpret_cast<const float*>(&vd[s + 3]),
-              *reinterpret_cast<const float*>(&vd[s + 4]),
-              *reinterpret_cast<const float*>(&vd[s + 5]));
+              "VTXDIST idx={} addr=0x{:08X} nonzero={}/{} firstnz={} lastnz={} "
+              "consumersh={:016X} consumervtx={} "
+              "hist= {} {} {} {} {} {} {} {} {} {}",
+              vfetch_index, vaddr, nonzero_count, dwords, first_nz, last_nz,
+              vertex_shader->ucode_data_hash(),
+              primitive_processing_result.host_draw_vertex_count, hist[0],
+              hist[1], hist[2], hist[3], hist[4], hist[5], hist[6], hist[7],
+              hist[8], hist[9]);
         }
       }
     }
@@ -2746,8 +2804,67 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // DEBUG(halo3-vtx): log memexport target addresses. If 0x0574CA80 (the
     // all-zeros vertex buffer the menu vista fetches) appears here, the menu
     // geometry is memexport-generated -> memexport writeback is the bug.
-    XELOGI("MEMEXPORT_TARGET addr=0x{:08X} size={}",
+    XELOGI("MEMEXPORT_TARGET sh={:016X} vtx={} addr=0x{:08X} size={}",
+           vertex_shader->ucode_data_hash(),
+           primitive_processing_result.host_draw_vertex_count,
            memexport_range_base_bytes, memexport_range.size_bytes);
+    // TESTRIG(halo3-nondeterminism): dump the constants feeding the
+    // trunc+exact-equality branch chain (c220-c229) plus all 32 loop
+    // constants, for the Halo 3 menu terrain shader specifically, once per
+    // draw. Comparing this across cold boots tells us whether the CPU-side
+    // simulation state feeding this shader differs boot-to-boot (a game/
+    // timing-seeded explanation for the observed non-determinism) versus
+    // being identical every boot (which would point at a GPU-side race
+    // instead, since the inputs would be provably the same).
+    if (vertex_shader->ucode_data_hash() == 0x9EA48FC2B26C325Dull) {
+      // TESTRIG(halo3-nondeterminism): one-shot snapshot of the target
+      // buffer's content BEFORE this (the first tracked) draw touches it -
+      // reflects whatever earlier GPU activity this session already left
+      // there (via SharedMemory's page-validity tracking, which skips
+      // re-uploading/re-zeroing from guest RAM once a page is marked
+      // gpu_written). If this is genuinely non-zero on some boots, that's
+      // direct evidence of boot-timing-variable "warm-up" seed state, a
+      // hypothesis distinct from (and not yet ruled out by) the CPU-constant
+      // and GPU-invocation-ordering checks already done.
+      static bool logged_prefill_snapshot = false;
+      if (!logged_prefill_snapshot) {
+        logged_prefill_snapshot = true;
+        const uint32_t* prefill = reinterpret_cast<const uint32_t*>(
+            memory_->TranslatePhysical(memexport_range_base_bytes));
+        uint32_t prefill_nonzero = 0;
+        uint32_t prefill_dwords =
+            std::min<uint32_t>(memexport_range.size_bytes / 4, 143360);
+        uint32_t prefill_first_nz = 0xFFFFFFFFu;
+        for (uint32_t k = 0; k < prefill_dwords; ++k) {
+          if (prefill[k] != 0) {
+            ++prefill_nonzero;
+            if (prefill_first_nz == 0xFFFFFFFFu) prefill_first_nz = k;
+          }
+        }
+        XELOGI(
+            "PREFILL_SNAPSHOT addr=0x{:08X} nonzero={}/{} firstnz={} "
+            "sample0=0x{:08X} sample1=0x{:08X} sample2=0x{:08X}",
+            memexport_range_base_bytes, prefill_nonzero, prefill_dwords,
+            prefill_first_nz, prefill[0], prefill[1], prefill[2]);
+      }
+      const uint32_t* regs = register_file_->values;
+      xe::StringBuffer cbuf;
+      cbuf.Append("CONSTDUMP c220-229:");
+      for (uint32_t c = 220; c <= 229; ++c) {
+        const float* cf = reinterpret_cast<const float*>(
+            &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (c << 2)]);
+        cbuf.AppendFormat(" c{}=({:.9g},{:.9g},{:.9g},{:.9g})", c, cf[0],
+                          cf[1], cf[2], cf[3]);
+      }
+      XELOGI("{}", cbuf.buffer());
+      xe::StringBuffer lbuf;
+      lbuf.Append("CONSTDUMP loop:");
+      for (uint32_t l = 0; l < 32; ++l) {
+        lbuf.AppendFormat(" l{}=0x{:08X}",
+                          l, regs[XE_GPU_REG_SHADER_CONSTANT_LOOP_00 + l]);
+      }
+      XELOGI("{}", lbuf.buffer());
+    }
     if (!shared_memory_->RequestRange(memexport_range_base_bytes,
                                       memexport_range.size_bytes)) {
       XELOGE(
@@ -2892,6 +3009,65 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (testrig_gpu_hot) {  // TESTRIG(gpu)
       ++testrig_total_memexport_draws_;
     }
+  }
+  // TESTRIG(halo3-nondeterminism): unconditionally log any LARGE draw
+  // (likely the actual terrain-rasterizing consumer, not a small memexport
+  // producer) so it can be identified without relying on buffer-size
+  // heuristics that turned out to also match the producer's own
+  // self-referential source read.
+  if (primitive_processing_result.host_draw_vertex_count >= 1000) {
+    XELOGI(
+        "BIGDRAW sh={:016X} vtxcount={} prim={} idxtype={} eM=0x{:X} "
+        "rasterdiscard={}",
+        vertex_shader->ucode_data_hash(),
+        primitive_processing_result.host_draw_vertex_count,
+        uint32_t(primitive_processing_result.host_primitive_type),
+        uint32_t(primitive_processing_result.index_buffer_type),
+        uint32_t(vertex_shader->memexport_eM_written()),
+        vertex_shader->memexport_eM_written() != 0 ? 1 : 0);
+  }
+  // TESTRIG(halo3-menu-vs-3d): log EVERY draw (vertex + pixel shader hash,
+  // vertex count) to find the 2D UI's rendering path - is it a separate,
+  // simple, non-memexport path (as expected), and does it touch the same
+  // guest memory region as the 3D vista at all?
+  XELOGI("ANYDRAW vsh={:016X} psh={:016X} vtxcount={} eM=0x{:X}",
+         vertex_shader->ucode_data_hash(),
+         pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+         primitive_processing_result.host_draw_vertex_count,
+         uint32_t(vertex_shader->memexport_eM_written()));
+  // TESTRIG(halo3-nondeterminism): for the terrain-consuming shader
+  // specifically, log the real PA_CL_VTE_CNTL hardware register - this is
+  // what actually decides whether kSysFlag_WNotReciprocal is set for THIS
+  // draw (i.e. whether the degenerate-W-clip fix's code path even applies
+  // here), instead of assuming it from the ucode alone.
+  if (vertex_shader->ucode_data_hash() == 0x488D9488AB7ED7D8ull) {
+    auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
+    XELOGI(
+        "CONSUMER_VTE vtx_xy_fmt={} vtx_z_fmt={} vtx_w0_fmt={} raw=0x{:08X}",
+        pa_cl_vte_cntl.vtx_xy_fmt, pa_cl_vte_cntl.vtx_z_fmt,
+        pa_cl_vte_cntl.vtx_w0_fmt, pa_cl_vte_cntl.value);
+  }
+  // TESTRIG(halo3-blend): user hypothesis - the 3D scene renders correctly
+  // but a blend mode makes it read as flat blue against the 2D UI
+  // foreground. Log the actual blend state + color mask for the consuming
+  // shader's draws to check directly instead of guessing from ucode.
+  if (vertex_shader->ucode_data_hash() == 0x488D9488AB7ED7D8ull ||
+      vertex_shader->ucode_data_hash() == 0x3D774C769771A211ull) {
+    auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+    auto rb_color_mask = regs.Get<reg::RB_COLOR_MASK>();
+    auto rb_blendcontrol0 = regs.Get<reg::RB_BLENDCONTROL>(
+        XE_GPU_REG_RB_BLENDCONTROL0);
+    XELOGI(
+        "SCENE_BLEND sh={:016X} blend_enable_colorcontrol=0x{:08X} "
+        "colormask=0x{:X} src_color={} dst_color={} comb_color={} "
+        "src_alpha={} dst_alpha={} comb_alpha={}",
+        vertex_shader->ucode_data_hash(), rb_colorcontrol.value,
+        rb_color_mask.value, uint32_t(rb_blendcontrol0.color_srcblend),
+        uint32_t(rb_blendcontrol0.color_destblend),
+        uint32_t(rb_blendcontrol0.color_comb_fcn),
+        uint32_t(rb_blendcontrol0.alpha_srcblend),
+        uint32_t(rb_blendcontrol0.alpha_destblend),
+        uint32_t(rb_blendcontrol0.alpha_comb_fcn));
   }
   if (testrig_gpu_hot) {  // TESTRIG(gpu)
     ++testrig_total_draws_;

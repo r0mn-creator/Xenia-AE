@@ -1,0 +1,63 @@
+#version 450
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer InBuf {
+    float inputs[];
+};
+layout(std430, binding = 1) writeonly buffer OutBuf {
+    // native_sin, native_cos, codywaite_sin, codywaite_cos
+    float outputs[];
+};
+
+const float ONE_OVER_TWO_PI = 0.15915494309189535;
+// Cody-Waite 3-term split of 2*pi, each term exactly representable in
+// float32 with enough trailing zero mantissa bits that k*term stays exact
+// (or far more precise than a single-term reduction) for k up to ~1e5.
+const float TWO_PI_HI = 6.28125;
+const float TWO_PI_MID = 0.0019340515136718750;
+const float TWO_PI_LO = 1.2554282316565513e-06;
+
+float cwSin(float x) {
+    float k = round(x * ONE_OVER_TWO_PI);
+    float r = x - k * TWO_PI_HI;
+    r = r - k * TWO_PI_MID;
+    r = r - k * TWO_PI_LO;
+    float x2 = r * r;
+    float result = -2.3889859e-08;
+    result = result * x2 + 2.7525562e-06;
+    result = result * x2 + -0.00019840874;
+    result = result * x2 + 0.0083333310;
+    result = result * x2 + -0.16666667;
+    result = result * x2 + 1.0;
+    return result * r;
+}
+
+float cwCos(float x) {
+    float k = round(x * ONE_OVER_TWO_PI);
+    float r = x - k * TWO_PI_HI;
+    r = r - k * TWO_PI_MID;
+    r = r - k * TWO_PI_LO;
+    float shifted = r + 1.5707963267948966;
+    float k2 = round(shifted * ONE_OVER_TWO_PI);
+    float r2 = shifted - k2 * TWO_PI_HI;
+    r2 = r2 - k2 * TWO_PI_MID;
+    r2 = r2 - k2 * TWO_PI_LO;
+    float x2 = r2 * r2;
+    float result = -2.3889859e-08;
+    result = result * x2 + 2.7525562e-06;
+    result = result * x2 + -0.00019840874;
+    result = result * x2 + 0.0083333310;
+    result = result * x2 + -0.16666667;
+    result = result * x2 + 1.0;
+    return result * r2;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    float x = inputs[i];
+    uint base = i * 4u;
+    outputs[base + 0u] = sin(x);
+    outputs[base + 1u] = cos(x);
+    outputs[base + 2u] = cwSin(x);
+    outputs[base + 3u] = cwCos(x);
+}

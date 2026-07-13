@@ -2672,6 +2672,25 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   // TODO(Triang3l): Wide lines.
   rasterization_state.lineWidth = 1.0f;
 
+  // TESTRIG(memexport): OPTION 1 - discard rasterization for draws whose vertex
+  // shader does memory export. On tiled GPUs (Adreno) the vertex shader
+  // normally runs in a position-only binning pass plus a shading pass, which
+  // strips/duplicates its memory stores; with rasterization discarded there is
+  // no binning, so the shader runs exactly once and its exported stores land -
+  // using the game's exact shader and float behavior (unlike compute-memexport
+  // re-translation). Safe for Halo 3's memexport (vertex-compaction) draws
+  // because they only output a throwaway degenerate position.
+  // Mutually exclusive with OPTION 2 (compute-memexport,
+  // command_processor_.memexport_use_compute()): when compute is doing the
+  // export, this same draw's vertex shader would otherwise ALSO attempt its
+  // own (unreliable, tiled-binning) memory stores immediately afterward and
+  // could partially overwrite the compute dispatch's clean output - so only
+  // apply this discard-based emulation when compute-memexport is off.
+  if (creation_arguments.vertex_shader->shader().memexport_eM_written() &&
+      !command_processor_.memexport_use_compute()) {
+    rasterization_state.rasterizerDiscardEnable = VK_TRUE;
+  }
+
   VkSampleMask sample_mask = UINT32_MAX;
   VkPipelineMultisampleStateCreateInfo multisample_state = {};
   multisample_state.sType =
