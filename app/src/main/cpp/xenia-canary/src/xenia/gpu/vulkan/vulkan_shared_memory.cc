@@ -481,7 +481,15 @@ void VulkanSharedMemory::GetUsageMasks(Usage usage,
   switch (usage) {
     case Usage::kComputeWrite:
       stage_mask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-      access_mask = VK_ACCESS_SHADER_READ_BIT;
+      // This usage is for compute shaders that WRITE shared memory (the EDRAM
+      // resolve). The access mask must be SHADER_WRITE so the write->read
+      // barrier before a subsequent texture load actually makes those writes
+      // available; a SHADER_READ mask here (the previous value) fails to
+      // publish the resolve's output, so on strict/tiled GPUs (Adreno) the
+      // texture load reads stale/empty data - this is the Halo 3 menu flat-navy
+      // vista bug (the resolved G-buffer is in shared memory but never becomes
+      // visible to the load). Matches upstream Xenia-Canary.
+      access_mask = VK_ACCESS_SHADER_WRITE_BIT;
       return;
     case Usage::kTransferDestination:
       stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;

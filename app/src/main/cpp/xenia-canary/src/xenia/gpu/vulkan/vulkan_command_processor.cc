@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include <unordered_set>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
@@ -1349,6 +1351,47 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {
     return;
+  }
+
+  if (gpu_trace_enabled()) {
+    GpuTrace("SWAP", fmt::format("frontbuffer_ptr=0x{:08X} {}x{}",
+                                 frontbuffer_ptr, frontbuffer_width,
+                                 frontbuffer_height));
+  }
+
+  // TESTRIG(halo3-gbuf): the magenta test proved the deferred composite reaches
+  // the screen, so the vista is lost in its G-buffer INPUT. Dump the guest-RAM
+  // content of the resolved G-buffer targets at swap time (after this frame's
+  // scene resolves). Xenia resolves EDRAM -> shared memory (guest RAM), then
+  // loads textures from there. If these are non-empty (many distinct values),
+  // the scene DID resolve to memory and the break is texture load/invalidation
+  // after resolve; if flat/near-empty, the EDRAM->shared-memory resolve itself
+  // isn't landing on Adreno. One-shot.
+  {
+    static bool logged_gbuf = false;
+    if (!logged_gbuf) {
+      logged_gbuf = true;
+      const uint32_t kGbufAddrs[] = {0x044B0000u, 0x04780000u, 0x043FC000u,
+                                     0x04E20000u};
+      for (uint32_t addr : kGbufAddrs) {
+        const uint32_t* p =
+            reinterpret_cast<const uint32_t*>(memory_->TranslatePhysical(addr));
+        uint32_t nonzero = 0, distinct_est = 0;
+        uint32_t prev = 0xDEADBEEFu;
+        uint32_t sample_dwords = 65536;  // 256KB window
+        for (uint32_t k = 0; k < sample_dwords; ++k) {
+          if (p[k] != 0) ++nonzero;
+          if (p[k] != prev) {
+            ++distinct_est;
+            prev = p[k];
+          }
+        }
+        XELOGI(
+            "GBUF addr=0x{:08X} nonzero={}/{} run_changes={} s0=0x{:08X} "
+            "s1=0x{:08X} s2=0x{:08X}",
+            addr, nonzero, sample_dwords, distinct_est, p[0], p[1], p[2]);
+      }
+    }
   }
 
   // In case the swap command is the only one in the frame.
@@ -2808,6 +2851,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
            vertex_shader->ucode_data_hash(),
            primitive_processing_result.host_draw_vertex_count,
            memexport_range_base_bytes, memexport_range.size_bytes);
+    if (gpu_trace_enabled()) {
+      GpuTrace("MEMEXPORT",
+               fmt::format("sh={:016X} addr=0x{:08X} size={}",
+                           vertex_shader->ucode_data_hash(),
+                           memexport_range_base_bytes,
+                           memexport_range.size_bytes));
+    }
     // TESTRIG(halo3-nondeterminism): dump the constants feeding the
     // trunc+exact-equality branch chain (c220-c229) plus all 32 loop
     // constants, for the Halo 3 menu terrain shader specifically, once per
@@ -3035,6 +3085,66 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
          pixel_shader ? pixel_shader->ucode_data_hash() : 0,
          primitive_processing_result.host_draw_vertex_count,
          uint32_t(vertex_shader->memexport_eM_written()));
+  if (gpu_trace_enabled()) {
+    auto ct_color_info = regs.Get<reg::RB_COLOR_INFO>(
+        reg::RB_COLOR_INFO::rt_register_indices[0]);
+    GpuTrace("DRAW",
+             fmt::format("vsh={:016X} psh={:016X} vtx={} eM=0x{:X} cbase0={}",
+                         vertex_shader->ucode_data_hash(),
+                         pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+                         primitive_processing_result.host_draw_vertex_count,
+                         uint32_t(vertex_shader->memexport_eM_written()),
+                         uint32_t(ct_color_info.color_base)));
+  }
+  // TESTRIG(halo3-rtmap): map which EDRAM render target each distinct draw
+  // targets. The force-vis probe proved the terrain consumer's pixels never
+  // reach the visible framebuffer, so the bug is render-target composition:
+  // the vista is drawn to an offscreen color RT, resolved to a texture, and a
+  // fullscreen pass paints it. Logging color/depth EDRAM base per shader (once
+  // each) shows who-draws-where - if the terrain (488D9488) and the final
+  // presented content sit at different color_base tiles, that confirms the
+  // offscreen-RT structure and pins the resolve/composite as the break.
+  {
+    static std::unordered_set<uint64_t> logged_rtmap;
+    uint64_t vh = vertex_shader->ucode_data_hash();
+    if (logged_rtmap.insert(vh).second) {
+      auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+      auto modecontrol = regs.Get<reg::RB_MODECONTROL>();
+      auto color_mask = regs.Get<reg::RB_COLOR_MASK>();
+      auto depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+      uint32_t cb[4];
+      for (uint32_t i = 0; i < 4; ++i) {
+        cb[i] = regs.Get<reg::RB_COLOR_INFO>(
+                        reg::RB_COLOR_INFO::rt_register_indices[i])
+                    .color_base;
+      }
+      XELOGI(
+          "RTMAP vsh={:016X} psh={:016X} edram_mode={} colormask=0x{:X} "
+          "pitch={} msaa={} cbase=[{},{},{},{}] dbase={}",
+          vh, pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+          uint32_t(modecontrol.edram_mode), color_mask.value,
+          surface_info.surface_pitch, uint32_t(surface_info.msaa_samples),
+          cb[0], cb[1], cb[2], cb[3], depth_info.depth_base);
+      // Also log the guest byte addresses of every texture this draw samples,
+      // so the fullscreen background pass can be correlated against RESOLVE
+      // dest addresses: if it samples an address that a resolve wrote, the
+      // chain is intact (bug = resolve content); if it samples something no
+      // resolve targets, the binding/resolve is the break.
+      xe::StringBuffer tb;
+      tb.AppendFormat("TEXSRC vsh={:016X} addrs=", vh);
+      uint32_t tex_remaining = used_texture_mask;
+      uint32_t tex_index;
+      bool any_tex = false;
+      while (xe::bit_scan_forward(tex_remaining, &tex_index)) {
+        tex_remaining &= ~(uint32_t(1) << tex_index);
+        xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(tex_index);
+        tb.AppendFormat("[fc{}=0x{:08X}]", tex_index, fetch.base_address << 12);
+        any_tex = true;
+      }
+      if (!any_tex) tb.Append("(none)");
+      XELOGI("{}", tb.buffer());
+    }
+  }
   // TESTRIG(halo3-nondeterminism): for the terrain-consuming shader
   // specifically, log the real PA_CL_VTE_CNTL hardware register - this is
   // what actually decides whether kSysFlag_WNotReciprocal is set for THIS
@@ -3046,6 +3156,52 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         "CONSUMER_VTE vtx_xy_fmt={} vtx_z_fmt={} vtx_w0_fmt={} raw=0x{:08X}",
         pa_cl_vte_cntl.vtx_xy_fmt, pa_cl_vte_cntl.vtx_z_fmt,
         pa_cl_vte_cntl.vtx_w0_fmt, pa_cl_vte_cntl.value);
+    // TESTRIG(halo3-consumer-p0): the entire terrain body of this shader is
+    // gated on predicate p0, set at ucode instr 49 by
+    //   setp_ne_push r9.w, c228.xxxx, r0.zzzz
+    // whose interpreter semantics are p0 = (c228.x == 0) && (r0.z != 0), and
+    // r0.z is built (instr 46-47) from exact float comparisons on the FETCHED
+    // vf1 vertex: r0.z = (r7.x >= c229.w ? 1:0) + (r11.w == 0 ? 1:0). If
+    // c228.x is not exactly 0, p0 can NEVER be true and no terrain ever draws
+    // regardless of buffer fill - which would make the whole fill-% hunt a red
+    // herring. Dump the constants that decide p0 (c78,c228,c229) plus the
+    // position-transform constants the p0 body uses (c7,c32-c36,c66-c69,c71,
+    // c77,c223-c227), once per session, to check directly. Prior CONSTDUMP
+    // covered only the PRODUCER (9EA48FC2); this consumer's constants have
+    // never been inspected.
+    static bool logged_consumer_consts = false;
+    if (!logged_consumer_consts) {
+      logged_consumer_consts = true;
+      const uint32_t* regvals = register_file_->values;
+      const uint32_t kConsts[] = {7,  32, 33,  34,  35,  36,  66,  67,
+                                  68, 69, 71,  77,  78,  223, 224, 225,
+                                  226, 227, 228, 229};
+      xe::StringBuffer ccb;
+      ccb.Append("CONSUMER_CONST:");
+      for (uint32_t c : kConsts) {
+        const float* cf = reinterpret_cast<const float*>(
+            &regvals[XE_GPU_REG_SHADER_CONSTANT_000_X + (c << 2)]);
+        ccb.AppendFormat(" c{}=({:.9g},{:.9g},{:.9g},{:.9g})", c, cf[0], cf[1],
+                         cf[2], cf[3]);
+      }
+      XELOGI("{}", ccb.buffer());
+      // The shader moves several constants into registers via the max(c,c)
+      // identity idiom (instr 56: r0=c32; 183: r1=-c5; 184: r0=c6) that feed
+      // the position/normal transform. c32 dumped as NaN above - if c5/c6 are
+      // also NaN/garbage, and especially if the raw bit pattern VARIES across
+      // cold boots, that's a live candidate for both the collapse AND the
+      // non-determinism (uninitialized constant memory -> vendor-divergent NaN
+      // propagation through max/cndeq). Dump raw hex to see exact bit patterns.
+      const uint32_t kRawConsts[] = {5, 6, 32, 58, 60, 74, 230};
+      xe::StringBuffer rcb;
+      rcb.Append("CONSUMER_CONST_RAW:");
+      for (uint32_t c : kRawConsts) {
+        const uint32_t* cu = &regvals[XE_GPU_REG_SHADER_CONSTANT_000_X + (c << 2)];
+        rcb.AppendFormat(" c{}=(0x{:08X},0x{:08X},0x{:08X},0x{:08X})", c, cu[0],
+                         cu[1], cu[2], cu[3]);
+      }
+      XELOGI("{}", rcb.buffer());
+    }
   }
   // TESTRIG(halo3-blend): user hypothesis - the 3D scene renders correctly
   // but a blend mode makes it read as flat blue against the 2D UI
@@ -3192,6 +3348,74 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   return true;
 }
 
+bool VulkanCommandProcessor::gpu_trace_enabled() {
+  // Cached, cheap gate. Unlike the other testrig subsystems, the gputrace flag
+  // defaults OFF (opt-in) - the full pipeline trace is very verbose, so it must
+  // be explicitly turned on and shouldn't spam normal runs:
+  //   adb shell setprop debug.canary.testrig.gputrace 1
+  // Still honors the testrig master switch (master 0 disables everything).
+  static std::atomic<bool> enabled{false};
+  static std::atomic<int64_t> next_check_ms{0};
+  int64_t now_ms = xe::testrig::internal::NowMs();
+  if (now_ms >= next_check_ms.load(std::memory_order_relaxed)) {
+    bool e = xe::testrig::internal::PropertyEnabled(
+                 "debug.canary.testrig.master", true) &&
+             xe::testrig::internal::PropertyEnabled(
+                 "debug.canary.testrig.gputrace", false);
+    enabled.store(e, std::memory_order_relaxed);
+    next_check_ms.store(now_ms + xe::testrig::internal::kHotPathCacheMs,
+                        std::memory_order_relaxed);
+    return e;
+  }
+  return enabled.load(std::memory_order_relaxed);
+}
+
+void VulkanCommandProcessor::GpuTrace(const char* stage,
+                                      const std::string& detail) {
+  static std::atomic<uint64_t> seq{0};
+  XELOGI("GPUTRACE seq={} frame={} {} {}",
+         seq.fetch_add(1, std::memory_order_relaxed), frame_current_, stage,
+         detail);
+}
+
+void VulkanCommandProcessor::TestrigReadbackAndLogBuffer(const char* tag,
+                                                         VkBuffer buffer,
+                                                         uint64_t offset,
+                                                         uint64_t size) {
+  uint32_t copy_size = std::min<uint32_t>(262144u, uint32_t(size));
+  if (!copy_size) return;
+  VkBuffer rbuf = RequestReadbackBuffer(copy_size);
+  if (rbuf == VK_NULL_HANDLE) return;
+  const ui::vulkan::VulkanDevice* const vd = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vd->functions();
+  const VkDevice device = vd->device();
+  VkBufferCopy region = {};
+  region.srcOffset = offset;
+  region.dstOffset = 0;
+  region.size = copy_size;
+  deferred_command_buffer_.CmdVkCopyBuffer(buffer, rbuf, 1, &region);
+  if (!AwaitAllQueueOperationsCompletion()) return;
+  void* mapped = nullptr;
+  if (dfn.vkMapMemory(device, memexport_readback_buffer_memory_, 0, copy_size, 0,
+                      &mapped) == VK_SUCCESS &&
+      mapped) {
+    const uint32_t* p = static_cast<const uint32_t*>(mapped);
+    uint32_t n = copy_size / 4, nonzero = 0, changes = 0, prev = 0xDEADBEEFu;
+    for (uint32_t k = 0; k < n; ++k) {
+      if (p[k] != 0) ++nonzero;
+      if (p[k] != prev) {
+        ++changes;
+        prev = p[k];
+      }
+    }
+    XELOGI(
+        "TESTRIG_READBACK {} nonzero={}/{} changes={} s0=0x{:08X} s1=0x{:08X} "
+        "s2=0x{:08X}",
+        tag, nonzero, n, changes, p[0], p[1], p[2]);
+    dfn.vkUnmapMemory(device, memexport_readback_buffer_memory_);
+  }
+}
+
 bool VulkanCommandProcessor::IssueCopy() {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
@@ -3205,6 +3429,72 @@ bool VulkanCommandProcessor::IssueCopy() {
   if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
                                      written_address, written_length)) {
     return false;
+  }
+  // TESTRIG(halo3-rtmap): every EDRAM->guest-RAM resolve, with the guest
+  // address range it wrote. Correlate against RTMAP (which EDRAM tile the
+  // vista drew to) and against the texture the fullscreen background pass
+  // samples: the chain is vista-draw -> resolve(EDRAM->guest addr A) ->
+  // fullscreen pass samples texture at addr A. A missing resolve, or a
+  // fullscreen pass sampling a different address, is the bug.
+  XELOGI("RESOLVE dest_addr=0x{:08X} length={}", written_address,
+         written_length);
+  if (gpu_trace_enabled()) {
+    GpuTrace("RESOLVE", fmt::format("dest=0x{:08X} length={}", written_address,
+                                    written_length));
+  }
+
+  // TESTRIG(halo3-gbufgpu): read the SHARED-MEMORY GPU BUFFER content at the
+  // vista's G-buffer resolve dest, bypassing the readback memory-accessible
+  // gate below (which skips these GPU-scratch addresses - that's why the
+  // earlier guest-RAM dump read all zeros). This is the decisive instrument:
+  // if the shared memory holds the vista here (many distinct nonzero dwords),
+  // the EDRAM resolve WORKS and the break is the texture LOAD from shared
+  // memory; if it's zeros, the break is upstream (host-RT->edram_buffer dump or
+  // the resolve compute). Read-only - does NOT write guest RAM. One-shot per
+  // address.
+  {
+    static int gbufgpu_dumps = 0;
+    if (gbufgpu_dumps < 9 && written_length >= 4096 &&
+        (written_address == 0x044B0000u || written_address == 0x04780000u ||
+         written_address == 0x043FC000u)) {
+      ++gbufgpu_dumps;
+      uint32_t copy_size = std::min<uint32_t>(262144u, written_length);
+      VkBuffer rbuf = RequestReadbackBuffer(copy_size);
+      if (rbuf != VK_NULL_HANDLE) {
+        const ui::vulkan::VulkanDevice* const vd = GetVulkanDevice();
+        const ui::vulkan::VulkanDevice::Functions& dfn = vd->functions();
+        const VkDevice device = vd->device();
+        shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+        VkBufferCopy region = {};
+        region.srcOffset = written_address;
+        region.dstOffset = 0;
+        region.size = copy_size;
+        deferred_command_buffer_.CmdVkCopyBuffer(shared_memory_->buffer(), rbuf,
+                                                 1, &region);
+        if (AwaitAllQueueOperationsCompletion()) {
+          void* mapped = nullptr;
+          if (dfn.vkMapMemory(device, memexport_readback_buffer_memory_, 0,
+                              copy_size, 0, &mapped) == VK_SUCCESS &&
+              mapped) {
+            const uint32_t* p = static_cast<const uint32_t*>(mapped);
+            uint32_t n = copy_size / 4, nonzero = 0, changes = 0,
+                     prev = 0xDEADBEEFu;
+            for (uint32_t k = 0; k < n; ++k) {
+              if (p[k] != 0) ++nonzero;
+              if (p[k] != prev) {
+                ++changes;
+                prev = p[k];
+              }
+            }
+            XELOGI(
+                "GBUFGPU addr=0x{:08X} nonzero={}/{} changes={} s0=0x{:08X} "
+                "s1=0x{:08X} s2=0x{:08X}",
+                written_address, nonzero, n, changes, p[0], p[1], p[2]);
+            dfn.vkUnmapMemory(device, memexport_readback_buffer_memory_);
+          }
+        }
+      }
+    }
   }
 
   // CPU readback resolve path (if not disabled).

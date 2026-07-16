@@ -1040,6 +1040,18 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
     return true;
   }
 
+  // TESTRIG(halo3-rtmap): the EDRAM source tile of each resolve, paired with
+  // its guest destination. Correlated with RTMAP (which EDRAM tile each draw
+  // wrote) and SWAPSRC (front buffer = 0x04E20000), this completes the chain:
+  // front buffer <- which resolve <- which EDRAM tile <- which draws. Shows
+  // whether the 3D vista's EDRAM tile ever resolves into the presented buffer.
+  XELOGI(
+      "RESOLVESRC copy_src_select={} color_base={} depth_base={} "
+      "dest_base=0x{:08X}",
+      uint32_t(resolve_info.rb_copy_control.copy_src_select),
+      resolve_info.color_original_base, resolve_info.depth_original_base,
+      resolve_info.copy_dest_base);
+
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();

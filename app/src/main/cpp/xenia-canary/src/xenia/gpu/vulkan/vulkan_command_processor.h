@@ -164,6 +164,26 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // stacking both memexport mechanisms on the same draw.
   bool memexport_use_compute() const { return memexport_use_compute_; }
 
+  // TESTRIG(gpu-trace): unified, toggleable GPU pipeline trace. gpu_trace_enabled()
+  // is a cheap cached check of `debug.canary.testrig.gputrace` (with the
+  // testrig master toggle) - flip live with
+  //   adb shell setprop debug.canary.testrig.gputrace 1   (0 to disable)
+  // GpuTrace() emits one ordered line per pipeline event:
+  //   GPUTRACE seq=<global monotonic> frame=<frame> <STAGE> <detail>
+  // so every step core->screen (submit/draw/memexport/resolve/texload/swap) can
+  // be followed in exact fire order. Callers must gate on gpu_trace_enabled()
+  // before building the detail string to keep it free when disabled.
+  bool gpu_trace_enabled();
+  void GpuTrace(const char* stage, const std::string& detail);
+
+  // TESTRIG(gpu-trace): copy a region of a GPU buffer to a host-visible buffer,
+  // full-sync, and log a content histogram (nonzero/distinct/samples). Exposed
+  // so other GPU subsystems (e.g. the texture cache reading its load scratch
+  // buffer) can inspect intermediate GPU-side content without their own
+  // readback/sync plumbing. Read-only, heavy (full GPU idle) - diagnostics use.
+  void TestrigReadbackAndLogBuffer(const char* tag, VkBuffer buffer,
+                                   uint64_t offset, uint64_t size);
+
   // Returns the deferred drawing command list for the currently open
   // submission.
   DeferredCommandBuffer& deferred_command_buffer() {

@@ -917,6 +917,11 @@ VkImageView VulkanTextureCache::RequestSwapTexture(
     xenos::TextureFormat& format_out) {
   const auto& regs = register_file();
   xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(0);
+  // TESTRIG(halo3-rtmap): the guest address actually presented to the screen.
+  // Correlate against RESOLVE dest addrs to find which resolve feeds the front
+  // buffer, then trace backward to see if the 3D vista made it into that
+  // buffer (vs. the front buffer being a navy-cleared image nothing drew into).
+  XELOGI("SWAPSRC addr=0x{:08X}", fetch.base_address << 12);
   TextureKey key;
   BindingInfoFromFetchConstant(fetch, key, nullptr);
   if (!key.is_valid || key.base_page == 0 ||
@@ -1163,6 +1168,43 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   bool is_3d_tiling = is_3d || vulkan_texture.force_load_3d_tiling();
   uint32_t width = texture_key.GetWidth();
   uint32_t height = texture_key.GetHeight();
+
+  // TESTRIG(halo3-texload): log the load parameters for the menu vista's
+  // G-buffer textures (base_page of 0x044B0000/0x04780000/0x043FC000), to see
+  // which load path (tiled vs linear), guest format, and load shader handle
+  // them - the composite samples these but gets uniform/empty despite the
+  // shared memory being full. base_page = addr >> 12.
+  {
+    uint32_t bp = texture_key.base_page;
+    static int cnt_44b0 = 0, cnt_4780 = 0, cnt_43fc = 0;
+    int* cnt = bp == 0x44B0u   ? &cnt_44b0
+               : bp == 0x4780u ? &cnt_4780
+               : bp == 0x43FCu ? &cnt_43fc
+                               : nullptr;
+    if (cnt) {
+      ++*cnt;
+      // Log the first few loads and then periodically, so a single early load
+      // (no reload despite per-frame resolves = invalidation ineffective) is
+      // distinguishable from a per-frame reload (would sample fresh content).
+      if (*cnt <= 3 || (*cnt % 128) == 0) {
+        XELOGI(
+            "TEXLOAD base_page=0x{:X} count={} tiled={} fmt={} dim={} {}x{} "
+            "load_shader={} scaled_resolve={} signed_sep={}",
+            bp, *cnt, uint32_t(texture_key.tiled), uint32_t(texture_key.format),
+            uint32_t(texture_key.dimension), width, height,
+            uint32_t(load_shader), uint32_t(texture_key.scaled_resolve),
+            uint32_t(texture_key.signed_separate));
+      }
+    }
+  }
+  if (command_processor_.gpu_trace_enabled()) {
+    command_processor_.GpuTrace(
+        "TEXLOAD",
+        fmt::format("base=0x{:08X} {}x{} tiled={} fmt={} load_shader={}",
+                    texture_key.base_page << 12, width, height,
+                    uint32_t(texture_key.tiled), uint32_t(texture_key.format),
+                    uint32_t(load_shader)));
+  }
   uint32_t depth_or_array_size = texture_key.GetDepthOrArraySize();
   uint32_t depth = is_3d ? depth_or_array_size : 1;
   uint32_t array_size = is_3d ? 1 : depth_or_array_size;
@@ -1564,6 +1606,24 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
           kLoadDescriptorSetIndexConstants, 1, &descriptor_set_constants, 0,
           nullptr);
       command_processor_.SubmitBarriers(true);
+      // TESTRIG(halo3-dispatch): log the actual load compute dispatch params
+      // for the main vista G-buffer (0x44B0). If groups/size are degenerate,
+      // the load writes little/nothing (uniform image); if they're correct, the
+      // bug is inside the load compute shader for this format on Adreno.
+      {
+        static int dl = 0;
+        if (texture_key.base_page == 0x44B0u && dl++ < 3) {
+          XELOGI(
+              "TEXDISPATCH base=0x44B0 groups=({},{},{}) size_blocks=({},{},{}) "
+              "guest_pitch_aligned={} host_pitch={} host_buffer_size={} "
+              "guest_offset={} host_offset={}",
+              group_count_x, group_count_y, load_constants.size_blocks[2],
+              load_constants.size_blocks[0], load_constants.size_blocks[1],
+              load_constants.size_blocks[2], load_constants.guest_pitch_aligned,
+              load_constants.host_pitch, uint32_t(host_buffer_size),
+              load_constants.guest_offset, load_constants.host_offset);
+        }
+      }
       command_buffer.CmdVkDispatch(group_count_x, group_count_y,
                                    load_constants.size_blocks[2]);
       load_constants.guest_offset += level_array_slice_stride_bytes_scaled;

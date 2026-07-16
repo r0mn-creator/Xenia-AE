@@ -20,9 +20,13 @@ import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
+import android.os.SystemClock;
 import android.util.Log;
+import android.view.InputDevice;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 
 import androidx.annotation.NonNull;
@@ -30,6 +34,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.documentfile.provider.DocumentFile;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentActivity;
+import androidx.recyclerview.widget.RecyclerView;
 import androidx.viewpager2.adapter.FragmentStateAdapter;
 import androidx.viewpager2.widget.ViewPager2;
 
@@ -67,6 +72,9 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
     private static final String PREF_GAME_DIR = "game_dir";
 
     private int mPendingArtIndex = -1;
+
+    /** Field (not a local in _on_create) so controller input handlers below can reach it. */
+    private ViewPager2 mPager;
 
     static final List<GameEntry> sGames = new ArrayList<>();
 
@@ -203,7 +211,8 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
         final MaterialToolbar toolbar = findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
 
-        final ViewPager2 pager = findViewById(R.id.pager);
+        mPager = findViewById(R.id.pager);
+        final ViewPager2 pager = mPager;
         final TabLayout tabs = findViewById(R.id.tabs);
 
         pager.setAdapter(new PagerAdapter(this));
@@ -219,6 +228,10 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
         final FloatingActionButton fab = findViewById(R.id.fab_add_games);
         fab.setOnClickListener(v -> showAddDialog());
         fab.setVisibility(View.VISIBLE);
+
+        // Controller support: land D-pad/stick focus somewhere sensible on the
+        // starting tab without requiring an extra press first.
+        focusCurrentPageContent();
 
         pager.registerOnPageChangeCallback(new ViewPager2.OnPageChangeCallback() {
             @Override
@@ -419,11 +432,161 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
 
     @Override
     public boolean onKeyDown(int keyCode,KeyEvent event){
-        if(keyCode==KeyEvent.KEYCODE_BACK){
+        if(keyCode==KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_BUTTON_B){
             finish();
             return true;
         }
+        // Controller support for the Profiles/Games/Settings tab strip: bumpers
+        // switch tabs, A accepts the focused item. D-pad navigation within a tab
+        // needs no extra code here - it's handled by Android's normal focus
+        // search, since every row/card layout already declares focusable="true".
+        // Guarded on repeatCount==0 so holding a button doesn't fire it on
+        // every auto-repeat tick.
+        if (event.getRepeatCount() == 0) {
+            if (keyCode == KeyEvent.KEYCODE_BUTTON_L1) {
+                moveTab(-1);
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_BUTTON_R1) {
+                moveTab(1);
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_BUTTON_A) {
+                if (performAcceptOnFocused()) return true;
+            }
+        }
         return super.onKeyDown(keyCode,event);
+    }
+
+    /** Switches the tab strip by delta (-1/+1), clamped to the tab range, then
+     *  moves focus into the new tab's content so D-pad/stick keep working
+     *  without an extra press. */
+    private void moveTab(int delta) {
+        if (mPager == null) return;
+        final int next = Math.max(0, Math.min(2, mPager.getCurrentItem() + delta));
+        if (next == mPager.getCurrentItem()) return;
+        mPager.setCurrentItem(next, true);
+        focusCurrentPageContent();
+    }
+
+    /** Requests focus on the current tab's fragment content once it's laid out -
+     *  ViewPager2 + FragmentStateAdapter tags fragments "f<position>". A plain
+     *  root.requestFocus() isn't enough for a RecyclerView-based page (Games):
+     *  RecyclerView claims focus for itself rather than descending into its
+     *  first item view (confirmed via uiautomator - descendantFocusability
+     *  alone doesn't override this), which would leave A-to-accept unable to
+     *  do anything on first landing. So if the page contains a RecyclerView,
+     *  its first item is focused directly instead. */
+    private void focusCurrentPageContent() {
+        if (mPager == null) return;
+        mPager.post(() -> {
+            final Fragment f = getSupportFragmentManager()
+                    .findFragmentByTag("f" + mPager.getCurrentItem());
+            if (f == null || f.getView() == null) return;
+            final View root = f.getView();
+            final RecyclerView recycler = findRecyclerView(root);
+            if (recycler != null) {
+                focusFirstRecyclerItem(recycler);
+            } else {
+                root.requestFocus();
+            }
+        });
+    }
+
+    private static RecyclerView findRecyclerView(View v) {
+        if (v instanceof RecyclerView) return (RecyclerView) v;
+        if (v instanceof ViewGroup) {
+            final ViewGroup group = (ViewGroup) v;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                final RecyclerView found = findRecyclerView(group.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    /** Focuses the RecyclerView's first item, waiting one more frame if items
+     *  haven't been laid out yet (falls back to focusing the RecyclerView
+     *  itself - still D-pad/stick navigable, just not directly A-clickable -
+     *  rather than leaving focus nowhere). */
+    private void focusFirstRecyclerItem(RecyclerView recycler) {
+        final View child = recycler.getChildAt(0);
+        if (child != null) {
+            child.requestFocus();
+            return;
+        }
+        recycler.post(() -> {
+            final View c = recycler.getChildAt(0);
+            if (c != null) c.requestFocus();
+            else recycler.requestFocus();
+        });
+    }
+
+    /** A button: click whatever currently has focus (game card, settings row,
+     *  tab, FAB...). Returns false if nothing focused/clickable, so the caller
+     *  can fall through to default handling instead of swallowing the press. */
+    private boolean performAcceptOnFocused() {
+        final View v = getCurrentFocus();
+        if (v != null && v.isClickable()) {
+            v.performClick();
+            return true;
+        }
+        return false;
+    }
+
+    private static final float STICK_DEADZONE = 0.5f;
+    private static final long STICK_REPEAT_MS = 220;
+    private long mLastStickMoveMs = 0;
+    private int mLastStickDx = 0;
+    private int mLastStickDy = 0;
+
+    // Left thumbstick as D-pad-style focus movement. Unlike the physical D-pad
+    // (which already arrives as KEYCODE_DPAD_* KeyEvents that Android's default
+    // focus search handles for free), analog stick input only ever arrives as
+    // continuous MotionEvent axis samples - there's no built-in translation to
+    // discrete focus moves, so it's done by hand here with a deadzone and a
+    // repeat delay (otherwise a held stick would try to move focus on every
+    // single motion sample, far faster than useful).
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if ((event.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                && event.getAction() == MotionEvent.ACTION_MOVE) {
+            final float x = event.getAxisValue(MotionEvent.AXIS_X);
+            final float y = event.getAxisValue(MotionEvent.AXIS_Y);
+            final int dx = Math.abs(x) > STICK_DEADZONE ? (x > 0 ? 1 : -1) : 0;
+            final int dy = Math.abs(y) > STICK_DEADZONE ? (y > 0 ? 1 : -1) : 0;
+            if (dx != 0 || dy != 0) {
+                final long now = SystemClock.uptimeMillis();
+                final boolean directionChanged = dx != mLastStickDx || dy != mLastStickDy;
+                if (directionChanged || now - mLastStickMoveMs >= STICK_REPEAT_MS) {
+                    mLastStickMoveMs = now;
+                    mLastStickDx = dx;
+                    mLastStickDy = dy;
+                    // One axis at a time, like a real D-pad - vertical wins on a
+                    // diagonal push since grids/lists scroll vertically here.
+                    final int direction = dy < 0 ? View.FOCUS_UP
+                            : dy > 0 ? View.FOCUS_DOWN
+                            : dx < 0 ? View.FOCUS_LEFT
+                            : View.FOCUS_RIGHT;
+                    moveFocus(direction);
+                }
+            } else {
+                mLastStickDx = 0;
+                mLastStickDy = 0;
+            }
+            return true;
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
+
+    private void moveFocus(int direction) {
+        final View current = getCurrentFocus();
+        if (current == null) {
+            focusCurrentPageContent();
+            return;
+        }
+        final View next = current.focusSearch(direction);
+        if (next != null) next.requestFocus();
     }
 
     @Override

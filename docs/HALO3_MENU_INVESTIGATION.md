@@ -819,3 +819,483 @@ a boot but varies boot-to-boot with proven-identical CPU-fed constants,
 proven-correct cross-draw ordering, and now proven-irrelevant store
 mechanism - something about actual per-invocation GPU execution timing/
 scheduling on Adreno itself remains the standing, unexplained cause.
+
+## Consumer shader `488D9488AB7ED7D8` predicate `p0` DECODED (from ucode + interpreter ground truth)
+
+Pulled the actual disassembled ucode (device `shaderdump/`) for the terrain
+consumer and decoded the master predicate that gates its entire body.
+
+**Instruction 49:** `setp_ne_push r9.w, c228.xxxx, r0.zzzz`. Per Xenia's own
+CPU interpreter (`shader_interpreter.cc` `kSetpNePush`), the semantics are:
+`p0 = (src0.w == 0.0) && (src1.w != 0.0)` = **`p0 = (c228.x == 0.0) && (r0.z != 0.0)`**.
+
+`r0.z` is built (instr 46-47) from **exact float comparisons on the FETCHED
+vf1 vertex** (vf1 = the memexport target the producer fills):
+`r0.z = (r7.x >= c229.w ? 1:0) + (r11.w == 0.0 ? 1:0)`, where r7/r11 come from
+`vfetch ... vf1` at computed index r0.y.
+
+### Runtime constants dumped (CONSUMER_CONST diagnostic, one-shot, kept)
+`c228 = (0, 1, 8, 30)` → **c228.x is EXACTLY 0.0**, so the first p0 term is
+always satisfied: **the terrain path is NOT globally gated off**. p0 reduces
+to `r0.z != 0`. `c229 = (0.5, -3, -2, 1)` → c229.w = 1.0.
+
+### The important reframe: invalid/unfilled vertices RUN the body (opposite of the prior assumption)
+For an UNFILLED compaction slot (all-zero fetch): r7.x = 0, r11.w = 0 →
+`r0.z = (0 >= 1 ? 1:0) + (0 == 0 ? 1:0) = 0 + 1 = 1` → `r0.z != 0` →
+**p0 = TRUE**. So the ~93% of vertices whose slots the producer never filled
+do NOT get skipped - they execute the FULL position/lighting body on zeroed
+input. The earlier working theory ("invalid → p0 false → body skipped →
+degenerate leftover position") was backwards. This means the visible collapse
+is 93% of vertices running the terrain math on zero input and landing wherever
+that math sends them (a tight degenerate cluster / off-screen / NaN), painting
+over the sparse ~7% of real vertices - which reconciles perfectly with the
+long-standing "fill % 5-14% with ZERO visible correlation" observation: it's
+not the amount of real data that decides the look, it's the flood of
+zero-input vertices that all render regardless.
+
+### New anomaly found and tested: `c32` is a NaN constant in the position path
+`c32 = (0x7FC00000, 0, 0, 0x7FC00000)` - the x lane is the **canonical quiet
+NaN**, bit-stable across cold boots (so NOT the non-determinism source). The
+shader moves it into a register via the max(c,c) identity-move idiom
+(instr 56: `(p0) max r0, c32.xxxx`), making r0 = NaN in all lanes; it then
+propagates into r4.y/r4.w (instr 70) before being consumed by seq/cndeq
+comparisons - exactly the ops where Adreno (which does not request
+`SignedZeroInfNanPreserve`) may legally fold NaN-comparisons differently than
+desktop RADV. Looked like a strong lead.
+
+**Tested: flushed all NaN vertex-float-constants to 0.0 on upload. The menu
+did not change at all (still flat navy, fill 5.47%, in-range).** So the c32
+NaN, while a genuine latent oddity, is NOT what collapses the visible terrain -
+consistent with the fill-%/visual decorrelation. Reverted the flush (it changes
+seq/cndeq semantics for any NaN-carrying constant, so it's not a safe keeper).
+The one-shot `CONSUMER_CONST` diagnostic was kept.
+
+### Where the p0 decode leaves it
+The decode is conclusive and reframes the visual mechanism, but it points the
+root cause right back at the **producer fill** (the hard, boot-to-boot
+non-deterministic core): the consumer faithfully runs on whatever the producer
+gives it, and with only ~7% of slots filled, the zero-input majority dominates
+the frame. The two concrete, not-yet-tried directions this unlocks:
+1. **Cull zero-input vertices in the consumer** (force oPos to clip when the
+   fetched vf1 vertex is entirely zero) - purely removes the garbage flood;
+   would reveal whether the sparse ~7% real vertices actually form recognizable
+   (if incomplete) terrain, which would definitively separate "producer fills
+   too little" from "producer fills WRONG data." A clean diagnostic-by-culling.
+2. Keep attacking producer fill (the standing non-determinism), which remains
+   the true blocker.
+
+## ★★★★★ BREAKTHROUGH: the geometry was never the blocker - the terrain draws don't composite to the screen ★★★★★
+
+Decisive "does the draw path even reach the framebuffer" probe. Hash-gated to
+the terrain consumer `488D9488AB7ED7D8`, in `CompleteVertexOrTessEvalShaderInMain`
+DISCARDED the shader's computed position entirely and forced every triangle to
+span most of NDC (vertex_index%3 -> three screen corners). Then, to remove
+fixed-function confounds, also force-overrode this shader's pipeline
+(`vulkan_pipeline_cache.cc`): `cullMode = NONE`, `depthTestEnable = FALSE`,
+`depthWriteEnable = FALSE`, blend disabled, full color write mask.
+
+**Result: the menu background stayed EXACTLY flat navy. No color flood, no
+change whatsoever** - while the log confirms this shader drew **15,795 times**
+that frame (so the override was unquestionably live). Forcing guaranteed-
+fullscreen, guaranteed-visible, depth/cull/blend-neutralized geometry from the
+terrain consumer produces ZERO visible pixels.
+
+### What this proves
+The terrain consumer's draws do **not** land in the visible framebuffer. The
+entire prior investigation - memexport fill %, producer non-determinism,
+trunc/precision, degenerate-W, the p0 predicate, the c32 NaN - was chasing the
+GEOMETRY of a shader whose output never reaches the screen in the first place.
+Geometry correctness was never the thing standing between us and a visible
+background.
+
+The overwhelmingly likely structure (standard for a console menu 3D vista):
+the terrain/vista renders to an **offscreen 3D render target**, which is then
+**resolved to a texture** and drawn as the menu background by a **separate
+fullscreen pass**. The break is in that resolve-and-composite path on Adreno,
+NOT in the vista geometry. This fits the oldest note in the project memory -
+that the Halo 3 corruption is "AE-specific in the FORKED Vulkan GPU backend
+(texture_cache / render_target_cache)".
+
+### Draw census at the menu (distinct vsh/psh/vtxcount/eM signatures)
+- `9EA48FC2B26C325D` vtx=16 **eM=0x1** - the memexport producer (compaction).
+- `488D9488AB7ED7D8` vtx=64 eM=0x0 - the terrain consumer (proven offscreen
+  above).
+- `FED9E00DE375B2D4` / `3D774C769771A211` vtx=306-426 - large scene-geometry
+  draws with real pixel shaders, drawn heavily (candidate actual 3D vista, or
+  its resolve consumers).
+- `B2771A0FDDE3B29E` vtx=4 - 4-vertex draws (classic fullscreen-quad /
+  composite shape - prime suspect for the pass that's SUPPOSED to paint the
+  vista as the background).
+- `4B00BAD98B735E75` vtx=38-67 - the 2D UI shader (renders correctly).
+- `C049A8C9E556F129` vtx=1 - huge count of 1-vertex draws.
+
+### The new, correct next direction
+Stop investigating vista geometry. Instead trace the **render-target
+composition**: which color RT (EDRAM base) each of these draws targets, whether
+the offscreen 3D RT is resolved to a texture, and whether the fullscreen
+background pass actually samples that texture (vs. sampling an
+unresolved/wrong/navy-cleared image) on Adreno. Concretely:
+1. Log the color RT EDRAM base + host VkImage for each distinct draw signature,
+   and for `IssueSwap`'s presented image, to map who-draws-where.
+2. Find the fullscreen background pass (likely `B2771A0F` vtx=4) and check what
+   texture it samples and whether that texture ever received a resolve from the
+   3D RT.
+3. This is a render_target_cache / texture_cache resolve-path bug on the tiled
+   Adreno GPU, which is exactly the class of bug desktop RADV tolerates and
+   Adreno does not.
+
+All force-vis probes were REVERTED (they destroy the shader's real geometry);
+only the harmless one-shot `CONSUMER_CONST` diagnostic was kept.
+
+## Render-target composition FULLY MAPPED - the vista is a deferred-shading scene; prime suspect is the 4x MSAA resolve on Adreno
+
+Added safe (no force-vis) diagnostics: `RTMAP` (EDRAM color/depth base per
+shader, once each), `TEXSRC` (guest addresses each draw samples), `RESOLVE` /
+`RESOLVESRC` (EDRAM source tile -> guest dest of every resolve), and `SWAPSRC`
+(the guest address actually presented). Together they reconstruct the entire
+menu frame graph:
+
+### The frame graph
+1. **3D vista renders at 4x MSAA (msaa=2) to EDRAM tile 608** (RT0) + tile 1216
+   (RT1), pitch 1160. Bulk scene shaders: `FED9E00D`, `3D774C76`, `D584861E`,
+   `D75B5EB3`, `DF62E069`, `9BC49A6E`, etc.
+2. **EDRAM 608/1216 resolve to the G-buffer textures** in guest RAM:
+   `0x043FC000`, `0x044B0000`, `0x04780000` (RESOLVESRC: color_base=608/1216 ->
+   those dests). Many deferred passes then SAMPLE those (TEXSRC).
+3. **Deferred composite**: `831761DEED869F91` samples the G-buffer
+   (`0x044B0000`, `0x043FC000`) and writes to **EDRAM tile 1216 non-MSAA**
+   (pitch 1200, msaa=0) - the final lit image.
+4. **EDRAM 1216 resolves to the front buffer 0x04E20000** (RESOLVESRC: 830x
+   copy_src_select=0 color_base=1216 -> dest 0x04E20000).
+5. **SWAPSRC = 0x04E20000** every frame - confirmed the presented image.
+
+### Why this indicts the MSAA resolve specifically
+- The **2D UI renders correctly** and is composited fine.
+- The entire **3D scene is the only thing that's MSAA (4x)**; the UI and the
+  final composite/present passes are non-MSAA (pitch 1200, msaa=0).
+- 4x-MSAA-EDRAM -> texture resolve on a **tiled Adreno GPU** is exactly the
+  class of operation that desktop RADV handles transparently and a tiled
+  renderer's EDRAM emulation frequently gets wrong (tile ownership, sample
+  layout, resolve shader). If step 2 (resolve the MSAA vista to the G-buffer)
+  produces empty/navy on Adreno, every downstream deferred pass composites
+  navy, the front buffer is navy where the vista should be, and the non-MSAA UI
+  still lands correctly on top - which is EXACTLY the observed picture.
+- Independent corroboration: force-vis'ing the MSAA composite pass `3D774C76`
+  fullscreen caused an immediate **VK_ERROR_DEVICE_LOST** on Adreno - the MSAA
+  scene path is genuinely fragile on this driver, whereas the same probe on the
+  non-MSAA terrain shader ran fine (just invisible).
+
+### The concrete next step
+Investigate the render_target_cache MSAA-resolve path on Adreno:
+1. Confirm the vista's msaa=2 EDRAM tile 608 resolve to `0x044B0000` actually
+   produces non-empty content on Adreno (dump/compare the resolved host image,
+   or the guest RAM if readback is on).
+2. Test forcing the scene to 1x (msaa=0) - if the vista appears (even
+   aliased), the MSAA resolve is confirmed as the break.
+3. Compare AE's Vulkan MSAA EDRAM resolve implementation against upstream
+   Xenia-Canary's (this is the forked backend the oldest project note already
+   fingered: texture_cache / render_target_cache).
+
+This is a completely different, well-evidenced, and far more specific target
+than the geometry/memexport rabbit hole the investigation lived in for weeks.
+All force-vis probes reverted; the RTMAP/TEXSRC/RESOLVE/RESOLVESRC/SWAPSRC
+diagnostics were kept (safe, read-only, and exactly what's needed to verify the
+MSAA-resolve fix).
+
+## MSAA=0 test: NEGATIVE - MSAA resolve is NOT the cause
+
+Forced all rendering to 1x by clearing the msaa_samples field (bits 16-17) of
+RB_SURFACE_INFO in the register file at the top of IssueDraw AND IssueCopy
+(so render-target creation, render pass, pipeline multisample state, and the
+resolve all read a consistent 1x). Verified effective: every RTMAP line now
+reports `msaa=0` (previously many were `msaa=2` = 4x), no device loss, emulator
+stable, menu still fully functional.
+
+**Result: the vista is STILL flat navy at 1x.** The prime suspect - the
+4x-MSAA EDRAM->texture resolve on tiled Adreno - is RULED OUT. The deferred
+scene fails to appear for a reason independent of MSAA. Reverted.
+
+### What this leaves
+The scene draws execute, resolve to the G-buffer textures, the deferred
+composite (831761DE) reads them and writes the front-buffer-feeding tile, yet
+the vista never appears - and it's not MSAA. The remaining fork:
+1. The scene geometry isn't actually rendering into EDRAM/the G-buffer, OR
+2. The intermediate render-target-to-texture round-trip is broken on Adreno
+   independent of MSAA - i.e. the resolved G-buffer host image isn't picked up
+   when the downstream deferred passes sample those addresses as textures
+   (the RT-as-texture aliasing path in the forked texture_cache). This is the
+   stronger candidate: it's exactly the kind of thing RADV handles and a
+   tiled-GPU EDRAM emulation gets wrong, and it's the `texture_cache` half of
+   the backend the oldest project note fingered.
+
+### Cleanest next test
+Force the composite pass 831761DE's PIXEL shader to output a solid color
+(safe - no geometry change, unlike the vertex force-vis that device-lost on the
+MSAA pass). If the background turns that solid color, 831761DE DOES reach the
+screen and the bug is its G-buffer INPUT (RT-as-texture aliasing / resolve
+content). If it stays navy, the composite's own output never reaches the front
+buffer. Either way it bisects the remaining chain in one test.
+
+## ★★★★★ DECISIVE: composite reaches the screen - the vista is lost in the EDRAM-resolve-to-texture data path ★★★★★
+
+### Test 1 (magenta): the deferred composite DOES reach the screen
+Forced the composite pixel shader `373E65D9ADCF4380` (paired with vsh
+`831761DE`, the pass that reads the resolved G-buffer and writes EDRAM tile
+1216 -> front buffer) to output solid magenta. **The entire background flooded
+magenta**, with the 2D UI correctly composited on top. So the composite's
+output path, the EDRAM-1216 -> front-buffer resolve, and presentation ALL work.
+The vista is lost in the composite's **G-buffer INPUT**.
+
+### Test 2 (G-buffer content): everything lives in host images, not guest RAM
+Dumped guest-RAM content at the G-buffer addresses AND the front buffer at swap
+time: `0x044B0000`, `0x04780000`, `0x043FC000`, `0x04E20000` are ALL exactly
+zero in CPU guest RAM (nonzero=0/65536) - yet the front buffer clearly presents
+on screen. Confirms AE uses **host render-target images** (Path::kHostRenderTargets):
+resolved data lives in the GPU shared-memory buffer / host VkImages, and CPU
+guest RAM is never written. So the composite reading the G-buffer depends
+entirely on the EDRAM-resolve-to-shared-memory-to-texture chain, all GPU-side.
+
+### Code trace: the resolve->texture chain is wired correctly
+- The resolve writes EDRAM -> shared memory via a compute shader
+  (`vulkan_render_target_cache.cc` ~1197, storage-buffer write to
+  `shared_memory.buffer()` at `copy_dest_base`).
+- After writing, it calls `texture_cache.MarkRangeAsResolved(...)` (line 1308)
+  -> `RangeWrittenByGpu(..., is_resolve=true)` -> `FireWatches` -> invalidates
+  overlapping textures so the composite reloads fresh data. This IS present and
+  correct - the "missing texture invalidation" hypothesis was checked and
+  DISPROVEN.
+
+### Where the break must be (the remaining, well-scoped target)
+Since the resolve->shared-memory write and the texture invalidation are both
+wired, and the composite still samples empty/navy on Adreno while desktop RADV
+renders the vista, the break is **upstream of the shared-memory write**, in the
+host-render-target EDRAM emulation:
+1. The **host RT image -> edram_buffer_ dump** (`PerformTransfersAndResolveClears`
+   / `GetCopyEdramTileSpan` path) - if the vista's host render-target image
+   isn't correctly dumped into the EDRAM emulation buffer on Adreno, the resolve
+   reads empty EDRAM and writes empty to shared memory.
+2. The **resolve compute shader** reading edram_buffer_ -> shared memory
+   producing zeros on Adreno.
+
+Both are in the forked `render_target_cache` host-RT EDRAM path - exactly the
+backend the oldest project note fingered. This is now a concrete, bounded fix
+target: instrument/compare the host-RT->EDRAM dump and resolve-compute output
+for the vista's tile on Adreno vs. the working desktop path, or port that
+specific path from upstream Xenia-Canary.
+
+### Summary of this session's eliminations (all decisive)
+- Geometry (memexport/terrain): ruled out - force-vis fullscreen terrain = nothing.
+- MSAA resolve: ruled out - forced msaa=0, still navy.
+- Composite output / front-buffer resolve / present: ruled out - magenta floods.
+- Texture invalidation after resolve: ruled out - MarkRangeAsResolved is wired.
+- REMAINING: host-RT -> EDRAM-buffer dump, or the resolve compute, on Adreno.
+
+## ★★★★★ DECISIVE: the resolve WORKS - G-buffer shared memory is fully populated; the break is the TEXTURE LOAD ★★★★★
+
+Implemented a diagnostic GPU readback (`GBUFGPU`) that copies the actual
+shared-memory GPU buffer content at the vista's resolve dest addresses into a
+host-visible buffer and histograms it - bypassing the readback
+memory-accessible gate that made the earlier guest-RAM dump read zeros (those
+G-buffer addresses are GPU-only scratch, not committed guest RAM). Uses the
+existing RequestReadbackBuffer + CmdVkCopyBuffer + AwaitAllQueueOperationsCompletion
++ map pattern. Read-only, does not touch guest RAM.
+
+### Result: the G-buffer shared memory is FULL of real scene content on Adreno
+- `0x044B0000`: nonzero=65536/65536, up to 7476 distinct dwords, varied pixel
+  data (0x65524F00, 0x431D1600, ...).
+- `0x04780000`: nonzero=65536/65536, up to 43812 distinct dwords.
+- `0x043FC000`: nonzero=65536/65536, up to 65536 distinct dwords (maximally
+  detailed - a real, fully varied image).
+- (cross-check) `0x04E20000` front buffer: nonzero=65536/65536, growing
+  variation - validates the readback reads real content.
+The content also EVOLVES per frame (changes count grows), i.e. the animated
+vista is genuinely rendering and resolving into shared memory every frame.
+
+### What this proves / flips
+The EDRAM resolve - host-RT->edram_buffer dump AND the resolve compute - WORKS
+on Adreno. The prior "resolve/dump produces zeros" hypothesis is RULED OUT. The
+vista data is sitting correctly in shared memory. Yet the composite (proven to
+reach the screen via the magenta test) samples those exact addresses as
+textures and outputs uniform navy. Uniform navy (not varied garbage) means the
+composite samples effectively UNIFORM/EMPTY texture data, NOT the varied
+content that's demonstrably in shared memory.
+
+**So the break is the TEXTURE LOAD/RELOAD from shared memory -> host texture
+image** (the forked `texture_cache`): the load compute that untiles/converts
+the Xbox-tiled shared-memory G-buffer into a host VkImage produces empty/uniform
+output on Adreno for this format, OR the post-resolve invalidation doesn't
+actually trigger a reload so the composite keeps sampling a stale empty texture
+(note: MarkRangeAsResolved is wired, but "wired" != "effective on Adreno" -
+the shared memory content changes every frame yet the sampled result stays
+static navy, consistent with no reload).
+
+### Eliminations now (all decisive this session)
+geometry✗  MSAA✗  composite-output/present✗  texture-invalidation-wiring✗
+EDRAM-resolve-to-shared-memory✗ (proven WORKING - G-buffer is full).
+REMAINING, well-scoped: the `texture_cache` shared-memory -> host-image load
+(untile/format-convert compute) or the actual reload-after-resolve on Adreno.
+
+### Cleanest next tests
+1. Force the composite pixel shader to output its RAW sampled G-buffer texel
+   (bypass lighting math). Scene => texture load works, lighting is the issue;
+   uniform navy => texture load confirmed broken.
+2. Read back the loaded HOST TEXTURE image for 0x044B0000 (vs the shared-memory
+   content already dumped) - if the host image is empty/uniform while shared
+   memory is varied, the load compute is the bug.
+3. Diff AE's vulkan_texture_cache load-shader / tiling path vs upstream
+   Xenia-Canary for this G-buffer format.
+
+## RAW-TEXEL TEST: texture load CONFIRMED broken (samples empty despite full shared memory)
+
+Captured the composite pixel shader (373E65D9)'s first texture-fetch texel into
+a debug var and output it raw (bypassing the lighting math), instead of magenta.
+
+**Result: still uniform navy - no scene structure.** The raw sampled texel is
+uniform/empty even though the shared memory at the sampled G-buffer addresses
+(0x044B0000 etc.) is proven full of varied, per-frame-changing content. This
+also covers the "which fetch is first" caveat: the composite's FINAL lit output
+is likewise uniform navy while it demonstrably samples fc0=0x044B0000, so that
+texture's sampled value must be uniform regardless of which fetch was captured.
+
+### Conclusion: the bug is the texture LOAD/RELOAD from shared memory -> host image
+The vista renders and resolves into shared memory correctly (varied content,
+proven), the composite reaches the screen (magenta, proven), texture
+invalidation is wired (MarkRangeAsResolved, proven) - but the textures the
+composite actually samples are uniform/empty. So the forked `vulkan_texture_cache`
+either (a) loads the shared-memory G-buffer into a host image incorrectly on
+Adreno (untile/format-convert compute produces empty/uniform for this format),
+or (b) races/never reloads after the resolve (loads the texture once while empty
+and the FireWatches invalidation doesn't trigger an effective reload on Adreno,
+or there's a missing barrier so the load reads shared memory before the resolve
+write is visible - note the GBUFGPU readback only saw content because it forced
+a full AwaitAllQueueOperationsCompletion sync).
+
+### THE fix target (this is where the bug lives)
+`vulkan_texture_cache` load path for the resolved G-buffer:
+- the shared-memory -> host-image load compute (tiling/format), and/or
+- the reload-after-resolve effectiveness + the barrier between the resolve
+  compute's shared-memory WRITE and the texture-load compute's shared-memory
+  READ.
+Compare against upstream Xenia-Canary's vulkan_texture_cache; the resolve/
+render-target side is proven correct and should NOT be touched.
+
+### Full pipeline walk complete - every stage tested, one culprit left
+geometry✗  MSAA✗  composite-output/present✗  EDRAM-resolve✗(works)
+texture-invalidation-wiring✗  →  REMAINING: texture LOAD/RELOAD (barrier or
+untile-compute) in vulkan_texture_cache. That is the fix location.
+
+## AE vs upstream canary texture_cache: structured study + "recreate results" vs "splice" assessment
+
+Compared AE's `vulkan_texture_cache` + load shaders against upstream
+xenia-canary (canary-git @6e5b8324f, /home/roman/xeniatest/canary-git).
+
+### The differences found in the texture LOAD path, and their nature
+1. **Tiling address math** — AE `XeTextureTiledOffset2D` (UModel-derived) vs
+   upstream `XenosTextureTiledAddress2D` (bank/pipe formulation). LOOKS like a
+   totally different algorithm. **Verified numerically (scratchpad/tilecmp.c):
+   they produce BYTE-IDENTICAL offsets for all coords (0/4096 differ)** at
+   bpb_log2=2, pitch=1152. => same result, different code. NOT the bug, and
+   nothing to "recreate" - already equivalent.
+2. **Linear pitch unit** — AE passes row_pitch in BYTES for linear textures
+   (blocks for tiled); upstream passes blocks always. AE's shader is written to
+   match (comment: "For linear textures - row pitch in bytes"). Internally
+   consistent. Also moot here: the vista's G-buffer textures are TILED, not
+   linear.
+3. **Load-constants mechanism** — AE uses a transient uniform buffer
+   (WriteTransientUniformBufferBinding + descriptor set); upstream uses
+   CmdVkPushConstants. Pure plumbing; same values delivered. Not behavioral.
+4. **Shader framework** — AE `xesl` macros vs upstream's. Cosmetic/structural.
+5. **scaled_resolve mip blit generation** — AE has an extra blit-based mip path
+   upstream lacks. Only for scaled_resolve textures; the vista G-buffer is
+   scaled_resolve=0, so not exercised.
+6. **source_length_alignment** — AE aligns the source buffer binding range to
+   the shader's source bpe (the real-upstream-Xenia fix for partial-vector
+   (0,0,0,0) reads on small textures). AE HAS this; good.
+
+### Verdict on the differences
+Every texture-LOAD-path difference examined is either (a) functionally
+identical (tiling), (b) internally consistent and not on this texture's path
+(linear pitch), or (c) mechanism-not-behavior (uniform buffer, shader
+framework). **None is a "produces different results on the bug path"
+difference.** This strongly implies the remaining bug is NOT a load-MATH
+divergence at all, but a **synchronization / ordering** issue (Adreno-specific:
+the load compute reading shared memory before the resolve's write is visible),
+which is a different class of fix - adding a correct barrier - not a
+code-matching exercise. (The next planned test - read shared-mem source AT LOAD
+TIME - directly checks this.)
+
+### Assessment: "recreate the same results with new AE-native code" vs "splice"
+The user's instinct is RIGHT as a general strategy and is confirmed by finding
+#1: the biggest, scariest divergence (whole different tiling algorithm) is
+actually behaviorally identical, i.e. much of the AE-vs-upstream delta is
+refactoring, not behavior. So where a real behavioral, causal difference IS
+found, rewriting AE-native code to match upstream's RESULT (same I/O contract,
+AE's framework) is clearly safer and easier than splicing:
+- **Splice (copy upstream files in)** = the `gpu-transplant` path = known open
+  Adreno "draws garbage" defect; also won't build cleanly (upstream
+  texture_cache needs upstream tiling shaders, command-processor interfaces,
+  etc. - deeply entangled). AVOID as a wholesale move.
+- **Recreate results (rewrite in place)** = best for pure-function behavioral
+  diffs with a clear contract (e.g. a tiling/format/offset formula): drop-in
+  same-signature replacement, keeps AE's framework, disposable on canary-ae.
+- **BUT** neither applies if the bug is synchronization/ordering (current
+  leading hypothesis after tiling was cleared): that fix is "add the right
+  barrier/sync on Adreno", which is neither splice nor result-recreation - it's
+  an AE-native correctness fix guided by (not copied from) how upstream orders
+  the resolve->load.
+
+### Practical rule going forward
+Only recreate/port a difference once it's proven BEHAVIORAL (different results)
+AND causal (on the failing path). So far no load-MATH difference qualifies;
+tiling is cleared. Next: the load-time source-content test to confirm
+ordering-race vs load-compute correctness, which decides whether the fix is a
+barrier (AE-native, small) or a deeper load-path port.
+
+## Tooling: unified toggleable GPU pipeline trace (core -> screen)
+
+Added a single opt-in trace covering every GPU pipeline stage, so a frame's
+execution can be followed in exact fire order.
+
+**Toggle (live, no rebuild):**
+```
+adb shell setprop debug.canary.testrig.gputrace 1    # enable
+adb shell setprop debug.canary.testrig.gputrace 0    # disable (default off)
+```
+Honors the testrig master switch. Defaults OFF (the trace is verbose) - unlike
+the other testrig subsystems which default on.
+
+**Output** - one ordered line per event, with a global monotonic `seq` and the
+`frame` number:
+```
+GPUTRACE seq=<n> frame=<f> DRAW      vsh=.. psh=.. vtx=.. eM=.. cbase0=<edram tile>
+GPUTRACE seq=<n> frame=<f> MEMEXPORT sh=.. addr=0x.. size=..
+GPUTRACE seq=<n> frame=<f> TEXLOAD   base=0x.. WxH tiled=.. fmt=.. load_shader=..
+GPUTRACE seq=<n> frame=<f> RESOLVE   dest=0x.. length=..
+GPUTRACE seq=<n> frame=<f> SWAP      frontbuffer_ptr=0x.. WxH
+```
+Stages instrumented: DRAW (IssueDraw), MEMEXPORT (per exported range), TEXLOAD
+(every texture load: address/size/tiling/format/load-shader), RESOLVE (every
+EDRAM->guest resolve), SWAP (present). Extensible - add
+`if (gpu_trace_enabled()) GpuTrace("STAGE", fmt::format(...));` at any new point.
+
+Infra: `VulkanCommandProcessor::gpu_trace_enabled()` (cached ~250ms) +
+`GpuTrace(stage, detail)`; the texture cache / RT cache call it via
+`command_processor_`. Verified: 0 lines when off, full ordered trace when on.
+Also added `TestrigReadbackAndLogBuffer()` (buffer->host readback + histogram)
+for inspecting intermediate GPU-side content from a flushable context (the
+per-load scratch-buffer readback is NOT possible mid-load - AwaitAllQueue only
+checks idle, can't flush an open submission).
+
+### Note on the barrier fix (kept, real, but not the whole story)
+Found and fixed a genuine bug: `VulkanSharedMemory::GetUsageMasks` had
+`kComputeWrite` access_mask = `VK_ACCESS_SHADER_READ_BIT` (should be
+`SHADER_WRITE`, per upstream) - the resolve's compute writes were never made
+available by the write->read barrier. KEPT (correct on its own merits). But it
+did NOT restore the vista, and a forced full GPU idle after every G-buffer
+resolve ALSO didn't - so the remaining issue is NOT synchronization. The load
+compute is dispatched with fully correct params (groups 36x20, size 1152x640,
+guest_pitch 1152, host_pitch 4608, buffer 2949120, offset 0x044B0000, source
+proven full) yet the sampled texture is uniform - pointing at the load COMPUTE
+SHADER's execution on Adreno (or the scratch->image copy), which the scratch
+readback couldn't reach due to the mid-load flush limitation. That's the open
+edge.
