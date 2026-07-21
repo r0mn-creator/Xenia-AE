@@ -90,6 +90,16 @@ class VulkanTextureCache final : public TextureCache {
   // preceding host GPU work.
   void RequestTextures(uint32_t used_texture_mask) override;
 
+  // TESTRIG(halo3): read back and histogram the loaded host image for the vista
+  // G-buffer (0x044B0000). Call from a flushable point (IssueSwap).
+  void TestrigDumpGbufferImage();
+
+  // TESTRIG(halo3): log the texture(s) bound to a fetch constant (binding key +
+  // unsigned/signed instance keys + image ptrs), to compare what the composite
+  // actually samples vs what the load fills.
+  void TestrigLogBoundTexture(uint32_t fetch_constant, const char* tag);
+  void TestrigCaptureBoundImage(uint32_t fetch_constant);
+
   VkImageView GetActiveBindingOrNullImageView(uint32_t fetch_constant_index,
                                               xenos::FetchOpDimension dimension,
                                               bool is_signed);

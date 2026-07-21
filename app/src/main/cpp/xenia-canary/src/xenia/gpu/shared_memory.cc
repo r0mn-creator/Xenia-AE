@@ -429,6 +429,16 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length,
     return true;
   }
 
+  // TESTRIG(halo3-clobber): catch the re-upload of guest RAM over the resolved
+  // vista G-buffer. If the range covering 0x044B0000 is being UPLOADED from
+  // guest RAM (i.e. its pages went invalid after the resolve), that clobbers
+  // the varied resolved data in the shared-memory buffer with uniform guest RAM
+  // -> the texture load then reads uniform. This is the suspected root cause.
+  if (start <= 0x044B0000u && (start + length) > 0x044B0000u) {
+    XELOGI("SMUPLOAD covers 0x044B0000 start=0x{:08X} len=0x{:08X} ranges={}",
+           start, length, current_upload_range);
+  }
+
   return UploadRanges(uploads, current_upload_range);
 }
 

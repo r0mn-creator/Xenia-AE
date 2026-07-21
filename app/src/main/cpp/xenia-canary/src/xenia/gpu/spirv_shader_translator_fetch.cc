@@ -15,6 +15,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 
 namespace xe {
@@ -636,6 +637,15 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
     bool use_computed_lod =
         instr.attributes.use_computed_lod &&
         (is_pixel_shader() || instr.attributes.use_register_gradients);
+    // TESTRIG(halo3-rawsample) mode 3: force the composite PS's first fetch to
+    // the explicit-LOD path (LOD forced to 0 below) so we can test whether
+    // sampling mip 0 explicitly yields the varied terrain (=> LOD-selection is
+    // the bug) or still uniform (=> mip-0 data/view is the problem).
+    if (kTestrigHalo3Mode == 3 &&
+        current_shader().ucode_data_hash() == 0x373E65D9ADCF4380ull &&
+        instr.opcode == ucode::FetchOpcode::kTextureFetch) {
+      use_computed_lod = false;
+    }
     if (instr.opcode == ucode::FetchOpcode::kGetTextureComputedLod &&
         (!use_computed_lod || instr.attributes.use_register_gradients)) {
       assert_always();
@@ -650,6 +660,31 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
 
     uint32_t fetch_constant_index = instr.operands[1].storage_index;
     uint32_t fetch_constant_word_0_index = 6 * fetch_constant_index;
+
+    // TESTRIG(halo3-lod): log the composite PS's first fetch attributes once,
+    // to pin down the mip/LOD-collapse root cause (is use_computed_lod off? is
+    // there an explicit LOD/bias? what filters/aniso?).
+    if (current_shader().ucode_data_hash() == 0x373E65D9ADCF4380ull &&
+        instr.opcode == ucode::FetchOpcode::kTextureFetch) {
+      static bool logged_lod = false;
+      if (!logged_lod) {
+        logged_lod = true;
+        XELOGI(
+            "HALO3LOD fc={} dim={} pixel={} use_computed_lod(attr)={} "
+            "use_computed_lod(eff)={} use_register_lod={} "
+            "use_register_gradients={} lod_bias={} unnorm_coords={} "
+            "mag={} min={} mip={} aniso={}",
+            fetch_constant_index, uint32_t(instr.dimension), is_pixel_shader(),
+            instr.attributes.use_computed_lod, use_computed_lod,
+            instr.attributes.use_register_lod,
+            instr.attributes.use_register_gradients, instr.attributes.lod_bias,
+            instr.attributes.unnormalized_coordinates,
+            uint32_t(instr.attributes.mag_filter),
+            uint32_t(instr.attributes.min_filter),
+            uint32_t(instr.attributes.mip_filter),
+            uint32_t(instr.attributes.aniso_filter));
+      }
+    }
 
     spv::Id sampler = spv::NoResult;
     spv::Id image_2d_array_or_cube_unsigned = spv::NoResult;
@@ -1064,6 +1099,18 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       xe::bit_scan_forward(coordinates_needed_components,
                            &coordinate_component_index);
       coordinates[coordinate_component_index] = coordinates_operand;
+    }
+
+    // TESTRIG(halo3-rawsample) mode 2: capture the composite PS's first fetch
+    // COORDINATE (normalized x,y) so the color store can output it. If the
+    // background then shows a clean 0..1 gradient, the coordinate is fine and
+    // the collapse is mip/LOD; if it's flat, the coordinate itself collapses.
+    if (kTestrigHalo3Mode == 2 &&
+        current_shader().ucode_data_hash() == 0x373E65D9ADCF4380ull &&
+        testrig_halo3_albedo_rgb_[0] == spv::NoResult) {
+      testrig_halo3_albedo_rgb_[0] = coordinates[0];
+      testrig_halo3_albedo_rgb_[1] = coordinates[1];
+      testrig_halo3_albedo_rgb_[2] = const_float_0_;
     }
 
     // Resolution scale doesn't need reverting for texture weights - weights are
@@ -1533,6 +1580,13 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           lod = builder_->createNoContractionBinOp(
               spv::OpFAdd, type_float_, lod,
               builder_->makeFloatConstant(instr.attributes.lod_bias));
+        }
+        // TESTRIG(halo3-rawsample) mode 3: force explicit LOD 0 for the
+        // composite fetch (use_computed_lod was forced false above).
+        if (kTestrigHalo3Mode == 3 &&
+            current_shader().ucode_data_hash() == 0x373E65D9ADCF4380ull &&
+            instr.opcode == ucode::FetchOpcode::kTextureFetch) {
+          lod = const_float_0_;
         }
 
         // Calculate the gradients for sampling the texture if needed.
@@ -2253,6 +2307,21 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
     uint32_t result_component_index;
     xe::bit_scan_forward(used_result_components, &result_component_index);
     result_vector = result[result_component_index];
+  }
+  // TESTRIG(halo3-rawsample): capture the composite PS's FIRST texture fetch
+  // (albedo, fc0=0x044B0000) RGB scalars so CompleteFragmentShaderInMain's
+  // color store can output the raw sample instead of the tonemapped result.
+  // This splits the two remaining hypotheses: if the vista shows varied
+  // terrain, the tonemap MATH collapses it; if still uniform, the SAMPLER
+  // reads uniform despite the proven-varied bound image. Diagnostic only.
+  if ((kTestrigHalo3Mode == 1 || kTestrigHalo3Mode == 3) &&
+      current_shader().ucode_data_hash() == 0x373E65D9ADCF4380ull &&
+      testrig_halo3_albedo_rgb_[0] == spv::NoResult) {
+    for (uint32_t c = 0; c < 3; ++c) {
+      testrig_halo3_albedo_rgb_[c] =
+          (used_result_components & (UINT32_C(1) << c)) ? result[c]
+                                                        : const_float_0_;
+    }
   }
   StoreResult(instr.result, result_vector);
 }

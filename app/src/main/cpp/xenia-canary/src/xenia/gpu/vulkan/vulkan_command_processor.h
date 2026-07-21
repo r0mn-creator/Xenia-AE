@@ -183,6 +183,31 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // readback/sync plumbing. Read-only, heavy (full GPU idle) - diagnostics use.
   void TestrigReadbackAndLogBuffer(const char* tag, VkBuffer buffer,
                                    uint64_t offset, uint64_t size);
+  // Same, for a color image: transitions to TRANSFER_SRC, copies to a host
+  // buffer, full-syncs, histograms, transitions back. Call from a flushable
+  // point (e.g. IssueSwap).
+  void TestrigReadbackAndLogImage(const char* tag, VkImage image,
+                                  VkImageLayout current_layout, uint32_t width,
+                                  uint32_t height);
+  // Resolves a multisampled image to a 1x scratch image (hardware resolve) and
+  // reads it back, to test whether raw MSAA samples survived storage on Adreno.
+  void TestrigResolveAndReadImage(const char* tag, VkImage msaa_src,
+                                  VkImageLayout src_layout, VkFormat format,
+                                  uint32_t width, uint32_t height);
+  // Decoupled image capture: records an image->persistent-buffer copy into the
+  // deferred command buffer NOW (safe mid-frame, e.g. inside a texture load
+  // where the submission is open and can't be flushed), to be READ later at a
+  // flushable point via TestrigReadCapturedImage(). current_layout is restored.
+  void TestrigCaptureImageDeferred(VkImage image, VkImageLayout current_layout,
+                                   uint32_t width, uint32_t height);
+  void TestrigReadCapturedImage(const char* tag);
+  // Same idea for a shared-memory (VkBuffer) region: records a deferred copy of
+  // `size` bytes at guest byte `offset` into a readback buffer, read at swap.
+  void TestrigCaptureSharedMemoryDeferred(uint64_t offset, uint32_t size);
+  void TestrigReadCapturedSharedMemory(const char* tag);
+  // Same for an EDRAM (VkBuffer) region - the dump's output.
+  void TestrigCaptureEdramDeferred(uint64_t offset, uint32_t size);
+  void TestrigReadCapturedEdram(const char* tag);
 
   // Returns the deferred drawing command list for the currently open
   // submission.

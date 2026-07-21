@@ -938,6 +938,18 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id var_main_tfetch_gradients_v_;
   // float4[register_count()].
   spv::Id var_main_registers_;
+  // TESTRIG(halo3-rawsample): make the Halo 3 menu composite PS output a
+  // diagnostic value instead of its tonemapped result.
+  //   0 = off (normal)   1 = raw albedo sample   2 = fetch coordinate (R=x,G=y)
+  //   3 = raw albedo sample with the fetch forced to explicit LOD 0
+  //   4 = force non-composite pixel shaders to a per-pixel pattern (scene test)
+  static constexpr int kTestrigHalo3Mode = 0;
+  static constexpr bool kTestrigHalo3RawSample = kTestrigHalo3Mode != 0;
+  // Captured RGB of the composite PS's first texture fetch (the albedo,
+  // fc0=0x044B0000), so the color store can output the raw sample instead of
+  // the tonemapped result. Diagnostic only.
+  spv::Id testrig_halo3_albedo_rgb_[3] = {spv::NoResult, spv::NoResult,
+                                          spv::NoResult};
   // Memory export variables are created only when needed.
   // float4.
   spv::Id var_main_memexport_address_;

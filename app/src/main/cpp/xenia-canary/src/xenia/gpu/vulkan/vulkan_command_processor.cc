@@ -1358,6 +1358,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                  frontbuffer_ptr, frontbuffer_width,
                                  frontbuffer_height));
   }
+  // TESTRIG(halo3): the decoupled image capture is read at the END of IssueSwap
+  // (after EndSubmission), so the deferred copy has actually been submitted and
+  // completed - reading here (submission still open) would no-op.
 
   // TESTRIG(halo3-gbuf): the magenta test proved the deferred composite reaches
   // the screen, so the vista is lost in its G-buffer INPUT. Dump the guest-RAM
@@ -1368,11 +1371,11 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // after resolve; if flat/near-empty, the EDRAM->shared-memory resolve itself
   // isn't landing on Adreno. One-shot.
   {
-    static bool logged_gbuf = false;
-    if (!logged_gbuf) {
-      logged_gbuf = true;
+    static int gbuf_logged = 0;
+    if (gbuf_logged < 4) {
       const uint32_t kGbufAddrs[] = {0x044B0000u, 0x04780000u, 0x043FC000u,
                                      0x04E20000u};
+      bool any_populated = false;
       for (uint32_t addr : kGbufAddrs) {
         const uint32_t* p =
             reinterpret_cast<const uint32_t*>(memory_->TranslatePhysical(addr));
@@ -1386,10 +1389,16 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             prev = p[k];
           }
         }
+        if (nonzero > 1000) any_populated = true;
         XELOGI(
             "GBUF addr=0x{:08X} nonzero={}/{} run_changes={} s0=0x{:08X} "
             "s1=0x{:08X} s2=0x{:08X}",
             addr, nonzero, sample_dwords, distinct_est, p[0], p[1], p[2]);
+      }
+      // Only "count" this as a real capture once the menu has populated the
+      // G-buffer, so we don't burn all logs on the initial empty frames.
+      if (any_populated) {
+        ++gbuf_logged;
       }
     }
   }
@@ -1725,6 +1734,12 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // End the frame even if did not present for any reason (the image refresher
   // was not called), to prevent leaking per-frame resources.
   EndSubmission(true);
+
+  // TESTRIG(halo3): read the resolved-companion capture recorded during this
+  // frame's dump (now submitted + complete).
+  TestrigReadCapturedImage("RT1216_HOSTIMG");
+  TestrigReadCapturedSharedMemory("SHM_44B0");
+  TestrigReadCapturedEdram("EDRAM_T1216");
 }
 
 bool VulkanCommandProcessor::PushBufferMemoryBarrier(
@@ -3265,6 +3280,24 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         primitive_processing_result.host_draw_vertex_count, 1, 0, 0, 0);
   }
 
+  // TESTRIG(halo3-loadvsuse): at the composite draw, capture the EXACT image
+  // bound to fc0 (the vista G-buffer albedo) in its at-draw layout. Read at
+  // swap. If uniform here but the resolve companion is varied, the composite
+  // samples unpublished/unordered data (load-vs-use / barrier ordering).
+  if (pixel_shader &&
+      pixel_shader->ucode_data_hash() == 0x373E65D9ADCF4380ull) {
+    // Diagnostic captures (DISABLED - the collapse is now localized to RT 1216
+    // being uniform near-black, a feedback-decay via the composite's own output
+    // resolved back into its albedo input 0x044B0000). Reusable capture infra
+    // kept for the next render-target-aliasing investigation. See checklist.
+    static int comp_cap_n = 0;
+    if (false && comp_cap_n++ < 3) {
+      texture_cache_->TestrigCaptureBoundImage(0);
+      TestrigCaptureSharedMemoryDeferred(0x044B0000ull, 256u * 1024u);
+      TestrigCaptureEdramDeferred(1216ull * 5120ull, 256u * 1024u);
+    }
+  }
+
   // Invalidate textures in memexported memory and watch for changes.
   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
     shared_memory_->RangeWrittenByGpu(memexport_range.base_address_dwords << 2,
@@ -3346,6 +3379,480 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
   return true;
+}
+
+namespace {
+// TESTRIG(halo3): persistent host-visible buffer for decoupled image capture
+// (single GPU, diagnostic use only).
+VkBuffer g_halo3_cap_buf = VK_NULL_HANDLE;
+VkDeviceMemory g_halo3_cap_mem = VK_NULL_HANDLE;
+uint32_t g_halo3_cap_w = 0, g_halo3_cap_h = 0;
+bool g_halo3_cap_pending = false;
+uint64_t g_halo3_cap_submission = 0;
+VkImage g_halo3_resolve_img = VK_NULL_HANDLE;
+VkDeviceMemory g_halo3_resolve_mem = VK_NULL_HANDLE;
+VkFormat g_halo3_resolve_fmt = VK_FORMAT_UNDEFINED;
+// TESTRIG(halo3): shared-memory (VkBuffer) region capture, to read what the
+// resolve-copy actually wrote to guest shared memory (the load's input).
+VkBuffer g_halo3_shm_buf = VK_NULL_HANDLE;
+VkDeviceMemory g_halo3_shm_mem = VK_NULL_HANDLE;
+uint32_t g_halo3_shm_bytes = 0;
+bool g_halo3_shm_pending = false;
+uint64_t g_halo3_shm_submission = 0;
+// TESTRIG(halo3): EDRAM (VkBuffer) region capture - the DUMP's output / the
+// resolve-copy's input. Splits dump vs resolve-copy as the collapse point.
+VkBuffer g_halo3_edram_buf = VK_NULL_HANDLE;
+VkDeviceMemory g_halo3_edram_mem = VK_NULL_HANDLE;
+uint32_t g_halo3_edram_bytes = 0;
+bool g_halo3_edram_pending = false;
+uint64_t g_halo3_edram_submission = 0;
+}  // namespace
+
+void VulkanCommandProcessor::TestrigCaptureEdramDeferred(uint64_t offset,
+                                                         uint32_t size) {
+  const ui::vulkan::VulkanDevice* const vd = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vd->functions();
+  const VkDevice device = vd->device();
+  uint32_t bytes = std::min<uint32_t>(size, 256u * 1024u);
+  if (g_halo3_edram_buf == VK_NULL_HANDLE) {
+    VkBufferCreateInfo bi = {};
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = 256u * 1024u;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (dfn.vkCreateBuffer(device, &bi, nullptr, &g_halo3_edram_buf) !=
+        VK_SUCCESS) {
+      g_halo3_edram_buf = VK_NULL_HANDLE;
+      return;
+    }
+    VkMemoryRequirements mr;
+    dfn.vkGetBufferMemoryRequirements(device, g_halo3_edram_buf, &mr);
+    uint32_t mti = ui::vulkan::util::ChooseMemoryType(
+        vd->memory_types(), mr.memoryTypeBits,
+        ui::vulkan::util::MemoryPurpose::kReadback);
+    VkMemoryAllocateInfo mai = {};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = mti;
+    if (mti == UINT32_MAX ||
+        dfn.vkAllocateMemory(device, &mai, nullptr, &g_halo3_edram_mem) !=
+            VK_SUCCESS) {
+      dfn.vkDestroyBuffer(device, g_halo3_edram_buf, nullptr);
+      g_halo3_edram_buf = VK_NULL_HANDLE;
+      return;
+    }
+    dfn.vkBindBufferMemory(device, g_halo3_edram_buf, g_halo3_edram_mem, 0);
+  }
+  VkBuffer edram = render_target_cache_->edram_buffer();
+  // Make prior compute writes to EDRAM visible to a transfer read.
+  PushBufferMemoryBarrier(edram, 0, VK_WHOLE_SIZE,
+                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                          VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+  SubmitBarriers(true);
+  VkBufferCopy region = {};
+  region.srcOffset = offset;
+  region.dstOffset = 0;
+  region.size = bytes;
+  deferred_command_buffer_.CmdVkCopyBuffer(edram, g_halo3_edram_buf, 1, &region);
+  // Restore EDRAM to its compute-write visibility for subsequent use.
+  PushBufferMemoryBarrier(edram, 0, VK_WHOLE_SIZE,
+                          VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                          VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+  g_halo3_edram_bytes = bytes;
+  g_halo3_edram_pending = true;
+  g_halo3_edram_submission = GetCurrentSubmission();
+}
+
+void VulkanCommandProcessor::TestrigReadCapturedEdram(const char* tag) {
+  if (!g_halo3_edram_pending || g_halo3_edram_buf == VK_NULL_HANDLE) return;
+  g_halo3_edram_pending = false;
+  const ui::vulkan::VulkanDevice* const vd = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vd->functions();
+  const VkDevice device = vd->device();
+  CheckSubmissionFenceAndDeviceLoss(g_halo3_edram_submission);
+  if (GetCompletedSubmission() < g_halo3_edram_submission) {
+    return;
+  }
+  void* mapped = nullptr;
+  if (dfn.vkMapMemory(device, g_halo3_edram_mem, 0, g_halo3_edram_bytes, 0,
+                      &mapped) == VK_SUCCESS &&
+      mapped) {
+    const uint32_t* p = static_cast<const uint32_t*>(mapped);
+    uint32_t n = g_halo3_edram_bytes / 4, nonzero = 0, changes = 0,
+             prev = 0xDEADBEEFu;
+    for (uint32_t k = 0; k < n; ++k) {
+      if (p[k] != 0) ++nonzero;
+      if (p[k] != prev) {
+        ++changes;
+        prev = p[k];
+      }
+    }
+    XELOGI(
+        "TESTRIG_EDRAM {} bytes={} nonzero={}/{} distinct_runs={} s0=0x{:08X} "
+        "smid=0x{:08X} slast=0x{:08X}",
+        tag, g_halo3_edram_bytes, nonzero, n, changes, p[0], p[n / 2],
+        p[n - 1]);
+    dfn.vkUnmapMemory(device, g_halo3_edram_mem);
+  }
+}
+
+void VulkanCommandProcessor::TestrigCaptureSharedMemoryDeferred(uint64_t offset,
+                                                                uint32_t size) {
+  const ui::vulkan::VulkanDevice* const vd = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vd->functions();
+  const VkDevice device = vd->device();
+  uint32_t bytes = std::min<uint32_t>(size, 256u * 1024u);
+  if (g_halo3_shm_buf == VK_NULL_HANDLE) {
+    VkBufferCreateInfo bi = {};
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = 256u * 1024u;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (dfn.vkCreateBuffer(device, &bi, nullptr, &g_halo3_shm_buf) !=
+        VK_SUCCESS) {
+      g_halo3_shm_buf = VK_NULL_HANDLE;
+      return;
+    }
+    VkMemoryRequirements mr;
+    dfn.vkGetBufferMemoryRequirements(device, g_halo3_shm_buf, &mr);
+    uint32_t mti = ui::vulkan::util::ChooseMemoryType(
+        vd->memory_types(), mr.memoryTypeBits,
+        ui::vulkan::util::MemoryPurpose::kReadback);
+    VkMemoryAllocateInfo mai = {};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = mti;
+    if (mti == UINT32_MAX ||
+        dfn.vkAllocateMemory(device, &mai, nullptr, &g_halo3_shm_mem) !=
+            VK_SUCCESS) {
+      dfn.vkDestroyBuffer(device, g_halo3_shm_buf, nullptr);
+      g_halo3_shm_buf = VK_NULL_HANDLE;
+      return;
+    }
+    dfn.vkBindBufferMemory(device, g_halo3_shm_buf, g_halo3_shm_mem, 0);
+  }
+  shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+  VkBufferCopy region = {};
+  region.srcOffset = offset;
+  region.dstOffset = 0;
+  region.size = bytes;
+  deferred_command_buffer_.CmdVkCopyBuffer(shared_memory_->buffer(),
+                                           g_halo3_shm_buf, 1, &region);
+  g_halo3_shm_bytes = bytes;
+  g_halo3_shm_pending = true;
+  g_halo3_shm_submission = GetCurrentSubmission();
+}
+
+void VulkanCommandProcessor::TestrigReadCapturedSharedMemory(const char* tag) {
+  if (!g_halo3_shm_pending || g_halo3_shm_buf == VK_NULL_HANDLE) return;
+  g_halo3_shm_pending = false;
+  const ui::vulkan::VulkanDevice* const vd = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vd->functions();
+  const VkDevice device = vd->device();
+  CheckSubmissionFenceAndDeviceLoss(g_halo3_shm_submission);
+  if (GetCompletedSubmission() < g_halo3_shm_submission) {
+    return;
+  }
+  void* mapped = nullptr;
+  if (dfn.vkMapMemory(device, g_halo3_shm_mem, 0, g_halo3_shm_bytes, 0,
+                      &mapped) == VK_SUCCESS &&
+      mapped) {
+    const uint32_t* p = static_cast<const uint32_t*>(mapped);
+    uint32_t n = g_halo3_shm_bytes / 4, nonzero = 0, changes = 0,
+             prev = 0xDEADBEEFu;
+    for (uint32_t k = 0; k < n; ++k) {
+      if (p[k] != 0) ++nonzero;
+      if (p[k] != prev) {
+        ++changes;
+        prev = p[k];
+      }
+    }
+    XELOGI(
+        "TESTRIG_SHM {} bytes={} nonzero={}/{} distinct_runs={} s0=0x{:08X} "
+        "smid=0x{:08X} slast=0x{:08X}",
+        tag, g_halo3_shm_bytes, nonzero, n, changes, p[0], p[n / 2], p[n - 1]);
+    dfn.vkUnmapMemory(device, g_halo3_shm_mem);
+  }
+}
+
+void VulkanCommandProcessor::TestrigCaptureImageDeferred(
+    VkImage image, VkImageLayout current_layout, uint32_t width,
+    uint32_t height) {
+  uint32_t w = std::min<uint32_t>(width, 256), h = std::min<uint32_t>(height, 256);
+  const ui::vulkan::VulkanDevice* const vd = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vd->functions();
+  const VkDevice device = vd->device();
+  if (g_halo3_cap_buf == VK_NULL_HANDLE) {
+    VkBufferCreateInfo bi = {};
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = 256 * 256 * 4;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (dfn.vkCreateBuffer(device, &bi, nullptr, &g_halo3_cap_buf) !=
+        VK_SUCCESS) {
+      g_halo3_cap_buf = VK_NULL_HANDLE;
+      XELOGI("TESTRIG_CAPIMG create-buffer FAILED");
+      return;
+    }
+    VkMemoryRequirements mr;
+    dfn.vkGetBufferMemoryRequirements(device, g_halo3_cap_buf, &mr);
+    uint32_t mti = ui::vulkan::util::ChooseMemoryType(
+        vd->memory_types(), mr.memoryTypeBits,
+        ui::vulkan::util::MemoryPurpose::kReadback);
+    VkMemoryAllocateInfo mai = {};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = mti;
+    if (mti == UINT32_MAX ||
+        dfn.vkAllocateMemory(device, &mai, nullptr, &g_halo3_cap_mem) !=
+            VK_SUCCESS) {
+      dfn.vkDestroyBuffer(device, g_halo3_cap_buf, nullptr);
+      g_halo3_cap_buf = VK_NULL_HANDLE;
+      XELOGI("TESTRIG_CAPIMG alloc-memory FAILED mti={}", mti);
+      return;
+    }
+    dfn.vkBindBufferMemory(device, g_halo3_cap_buf, g_halo3_cap_mem, 0);
+  }
+  VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange();
+  PushImageMemoryBarrier(image, range, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                         current_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+  SubmitBarriers(true);
+  VkBufferImageCopy region = {};
+  region.bufferRowLength = w;
+  region.bufferImageHeight = h;
+  region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  region.imageSubresource.layerCount = 1;
+  region.imageExtent.width = w;
+  region.imageExtent.height = h;
+  region.imageExtent.depth = 1;
+  deferred_command_buffer_.CmdVkCopyImageToBuffer(
+      image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_halo3_cap_buf, 1, &region);
+  PushImageMemoryBarrier(image, range, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, current_layout);
+  g_halo3_cap_w = w;
+  g_halo3_cap_h = h;
+  g_halo3_cap_pending = true;
+  g_halo3_cap_submission = GetCurrentSubmission();
+  XELOGI("TESTRIG_CAPIMG recorded pending sub={} {}x{}", g_halo3_cap_submission,
+         w, h);
+}
+
+void VulkanCommandProcessor::TestrigReadCapturedImage(const char* tag) {
+  if (!g_halo3_cap_pending || g_halo3_cap_buf == VK_NULL_HANDLE) return;
+  g_halo3_cap_pending = false;
+  const ui::vulkan::VulkanDevice* const vd = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vd->functions();
+  const VkDevice device = vd->device();
+  // Wait specifically for the submission that recorded the copy to complete
+  // (AwaitAllQueueOperationsCompletion bails without waiting when in-flight
+  // fences remain). Must be called after the copy's submission is closed
+  // (i.e. after IssueSwap's EndSubmission). Diagnostic only.
+  CheckSubmissionFenceAndDeviceLoss(g_halo3_cap_submission);
+  if (GetCompletedSubmission() < g_halo3_cap_submission) {
+    XELOGI("TESTRIG_CAPIMG {} not-yet-complete (sub {} > completed {})", tag,
+           g_halo3_cap_submission, GetCompletedSubmission());
+    return;
+  }
+  uint32_t bytes = g_halo3_cap_w * g_halo3_cap_h * 4;
+  void* mapped = nullptr;
+  if (dfn.vkMapMemory(device, g_halo3_cap_mem, 0, bytes, 0, &mapped) ==
+          VK_SUCCESS &&
+      mapped) {
+    const uint32_t* p = static_cast<const uint32_t*>(mapped);
+    uint32_t n = bytes / 4, nonzero = 0, changes = 0, prev = 0xDEADBEEFu;
+    for (uint32_t k = 0; k < n; ++k) {
+      if (p[k] != 0) ++nonzero;
+      if (p[k] != prev) {
+        ++changes;
+        prev = p[k];
+      }
+    }
+    XELOGI(
+        "TESTRIG_CAPIMG {} {}x{} nonzero={}/{} distinct_runs={} s0=0x{:08X} "
+        "smid=0x{:08X} slast=0x{:08X}",
+        tag, g_halo3_cap_w, g_halo3_cap_h, nonzero, n, changes, p[0], p[n / 2],
+        p[n - 1]);
+    dfn.vkUnmapMemory(device, g_halo3_cap_mem);
+  }
+}
+
+void VulkanCommandProcessor::TestrigReadbackAndLogImage(
+    const char* tag, VkImage image, VkImageLayout current_layout,
+    uint32_t width, uint32_t height) {
+  uint32_t copy_w = std::min<uint32_t>(width, 256);
+  uint32_t copy_h = std::min<uint32_t>(height, 256);
+  uint32_t bytes = copy_w * copy_h * 4;
+  VkBuffer rbuf = RequestReadbackBuffer(bytes);
+  if (rbuf == VK_NULL_HANDLE) return;
+  const ui::vulkan::VulkanDevice* const vd = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vd->functions();
+  const VkDevice device = vd->device();
+  VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange();
+  PushImageMemoryBarrier(image, range, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                         VK_ACCESS_TRANSFER_READ_BIT, current_layout,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+  SubmitBarriers(true);
+  VkBufferImageCopy region = {};
+  region.bufferOffset = 0;
+  region.bufferRowLength = copy_w;
+  region.bufferImageHeight = copy_h;
+  region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  region.imageSubresource.mipLevel = 0;
+  region.imageSubresource.baseArrayLayer = 0;
+  region.imageSubresource.layerCount = 1;
+  region.imageExtent.width = copy_w;
+  region.imageExtent.height = copy_h;
+  region.imageExtent.depth = 1;
+  deferred_command_buffer_.CmdVkCopyImageToBuffer(
+      image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rbuf, 1, &region);
+  PushImageMemoryBarrier(image, range, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, current_layout);
+  SubmitBarriers(true);
+  if (!AwaitAllQueueOperationsCompletion()) return;
+  void* mapped = nullptr;
+  if (dfn.vkMapMemory(device, memexport_readback_buffer_memory_, 0, bytes, 0,
+                      &mapped) == VK_SUCCESS &&
+      mapped) {
+    const uint32_t* p = static_cast<const uint32_t*>(mapped);
+    uint32_t n = bytes / 4, nonzero = 0, changes = 0, prev = 0xDEADBEEFu;
+    for (uint32_t k = 0; k < n; ++k) {
+      if (p[k] != 0) ++nonzero;
+      if (p[k] != prev) {
+        ++changes;
+        prev = p[k];
+      }
+    }
+    XELOGI(
+        "TESTRIG_IMAGE {} {}x{} nonzero={}/{} changes={} s0=0x{:08X} "
+        "s1=0x{:08X} smid=0x{:08X}",
+        tag, copy_w, copy_h, nonzero, n, changes, p[0], p[1], p[n / 2]);
+    dfn.vkUnmapMemory(device, memexport_readback_buffer_memory_);
+  }
+}
+
+void VulkanCommandProcessor::TestrigResolveAndReadImage(
+    const char* tag, VkImage msaa_src, VkImageLayout src_layout,
+    VkFormat format, uint32_t width, uint32_t height) {
+  uint32_t w = std::min<uint32_t>(width, 512);
+  uint32_t h = std::min<uint32_t>(height, 512);
+  const ui::vulkan::VulkanDevice* const vd = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vd->functions();
+  const VkDevice device = vd->device();
+  if (g_halo3_resolve_img == VK_NULL_HANDLE || g_halo3_resolve_fmt != format) {
+    if (g_halo3_resolve_img != VK_NULL_HANDLE) {
+      dfn.vkDestroyImage(device, g_halo3_resolve_img, nullptr);
+      dfn.vkFreeMemory(device, g_halo3_resolve_mem, nullptr);
+      g_halo3_resolve_img = VK_NULL_HANDLE;
+    }
+    VkImageCreateInfo ici = {};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = format;
+    ici.extent = {512, 512, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage =
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!ui::vulkan::util::CreateDedicatedAllocationImage(
+            vd, ici, ui::vulkan::util::MemoryPurpose::kDeviceLocal,
+            g_halo3_resolve_img, g_halo3_resolve_mem)) {
+      XELOGI("TESTRIG_RESOLVE {} scratch image create FAILED", tag);
+      g_halo3_resolve_img = VK_NULL_HANDLE;
+      return;
+    }
+    g_halo3_resolve_fmt = format;
+  }
+  uint32_t bytes = w * h * 4;
+  VkBuffer rbuf = RequestReadbackBuffer(bytes);
+  if (rbuf == VK_NULL_HANDLE) return;
+  VkImageSubresourceRange range = ui::vulkan::util::InitializeSubresourceRange();
+  PushImageMemoryBarrier(
+      msaa_src, range, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT |
+          VK_ACCESS_SHADER_WRITE_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT, src_layout,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+  PushImageMemoryBarrier(g_halo3_resolve_img, range,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  SubmitBarriers(true);
+  VkImageResolve resolve_region = {};
+  resolve_region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  resolve_region.srcSubresource.layerCount = 1;
+  // Read from the CENTER of the RT (the top-left corner is often uniform sky).
+  resolve_region.srcOffset.x = 0;
+  resolve_region.srcOffset.y = 0;
+  resolve_region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  resolve_region.dstSubresource.layerCount = 1;
+  resolve_region.extent = {w, h, 1};
+  deferred_command_buffer_.CmdVkResolveImage(
+      msaa_src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_halo3_resolve_img,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &resolve_region);
+  PushImageMemoryBarrier(
+      g_halo3_resolve_img, range, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+  PushImageMemoryBarrier(msaa_src, range, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src_layout);
+  SubmitBarriers(true);
+  VkBufferImageCopy copy = {};
+  copy.bufferRowLength = w;
+  copy.bufferImageHeight = h;
+  copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  copy.imageSubresource.layerCount = 1;
+  copy.imageExtent = {w, h, 1};
+  deferred_command_buffer_.CmdVkCopyImageToBuffer(
+      g_halo3_resolve_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rbuf, 1, &copy);
+  SubmitBarriers(true);
+  if (!AwaitAllQueueOperationsCompletion()) return;
+  void* mapped = nullptr;
+  if (dfn.vkMapMemory(device, memexport_readback_buffer_memory_, 0, bytes, 0,
+                      &mapped) == VK_SUCCESS &&
+      mapped) {
+    const uint32_t* p = static_cast<const uint32_t*>(mapped);
+    uint32_t n = bytes / 4, nonzero = 0, changes = 0, prev = 0xDEADBEEFu;
+    for (uint32_t k = 0; k < n; ++k) {
+      if (p[k] != 0) ++nonzero;
+      if (p[k] != prev) {
+        ++changes;
+        prev = p[k];
+      }
+    }
+    XELOGI(
+        "TESTRIG_RESOLVE {} {}x{} nonzero={}/{} changes={} s0=0x{:08X} "
+        "smid=0x{:08X} (changes>1 => raw MSAA samples survived storage)",
+        tag, w, h, nonzero, n, changes, p[0], p[n / 2]);
+    // Dump the raw RGBA8 to a file so it can be viewed on the host.
+    FILE* f = std::fopen(
+        "/storage/emulated/0/Android/data/org.xeniaae.canary/files/xeniaae/"
+        "vista_rt.raw",
+        "wb");
+    if (f) {
+      std::fwrite(p, 1, bytes, f);
+      std::fclose(f);
+      XELOGI("TESTRIG_RESOLVE {} wrote {}x{} RGBA8 to vista_rt.raw", tag, w, h);
+    }
+    dfn.vkUnmapMemory(device, memexport_readback_buffer_memory_);
+  }
 }
 
 bool VulkanCommandProcessor::gpu_trace_enabled() {
@@ -3454,7 +3961,10 @@ bool VulkanCommandProcessor::IssueCopy() {
   // address.
   {
     static int gbufgpu_dumps = 0;
-    if (gbufgpu_dumps < 9 && written_length >= 4096 &&
+    // DISABLED for clean build: this mid-resolve GBUFGPU readback does an
+    // AwaitAll (full GPU idle) that perturbs Halo 3's streaming sync and can
+    // trigger the streaming-semaphore deadlock. Set the cap to 0 to disable.
+    if (gbufgpu_dumps < 0 && written_length >= 4096 &&
         (written_address == 0x044B0000u || written_address == 0x04780000u ||
          written_address == 0x043FC000u)) {
       ++gbufgpu_dumps;

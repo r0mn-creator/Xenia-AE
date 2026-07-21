@@ -1299,3 +1299,60 @@ proven full) yet the sampled texture is uniform - pointing at the load COMPUTE
 SHADER's execution on Adreno (or the scratch->image copy), which the scratch
 readback couldn't reach due to the mid-load flush limitation. That's the open
 edge.
+
+## ★ CORRECTION + new evidence: the earlier "texture load broken" was based on a NO-OP test
+
+While re-testing, discovered the earlier "raw-texel" probe that concluded
+"texture load broken" was placed at the end of ProcessVertexFetchInstruction
+(the VERTEX-fetch path) - a PIXEL shader never vfetches, so the probe NEVER
+FIRED and the "uniform navy => load broken" reading was actually just the
+normal (unchanged) composite output. That conclusion is retracted.
+
+### Redone correctly in the texture-fetch path - decisive new data
+The composite pixel shader (373E65D9) is tiny:
+```
+mad r0.__zw, r0.yyyx, c5.yyyx, c5.wwwz
+tfetch2D r1.xyz, r0.xy, tf0            // G-buffer (fc0 = 0x044B0000) at r0.xy
+tfetch2D r0,     r0.wz, tf2, linear    // fc2 = 0x043FC000
+... tonemap (dp4 c229/230/231, log/exp, min c3) -> oC0
+```
+Captured at the fc0 tfetch (correct placement, confirmed by output change):
+1. **Output the fc0 SAMPLE raw => uniform dark BROWN** (not the varied scene).
+2. **Output the fc0 COORDINATE (r0.xy) => a clean smooth 0..1 gradient**
+   (green->red->yellow across the screen). So the interpolated texcoord is
+   CORRECT and varies per-fragment. Interpolator/param-gen is fine.
+3. Forced explicit **LOD 0** on the fetch => still uniform brown. So it is NOT
+   a mip/computed-LOD issue; mip 0 itself samples uniform.
+4. Magenta test already proved fragments run per-pixel across the screen.
+
+Correct coordinate + per-pixel fragments + LOD 0 + uniform sample => the
+sampled texture is genuinely uniform (brown) at mip 0. Brown ~= the AVERAGE of
+the reference vista (a dark brown snowy landscape).
+
+### No render-target-as-texture serving
+Checked the texture cache: it does NOT bind render-target host images for
+overlapping textures (only scaled_resolve handling, which this texture isn't).
+So the composite samples the normally-LOADED-from-shared-memory texture.
+
+### The G-buffer texture is aggressively evicted/reloaded (new clue)
+Added a host-image readback (new deferred CmdVkCopyImageToBuffer +
+TestrigReadbackAndLogImage + TestrigFindTextureByBasePage). At IssueSwap the
+texture at base_page 0x44B0 is NOT in the cache (only 4-9 textures total, near=0)
+- despite ~384 loads earlier. So it's created/loaded/sampled during the
+composite draw and EVICTED before swap (constant invalidate+reload thrash,
+consistent with every resolve to 0x044B0000 invalidating it). This is why the
+swap-time image readback can't find it - the texture is alive only during the
+composite draw, which is not a flushable point (AwaitAllQueue can't flush an
+open submission).
+
+### Where this leaves it
+The composite samples a uniform-brown texture at 0x044B0000 with correct coords,
+not a mip issue, not RT-alias, and the resolve DID put varied data in shared
+memory (GBUFGPU). The reload during the composite draw apparently produces a
+uniform image (or samples a uniform instance). The barrier fix + a forced full
+GPU idle after every G-buffer resolve did NOT change it, so it's not simple
+visibility. NEXT: capture the loaded image content with a DECOUPLED copy -
+record image->persistent-buffer inside the load (deferred), read that buffer at
+the next flushable point (swap) - to finally see whether the load writes a
+uniform or varied image for this texture. Infra (deferred CmdVkCopyImageToBuffer,
+readback helpers, GPU trace) is now in place for it.

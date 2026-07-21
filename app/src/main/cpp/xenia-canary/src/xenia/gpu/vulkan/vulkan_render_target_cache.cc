@@ -284,6 +284,7 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     msaa_2x_no_attachments_supported_ = false;
   }
 
+
   // Descriptor set layouts.
   VkDescriptorSetLayoutBinding descriptor_set_layout_bindings[2];
   descriptor_set_layout_bindings[0].binding = 0;
@@ -874,6 +875,10 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
 
+  // Adreno resolved-dump companions use the sampled-image descriptor pool -
+  // destroy before that pool is torn down.
+  DestroyResolvedDumpCompanions();
+
   // Destroy all render targets before the descriptor set pool is destroyed -
   // may happen if shutting down the VulkanRenderTargetCache by destroying it,
   // so ShutdownCommon is called by the RenderTargetCache destructor, when it's
@@ -1016,6 +1021,7 @@ void VulkanRenderTargetCache::EndSubmission() {
     transfer_vertex_buffer_pool_->FlushWrites();
   }
 }
+
 
 bool VulkanRenderTargetCache::Resolve(const Memory& memory,
                                       VulkanSharedMemory& shared_memory,
@@ -1426,6 +1432,7 @@ bool VulkanRenderTargetCache::Update(
     case Path::kHostRenderTargets: {
       RenderTarget* const* depth_and_color_render_targets =
           last_update_accumulated_render_targets();
+
 
       PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
                                        depth_and_color_render_targets,
@@ -1879,6 +1886,9 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
       image_create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     }
     image_create_info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // Adreno workaround: allow resolving multisample color targets to a 1x
+    // image for dumping (multisample compute reads collapse on some drivers).
+    image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
   }
   if (image_create_info.format == VK_FORMAT_UNDEFINED) {
     XELOGE("VulkanRenderTargetCache: Unknown {} render target format {}",
@@ -5436,6 +5446,50 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
               kTransferUsedPushConstantDwordAddressBit;
         }
 
+        // TESTRIG(halo3-transfer): log the actual copy-forward draw that
+        // executes when EDRAM tile ownership changes hands, gated to the
+        // vista's contended tiles (608 terrain/albedo, 1216 composite
+        // output), deduped so a rapid back-and-forth doesn't flood. This is
+        // the step that repaints a render target with its predecessor's
+        // content before the new owner draws into it - if it's overwriting
+        // fresh vista pixels with stale composite output (or vice versa)
+        // more than intended, this is where it would show up.
+        if (dest_rt_key.base_tiles == 608u || dest_rt_key.base_tiles == 1216u) {
+          RenderTargetKey source_key_for_log = source_vulkan_rt.key();
+          static uint32_t last_dest_key[2] = {0, 0};
+          static uint32_t last_source_key[2] = {0, 0};
+          static uint32_t repeat_count[2] = {0, 0};
+          static int total_emitted[2] = {0, 0};
+          int slot = dest_rt_key.base_tiles == 608u ? 0 : 1;
+          if (dest_rt_key.key == last_dest_key[slot] &&
+              source_key_for_log.key == last_source_key[slot]) {
+            ++repeat_count[slot];
+          } else {
+            if (repeat_count[slot] > 1 && total_emitted[slot] < 150) {
+              XELOGI("RTTRANSFER tile{} (repeated {}x)", dest_rt_key.base_tiles,
+                     repeat_count[slot]);
+            }
+            if (total_emitted[slot] < 150) {
+              ++total_emitted[slot];
+              XELOGI(
+                  "RTTRANSFER tile{} SRC(base{}pitch{}msaa{}fmt{}) -> "
+                  "DEST(base{}pitch{}msaa{}fmt{}) tiles[{}..{}) rects={}",
+                  dest_rt_key.base_tiles, source_key_for_log.base_tiles,
+                  source_key_for_log.pitch_tiles_at_32bpp,
+                  uint32_t(source_key_for_log.msaa_samples),
+                  source_key_for_log.resource_format, dest_rt_key.base_tiles,
+                  dest_rt_key.pitch_tiles_at_32bpp,
+                  uint32_t(dest_rt_key.msaa_samples),
+                  dest_rt_key.resource_format,
+                  transfer_invocation_first.transfer.start_tiles,
+                  transfer_invocation_first.transfer.end_tiles,
+                  transfer_rectangle_count);
+            }
+            last_dest_key[slot] = dest_rt_key.key;
+            last_source_key[slot] = source_key_for_log.key;
+            repeat_count[slot] = 1;
+          }
+        }
         for (uint32_t j = 0; j < transfer_sample_pipeline_count; ++j) {
           if (j) {
             command_processor_.BindExternalGraphicsPipeline(
@@ -5612,6 +5666,9 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
   builder.addDecoration(edram_buffer, spv::DecorationBinding, 0);
   // Color or depth source.
   bool source_is_multisampled = key.msaa_samples != xenos::MsaaSamples::k1X;
+  // Adreno workaround: the source IMAGE is a resolved 1x texture, but the EDRAM
+  // per-sample ADDRESSING still uses the real multisample layout.
+  bool read_multisampled = source_is_multisampled && !key.read_resolved_1x;
   bool source_is_uint;
   if (key.is_depth) {
     source_is_uint = false;
@@ -5623,7 +5680,7 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
   spv::Id source_texture = builder.createVariable(
       spv::NoPrecision, spv::StorageClassUniformConstant,
       builder.makeImageType(source_component_type, spv::Dim2D, false, false,
-                            source_is_multisampled, 1, spv::ImageFormatUnknown),
+                            read_multisampled, 1, spv::ImageFormatUnknown),
       "xe_edram_dump_source");
   builder.addDecoration(source_texture, spv::DecorationDescriptorSet,
                         kDumpDescriptorSetSource);
@@ -5854,10 +5911,12 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
       builder.createUnaryOp(spv::OpBitcast, type_int, source_pixel_y));
   source_texture_parameters.coords =
       builder.createCompositeConstruct(type_int2, id_vector_temp);
-  if (source_is_multisampled) {
+  if (read_multisampled) {
     source_texture_parameters.sample =
         builder.createUnaryOp(spv::OpBitcast, type_int, source_sample_id);
   } else {
+    // Resolved 1x source (or genuinely single-sample): read LOD 0. All samples
+    // of a pixel therefore read the same resolved value.
     source_texture_parameters.lod = builder.makeIntConstant(0);
   }
   spv::Id source_vec4 = builder.createTextureCall(
@@ -6084,6 +6143,162 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
   return pipeline;
 }
 
+void VulkanRenderTargetCache::DestroyResolvedDumpCompanions() {
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  if (!vulkan_device) {
+    resolved_dump_companions_.clear();
+    return;
+  }
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  for (ResolvedDumpCompanion& comp : resolved_dump_companions_) {
+    if (comp.descriptor_index != SIZE_MAX) {
+      descriptor_set_pool_sampled_image_->Free(comp.descriptor_index);
+    }
+    if (comp.view != VK_NULL_HANDLE) {
+      dfn.vkDestroyImageView(device, comp.view, nullptr);
+    }
+    if (comp.image != VK_NULL_HANDLE) {
+      dfn.vkDestroyImage(device, comp.image, nullptr);
+    }
+    if (comp.memory != VK_NULL_HANDLE) {
+      dfn.vkFreeMemory(device, comp.memory, nullptr);
+    }
+  }
+  resolved_dump_companions_.clear();
+}
+
+VkDescriptorSet VulkanRenderTargetCache::ResolveColorRenderTargetForDump(
+    VulkanRenderTarget& vulkan_rt, size_t slot) {
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  RenderTargetKey rt_key = vulkan_rt.key();
+  uint32_t width = rt_key.GetWidth() * draw_resolution_scale_x();
+  uint32_t height =
+      GetRenderTargetHeight(rt_key.pitch_tiles_at_32bpp, rt_key.msaa_samples) *
+      draw_resolution_scale_y();
+  VkFormat format = GetColorVulkanFormat(rt_key.GetColorFormat());
+  {
+    static int n = 0;
+    if (n++ < 12) {
+      XELOGI("RESOLVEDUMP slot={} base_tiles={} {}x{} msaa={} fmt={}", slot,
+             rt_key.base_tiles, width, height, uint32_t(rt_key.msaa_samples),
+             uint32_t(rt_key.resource_format));
+    }
+  }
+  if (slot >= resolved_dump_companions_.size()) {
+    resolved_dump_companions_.resize(slot + 1);
+  }
+  ResolvedDumpCompanion& comp = resolved_dump_companions_[slot];
+  if (comp.image == VK_NULL_HANDLE || comp.width != width ||
+      comp.height != height || comp.format != format) {
+    if (comp.view != VK_NULL_HANDLE) {
+      dfn.vkDestroyImageView(device, comp.view, nullptr);
+      comp.view = VK_NULL_HANDLE;
+    }
+    if (comp.image != VK_NULL_HANDLE) {
+      dfn.vkDestroyImage(device, comp.image, nullptr);
+      dfn.vkFreeMemory(device, comp.memory, nullptr);
+      comp.image = VK_NULL_HANDLE;
+    }
+    VkImageCreateInfo ici = {};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = format;
+    ici.extent = {width, height, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!ui::vulkan::util::CreateDedicatedAllocationImage(
+            vulkan_device, ici, ui::vulkan::util::MemoryPurpose::kDeviceLocal,
+            comp.image, comp.memory)) {
+      comp.image = VK_NULL_HANDLE;
+      return VK_NULL_HANDLE;
+    }
+    VkImageViewCreateInfo vci = {};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = comp.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = format;
+    vci.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+    vci.subresourceRange = ui::vulkan::util::InitializeSubresourceRange(
+        VK_IMAGE_ASPECT_COLOR_BIT);
+    if (dfn.vkCreateImageView(device, &vci, nullptr, &comp.view) !=
+        VK_SUCCESS) {
+      dfn.vkDestroyImage(device, comp.image, nullptr);
+      dfn.vkFreeMemory(device, comp.memory, nullptr);
+      comp.image = VK_NULL_HANDLE;
+      return VK_NULL_HANDLE;
+    }
+    if (comp.descriptor_index == SIZE_MAX) {
+      comp.descriptor_index = descriptor_set_pool_sampled_image_->Allocate();
+    }
+    VkDescriptorImageInfo dii = {};
+    dii.imageView = comp.view;
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w = {};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet =
+        descriptor_set_pool_sampled_image_->Get(comp.descriptor_index);
+    w.dstBinding = 0;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    w.pImageInfo = &dii;
+    dfn.vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+    comp.width = width;
+    comp.height = height;
+    comp.format = format;
+  }
+  // Record: MSAA RT -> TRANSFER_SRC, companion -> TRANSFER_DST, resolve,
+  // companion -> SHADER_READ_ONLY. The RT is left in TRANSFER_SRC (the dump
+  // loop's own barrier will move it to SHADER_READ_ONLY afterwards).
+  VkImageSubresourceRange color_range =
+      ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
+  command_processor_.PushImageMemoryBarrier(
+      vulkan_rt.image(), color_range, vulkan_rt.current_stage_mask(),
+      VK_PIPELINE_STAGE_TRANSFER_BIT, vulkan_rt.current_access_mask(),
+      VK_ACCESS_TRANSFER_READ_BIT, vulkan_rt.current_layout(),
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+  vulkan_rt.SetUsage(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+  command_processor_.PushImageMemoryBarrier(
+      comp.image, color_range, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  command_processor_.SubmitBarriers(true);
+  VkImageResolve resolve_region = {};
+  resolve_region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  resolve_region.srcSubresource.layerCount = 1;
+  resolve_region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  resolve_region.dstSubresource.layerCount = 1;
+  resolve_region.extent = {width, height, 1};
+  command_processor_.deferred_command_buffer().CmdVkResolveImage(
+      vulkan_rt.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, comp.image,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &resolve_region);
+  command_processor_.PushImageMemoryBarrier(
+      comp.image, color_range, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  // TESTRIG: capture the resolved companion content for the vista albedo RT so
+  // we can see (at swap) whether the companion holds varied per-pixel content.
+  if (false && rt_key.base_tiles == 1216u) {
+    command_processor_.TestrigCaptureImageDeferred(
+        comp.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, width, height);
+  }
+  return descriptor_set_pool_sampled_image_->Get(comp.descriptor_index);
+}
+
 void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
                                                 uint32_t dump_row_length_used,
                                                 uint32_t dump_rows,
@@ -6116,6 +6331,24 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
     auto& vulkan_rt =
         *static_cast<VulkanRenderTarget*>(rectangle.render_target);
     RenderTargetKey rt_key = vulkan_rt.key();
+    // TESTRIG(halo3-resolvetest): for the vista's 4x-MSAA color G-buffer, use
+    // the HARDWARE resolve (a different path than the broken compute texelFetch)
+    // to check whether the raw MSAA samples survived storage. changes>1 => they
+    // survived (so a fragment-shader read / option 1 can work); changes==1 =>
+    // storage itself collapsed them.
+    if (false && dump_base == 608u && !rt_key.is_depth &&
+        rt_key.msaa_samples == xenos::MsaaSamples::k4X) {
+      static int n = 0;
+      if (n++ < 25) {
+        command_processor_.TestrigResolveAndReadImage(
+            "VISTA_RT_608", vulkan_rt.image(), vulkan_rt.current_layout(),
+            GetColorVulkanFormat(rt_key.GetColorFormat()),
+            rt_key.GetWidth() * draw_resolution_scale_x(),
+            GetRenderTargetHeight(rt_key.pitch_tiles_at_32bpp,
+                                  rt_key.msaa_samples) *
+                draw_resolution_scale_y());
+      }
+    }
     command_processor_.PushImageMemoryBarrier(
         vulkan_rt.image(),
         ui::vulkan::util::InitializeSubresourceRange(
@@ -6135,6 +6368,13 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
     pipeline_key.msaa_samples = rt_key.msaa_samples;
     pipeline_key.resource_format = rt_key.resource_format;
     pipeline_key.is_depth = rt_key.is_depth;
+    // Adreno workaround (DORMANT - proven NOT the Halo 3 vista cause): the
+    // per-sample compute texelFetch dump is CORRECT (EDRAM tile 608 reads back
+    // 59488 distinct/varied every frame). The vista collapse is downstream in
+    // the EDRAM->shared-memory resolve source selection, not the MSAA dump. The
+    // read-resolved-1x infra is kept but disabled to avoid MSAA AA loss/regress
+    // on other games. See docs/HALO3_FINDINGS_CHECKLIST.md.
+    pipeline_key.read_resolved_1x = 0;
     dump_invocations_.emplace_back(rectangle, pipeline_key);
   }
 
@@ -6149,6 +6389,7 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
   DumpPitches last_pitches;
   DumpOffsets last_offsets;
   bool pitches_bound = false, offsets_bound = false;
+  size_t resolved_dump_slot = 0;
   for (const DumpInvocation& invocation : dump_invocations_) {
     const ResolveCopyDumpRectangle& rectangle = invocation.rectangle;
     auto& vulkan_rt =
@@ -6175,8 +6416,25 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
           nullptr);
     }
 
-    VkDescriptorSet source_descriptor_set =
-        vulkan_rt.GetDescriptorSetTransferSource();
+    // TESTRIG(halo3-rt1216): diagnostically resolve RT base_tiles==1216 to a 1x
+    // companion and capture it (DISABLED - already proved RT 1216 host image is
+    // uniform near-black, a feedback-decay; see docs/HALO3_FINDINGS_CHECKLIST.md).
+    if (false && rt_key.base_tiles == 1216u && !rt_key.is_depth &&
+        rt_key.msaa_samples != xenos::MsaaSamples::k1X) {
+      ResolveColorRenderTargetForDump(vulkan_rt, 900);
+    }
+
+    VkDescriptorSet source_descriptor_set;
+    if (pipeline_key.read_resolved_1x) {
+      // Resolve the MSAA color RT into a 1x companion and read that instead.
+      source_descriptor_set =
+          ResolveColorRenderTargetForDump(vulkan_rt, resolved_dump_slot++);
+      if (source_descriptor_set == VK_NULL_HANDLE) {
+        source_descriptor_set = vulkan_rt.GetDescriptorSetTransferSource();
+      }
+    } else {
+      source_descriptor_set = vulkan_rt.GetDescriptorSetTransferSource();
+    }
     if (last_source_descriptor_set != source_descriptor_set) {
       last_source_descriptor_set = source_descriptor_set;
       command_buffer.CmdVkBindDescriptorSets(

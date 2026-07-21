@@ -912,6 +912,86 @@ uint64_t VulkanTextureCache::GetSubmissionToAwaitOnSamplerOverflow(
   return sampler_used->second.last_usage_submission;
 }
 
+void VulkanTextureCache::TestrigLogBoundTexture(uint32_t fc, const char* tag) {
+  const TextureBinding* b = GetValidTextureBinding(fc);
+  if (!b) {
+    XELOGI("{} fc{}: NO valid binding", tag, fc);
+    return;
+  }
+  XELOGI(
+      "{} fc{} bindkey base=0x{:08X} {}x{} fmt={} tiled={} dim={} "
+      "signsep={} swizsigns=0x{:X}",
+      tag, fc, b->key.base_page << 12, b->key.GetWidth(), b->key.GetHeight(),
+      uint32_t(b->key.format), uint32_t(b->key.tiled),
+      uint32_t(b->key.dimension), uint32_t(b->key.signed_separate),
+      b->swizzled_signs);
+  auto logtex = [&](const char* which, Texture* t) {
+    if (!t) {
+      XELOGI("{} fc{} {}=NULL", tag, fc, which);
+      return;
+    }
+    VulkanTexture* vt = static_cast<VulkanTexture*>(t);
+    const TextureKey& k = vt->key();
+    XELOGI("{} fc{} {} base=0x{:08X} {}x{} fmt={} tiled={} signsep={} img=0x{:016X}",
+           tag, fc, which, k.base_page << 12, k.GetWidth(), k.GetHeight(),
+           uint32_t(k.format), uint32_t(k.tiled), uint32_t(k.signed_separate),
+           reinterpret_cast<uint64_t>(vt->image()));
+  };
+  logtex("unsigned", b->texture);
+  logtex("signed", b->texture_signed);
+  // TESTRIG(halo3-mip): log the mip range from this fetch constant. If
+  // mip_min_level > 0, the sampler's minLod clamps ALL sampling (even explicit
+  // LOD 0) up to that mip - which would collapse the G-buffer read to the
+  // scene average (spatially flat, temporally alive, LOD-independent), exactly
+  // the observed vista bug.
+  {
+    xenos::xe_gpu_texture_fetch_t fetch = register_file().GetTextureFetch(fc);
+    uint32_t mmin = 0, mmax = 0;
+    texture_util::GetSubresourcesFromFetchConstant(
+        fetch, nullptr, nullptr, nullptr, nullptr, nullptr, &mmin, &mmax);
+    uint32_t host_mip_levels =
+        b->texture ? (static_cast<VulkanTexture*>(b->texture)->key().mip_max_level + 1)
+                   : 0;
+    XELOGI(
+        "{} fc{} MIP mip_min_level={} mip_max_level={} -> sampler.minLod={} "
+        "host_image_mipLevels={} mip_filter={} min_filter={} mag_filter={}",
+        tag, fc, mmin, mmax, float(mmin), host_mip_levels,
+        uint32_t(fetch.mip_filter), uint32_t(fetch.min_filter),
+        uint32_t(fetch.mag_filter));
+  }
+}
+
+void VulkanTextureCache::TestrigCaptureBoundImage(uint32_t fc) {
+  // TESTRIG(halo3-loadvsuse): record a deferred copy of the EXACT image bound
+  // to fetch-constant `fc` at THIS draw (the composite draw), in its current
+  // sampling layout. Read at swap. If this is uniform, the composite samples a
+  // uniform image at draw time (load-vs-use: wrong instance or unordered copy).
+  const TextureBinding* b = GetValidTextureBinding(fc);
+  if (!b || !b->texture) {
+    XELOGI("COMPOSITE_CAP fc{}: no bound texture", fc);
+    return;
+  }
+  VulkanTexture* vt = static_cast<VulkanTexture*>(b->texture);
+  XELOGI("COMPOSITE_CAP fc{} capturing img=0x{:016X} {}x{}", fc,
+         reinterpret_cast<uint64_t>(vt->image()), vt->key().GetWidth(),
+         vt->key().GetHeight());
+  command_processor_.TestrigCaptureImageDeferred(
+      vt->image(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      vt->key().GetWidth(), vt->key().GetHeight());
+}
+
+void VulkanTextureCache::TestrigDumpGbufferImage() {
+  Texture* t = TestrigFindTextureByBasePage(0x44B0u, 1152u);
+  if (!t) {
+    XELOGI("TESTRIG_IMAGE GBUF44B0 texture NOT FOUND");
+    return;
+  }
+  VulkanTexture* vt = static_cast<VulkanTexture*>(t);
+  command_processor_.TestrigReadbackAndLogImage(
+      "GBUF44B0", vt->image(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      vt->key().GetWidth(), vt->key().GetHeight());
+}
+
 VkImageView VulkanTextureCache::RequestSwapTexture(
     uint32_t& width_scaled_out, uint32_t& height_scaled_out,
     xenos::TextureFormat& format_out) {
@@ -1312,6 +1392,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
           VK_ACCESS_SHADER_WRITE_BIT));
   VkBuffer scratch_buffer = scratch_buffer_acquisition.buffer();
   if (scratch_buffer == VK_NULL_HANDLE) {
+    if (texture_key.base_page == 0x44B0u)
+      XELOGI("LOADFAIL scratch base=0x44B0 size={}", host_buffer_size);
     return false;
   }
 
@@ -1331,6 +1413,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
           VulkanCommandProcessor::SingleTransientDescriptorLayout ::
               kStorageBufferCompute);
   if (!descriptor_set_dest) {
+    if (texture_key.base_page == 0x44B0u)
+      XELOGI("LOADFAIL descdest base=0x44B0");
     return false;
   }
   VkDescriptorBufferInfo write_descriptor_set_dest_buffer_info;
@@ -1455,6 +1539,10 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         command_processor_.AllocateSingleTransientDescriptor(
             VulkanCommandProcessor::SingleTransientDescriptorLayout ::
                 kStorageBufferCompute);
+    if (!descriptor_set_source_mips &&
+        texture_key.base_page == 0x44B0u) {
+      XELOGI("LOADFAIL srcmips base=0x44B0 level_last={}", level_last);
+    }
     if (!descriptor_set_source_mips) {
       return false;
     }
@@ -1598,6 +1686,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                   kUniformBufferCompute,
               descriptor_set_constants);
       if (!constants_mapping) {
+        if (texture_key.base_page == 0x44B0u)
+          XELOGI("LOADFAIL constants base=0x44B0");
         return false;
       }
       std::memcpy(constants_mapping, &load_constants, sizeof(load_constants));
@@ -1702,6 +1792,27 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     copy_region.imageExtent.height =
         std::max((height * texture_resolution_scale_y) >> level, UINT32_C(1));
     copy_region.imageExtent.depth = std::max(depth >> level, UINT32_C(1));
+  }
+
+  // TESTRIG(halo3): decoupled capture of the just-loaded G-buffer host image
+  // (image is TRANSFER_DST_OPTIMAL here after the buffer->image copy). Records
+  // the copy now (deferred), read at swap. Decisive: uniform => the load writes
+  // a uniform image; varied => the load works and the uniform sample is a
+  // binding/instance/sampler issue.
+  // TESTRIG(halo3): log every load of a texture at the vista G-buffer address so
+  // its instance (image ptr) + key can be compared to what the composite binds.
+  // Capture the FRONT BUFFER (which now holds the composite's raw albedo output
+  // thanks to the halo3-measure shader probe) to MEASURE the sample's variation.
+  // TESTRIG(halo3-loadvsuse): log the DEST image ptr this load just wrote into,
+  // for the vista G-buffer. Compare against the composite's bound img ptr
+  // (COMPOSITE_CAP) in the same frame: same ptr => load wrote the sampled image
+  // (so uniform sample = load wrote uniform / overwritten); different ptr =>
+  // instance aliasing (composite binds a stale/uniform instance).
+  if (texture_key.base_page == 0x44B0u) {
+    XELOGI("LOADDEST base=0x44B0 img=0x{:016X} {}x{} load_mips={} level_last={}",
+           reinterpret_cast<uint64_t>(vulkan_texture.image()),
+           texture_key.GetWidth(), texture_key.GetHeight(), load_mips,
+           level_last);
   }
 
   return true;

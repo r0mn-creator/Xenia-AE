@@ -232,6 +232,41 @@ class DeferredCommandBuffer {
                 regions, sizeof(VkBufferImageCopy) * region_count);
   }
 
+  void CmdVkCopyImageToBuffer(VkImage src_image, VkImageLayout src_image_layout,
+                              VkBuffer dst_buffer, uint32_t region_count,
+                              const VkBufferImageCopy* regions) {
+    const size_t header_size =
+        xe::align(sizeof(ArgsVkCopyImageToBuffer), alignof(VkBufferImageCopy));
+    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
+        WriteCommand(Command::kVkCopyImageToBuffer,
+                     header_size + sizeof(VkBufferImageCopy) * region_count));
+    auto& args = *reinterpret_cast<ArgsVkCopyImageToBuffer*>(args_ptr);
+    args.src_image = src_image;
+    args.src_image_layout = src_image_layout;
+    args.dst_buffer = dst_buffer;
+    args.region_count = region_count;
+    std::memcpy(args_ptr + header_size, regions,
+                sizeof(VkBufferImageCopy) * region_count);
+  }
+
+  void CmdVkResolveImage(VkImage src_image, VkImageLayout src_image_layout,
+                         VkImage dst_image, VkImageLayout dst_image_layout,
+                         uint32_t region_count, const VkImageResolve* regions) {
+    const size_t header_size =
+        xe::align(sizeof(ArgsVkResolveImage), alignof(VkImageResolve));
+    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
+        WriteCommand(Command::kVkResolveImage,
+                     header_size + sizeof(VkImageResolve) * region_count));
+    auto& args = *reinterpret_cast<ArgsVkResolveImage*>(args_ptr);
+    args.src_image = src_image;
+    args.src_image_layout = src_image_layout;
+    args.dst_image = dst_image;
+    args.dst_image_layout = dst_image_layout;
+    args.region_count = region_count;
+    std::memcpy(args_ptr + header_size, regions,
+                sizeof(VkImageResolve) * region_count);
+  }
+
   void CmdVkDispatch(uint32_t group_count_x, uint32_t group_count_y,
                      uint32_t group_count_z) {
     auto& args = *reinterpret_cast<ArgsVkDispatch*>(
@@ -369,12 +404,14 @@ class DeferredCommandBuffer {
     kVkClearColorImage,
     kVkCopyBuffer,
     kVkCopyBufferToImage,
+    kVkCopyImageToBuffer,
     kVkDispatch,
     kVkDraw,
     kVkDrawIndexed,
     kVkEndRenderPass,
     kVkPipelineBarrier,
     kVkPushConstants,
+    kVkResolveImage,
     kVkSetBlendConstants,
     kVkSetDepthBias,
     kVkSetScissor,
@@ -462,6 +499,25 @@ class DeferredCommandBuffer {
     uint32_t region_count;
     // Followed by aligned VkBufferImageCopy[].
     static_assert(alignof(VkBufferImageCopy) <= alignof(uintmax_t));
+  };
+
+  struct ArgsVkCopyImageToBuffer {
+    VkImage src_image;
+    VkImageLayout src_image_layout;
+    VkBuffer dst_buffer;
+    uint32_t region_count;
+    // Followed by aligned VkBufferImageCopy[].
+    static_assert(alignof(VkBufferImageCopy) <= alignof(uintmax_t));
+  };
+
+  struct ArgsVkResolveImage {
+    VkImage src_image;
+    VkImageLayout src_image_layout;
+    VkImage dst_image;
+    VkImageLayout dst_image_layout;
+    uint32_t region_count;
+    // Followed by aligned VkImageResolve[].
+    static_assert(alignof(VkImageResolve) <= alignof(uintmax_t));
   };
 
   struct ArgsVkDispatch {

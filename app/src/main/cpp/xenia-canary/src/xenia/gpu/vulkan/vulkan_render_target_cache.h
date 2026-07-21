@@ -279,6 +279,29 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   std::unique_ptr<ui::vulkan::SingleLayoutDescriptorSetPool>
       descriptor_set_pool_sampled_image_x2_;
 
+  class VulkanRenderTarget;
+
+  // Adreno workaround: pool of 1x resolved companion images for dumping
+  // multisample color render targets (which Adreno collapses when read
+  // per-sample in a compute shader). One slot per dump invocation.
+  struct ResolvedDumpCompanion {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    size_t descriptor_index = SIZE_MAX;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+  };
+  std::vector<ResolvedDumpCompanion> resolved_dump_companions_;
+  // Ensures companion[slot] matches the source RT (recreating if needed),
+  // records a hardware resolve of the MSAA color RT into it, and returns the
+  // sampled-image descriptor bound to the resolved 1x image. VK_NULL_HANDLE on
+  // failure (caller falls back to the normal multisample path).
+  VkDescriptorSet ResolveColorRenderTargetForDump(VulkanRenderTarget& vulkan_rt,
+                                                   size_t slot);
+  void DestroyResolvedDumpCompanions();
+
   VkDeviceMemory edram_buffer_memory_ = VK_NULL_HANDLE;
   VkBuffer edram_buffer_ = VK_NULL_HANDLE;
   EdramBufferUsage edram_buffer_usage_;
@@ -710,6 +733,11 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       // Last bit because this affects the pipeline - after sorting, only change
       // it at most once. Depth buffers have an additional stencil SRV.
       uint32_t is_depth : 1;
+      // Adreno workaround: read the source as a resolved 1x image (bound as a
+      // single-sample texture) instead of per-sample multisample texelFetch,
+      // which collapses to a single value on some Adreno drivers. The EDRAM
+      // per-sample addressing is unchanged (all samples get the resolved value).
+      uint32_t read_resolved_1x : 1;
     };
 
     DumpPipelineKey() : key(0) { static_assert_size(*this, sizeof(key)); }

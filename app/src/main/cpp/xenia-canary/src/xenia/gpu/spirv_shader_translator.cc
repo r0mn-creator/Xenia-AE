@@ -2040,7 +2040,8 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
   // TODO(Triang3l): More conditions - alpha to coverage (if RT 0 is written,
   // and there's no early depth / stencil), depth writing in the fragment shader
   // (per-sample if supported).
-  if (edram_fragment_shader_interlock_ || param_gen_needed) {
+  if (edram_fragment_shader_interlock_ || param_gen_needed ||
+      kTestrigHalo3Mode == 4) {
     input_fragment_coordinates_ = builder_->createVariable(
         spv::NoPrecision, spv::StorageClassInput, type_float4_, "gl_FragCoord");
     builder_->addDecoration(input_fragment_coordinates_, spv::DecorationBuiltIn,
@@ -2752,6 +2753,66 @@ void SpirvShaderTranslator::StoreResult(const InstructionResult& result,
       assert_not_zero(used_write_mask);
       assert_true(current_shader().writes_color_target(result.storage_index));
       target_pointer = output_or_var_fragment_data_[result.storage_index];
+      // TESTRIG(halo3-rawsample): override the composite PS's tonemapped color
+      // with its raw albedo sample so we can see on-device whether the SAMPLE
+      // is varied (=> tonemap collapses) or uniform (=> sampler/view issue).
+      if (kTestrigHalo3RawSample && result.storage_index == 0 &&
+          testrig_halo3_albedo_rgb_[0] != spv::NoResult &&
+          current_shader().ucode_data_hash() == 0x373E65D9ADCF4380ull &&
+          value != spv::NoResult) {
+        unsigned int nc = builder_->getNumComponents(value);
+        if (nc == 1) {
+          value = testrig_halo3_albedo_rgb_[0];
+        } else {
+          std::vector<spv::Id> comps;
+          for (unsigned int i = 0; i < nc; ++i) {
+            comps.push_back(testrig_halo3_albedo_rgb_[i < 3 ? i : 2]);
+          }
+          value = builder_->createCompositeConstruct(
+              type_float_vectors_[nc - 1], comps);
+        }
+      }
+      // TESTRIG(halo3-sceneforce) mode 4: force NON-composite pixel shaders'
+      // color0 to a distinctive magenta. Tests whether the 3D scene geometry
+      // rasterizes into the G-buffer at all. If the vista changes away from
+      // navy, geometry + MSAA store + dump read + composite all work; if it
+      // stays navy, the scene isn't producing varied content into the RT.
+      if (kTestrigHalo3Mode == 4 && result.storage_index == 0 &&
+          current_shader().ucode_data_hash() != 0x373E65D9ADCF4380ull &&
+          value != spv::NoResult &&
+          input_fragment_coordinates_ != spv::NoResult) {
+        // Per-pixel gl_FragCoord pattern: if this reaches the vista as a
+        // spatial gradient, the scene->RT->dump->resolve->composite path
+        // preserves per-pixel variation (so the real scene shaders output
+        // uniform); if it collapses to uniform, the MSAA store/read collapses
+        // variation on Adreno.
+        spv::Id fc =
+            builder_->createLoad(input_fragment_coordinates_, spv::NoPrecision);
+        spv::Id fx = builder_->createCompositeExtract(fc, type_float_, 0);
+        spv::Id fy = builder_->createCompositeExtract(fc, type_float_, 1);
+        spv::Id r = builder_->createUnaryBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450Fract,
+            builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_, fx, builder_->makeFloatConstant(0.03f)));
+        spv::Id g = builder_->createUnaryBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450Fract,
+            builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_, fy, builder_->makeFloatConstant(0.03f)));
+        spv::Id b = builder_->makeFloatConstant(0.5f);
+        spv::Id a = builder_->makeFloatConstant(1.0f);
+        spv::Id ch[4] = {r, g, b, a};
+        unsigned int nc = builder_->getNumComponents(value);
+        if (nc == 1) {
+          value = r;
+        } else {
+          std::vector<spv::Id> comps;
+          for (unsigned int i = 0; i < nc; ++i) {
+            comps.push_back(ch[i < 4 ? i : 3]);
+          }
+          value = builder_->createCompositeConstruct(
+              type_float_vectors_[nc - 1], comps);
+        }
+      }
       if (edram_fragment_shader_interlock_) {
         assert_true(var_main_fsi_color_written_ != spv::NoResult);
         builder_->createStore(

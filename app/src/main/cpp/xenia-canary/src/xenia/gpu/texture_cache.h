@@ -19,6 +19,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/hash.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/mutex.h"
 #include "xenia/gpu/register_file.h"
@@ -608,6 +609,32 @@ class TextureCache {
       uint32_t fetch_constant_index) const {
     const TextureBinding& binding = texture_bindings_[fetch_constant_index];
     return binding.key.is_valid ? &binding : nullptr;
+  }
+  // TESTRIG(halo3): find a loaded texture by guest base page (address>>12) for
+  // diagnostic host-image readback. Returns the widest match; logs candidates.
+  Texture* TestrigFindTextureByBasePage(uint32_t base_page, uint32_t min_width) {
+    Texture* best = nullptr;
+    uint32_t best_w = 0;
+    uint32_t total = 0, near = 0;
+    for (auto& kv : textures_) {
+      ++total;
+      if (kv.first.base_page == base_page) {
+        ++near;
+        uint32_t w = kv.first.GetWidth();
+        XELOGI("TESTRIG_IMG_CAND base=0x{:X} {}x{} tiled={} fmt={}",
+               kv.first.base_page, w, kv.first.GetHeight(),
+               uint32_t(kv.first.tiled), uint32_t(kv.first.format));
+        if (w >= min_width && w > best_w) {
+          best_w = w;
+          best = kv.second.get();
+        }
+      }
+    }
+    if (!best) {
+      XELOGI("TESTRIG_IMG_CAND none at base=0x{:X} (total_textures={} near={})",
+             base_page, total, near);
+    }
+    return best;
   }
   // Called when something in a texture binding is changed for the
   // implementation to update the internal dependencies of the binding.

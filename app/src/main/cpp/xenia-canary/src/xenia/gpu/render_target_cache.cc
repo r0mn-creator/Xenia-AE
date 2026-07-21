@@ -1644,6 +1644,56 @@ void RenderTargetCache::ChangeOwnership(
           }
         }
       }
+      // TESTRIG(halo3-ownership): log every time a tile range actually
+      // changes hands, near the vista's two contended tiles (608 = vista
+      // albedo/terrain, 1216 = composite output), to see the real order of
+      // claims and whether a transfer (copy-forward) was queued for each.
+      {
+        const RenderTargetKey& prev_owner = it->second.render_target;
+        uint32_t log_range_end = std::min(it->second.end_tiles, extent_end);
+        // Which watched tile (608 = vista albedo/terrain, 1216 = composite
+        // output) this claim touches, if any. Logged/capped SEPARATELY per
+        // tile so a fast-flipping one can't starve the other out of its
+        // budget, and consecutive IDENTICAL flips are collapsed into a
+        // repeat count instead of one line each (this range was observed to
+        // ping-pong between two owners many times in a row).
+        for (uint32_t watched_tile : {608u, 1216u}) {
+          if (!(it->first <= watched_tile && log_range_end > watched_tile)) {
+            continue;
+          }
+          static uint32_t last_dest_key[2] = {0, 0};
+          static uint32_t last_prev_key[2] = {0, 0};
+          static uint32_t repeat_count[2] = {0, 0};
+          static int total_emitted[2] = {0, 0};
+          int slot = watched_tile == 608u ? 0 : 1;
+          bool had_transfer =
+              transfers_append_out && !prev_owner.IsEmpty() && prev_owner != dest;
+          if (dest.key == last_dest_key[slot] &&
+              prev_owner.key == last_prev_key[slot]) {
+            ++repeat_count[slot];
+          } else {
+            if (repeat_count[slot] > 1 && total_emitted[slot] < 150) {
+              XELOGI("RTOWN tile{} (repeated {}x)", watched_tile,
+                     repeat_count[slot]);
+            }
+            if (total_emitted[slot] < 150) {
+              ++total_emitted[slot];
+              XELOGI(
+                  "RTOWN tile{} tiles[{}..{}) dest=base{}pitch{}msaa{}fmt{} "
+                  "prev=base{}pitch{}msaa{}fmt{} transfer={}",
+                  watched_tile, it->first, log_range_end, dest.base_tiles,
+                  dest.pitch_tiles_at_32bpp, uint32_t(dest.msaa_samples),
+                  dest.resource_format, prev_owner.base_tiles,
+                  prev_owner.pitch_tiles_at_32bpp,
+                  uint32_t(prev_owner.msaa_samples),
+                  prev_owner.resource_format, had_transfer ? 1 : 0);
+            }
+            last_dest_key[slot] = dest.key;
+            last_prev_key[slot] = prev_owner.key;
+            repeat_count[slot] = 1;
+          }
+        }
+      }
       // Claim the current range.
       it->second.render_target = dest;
       if (host_depth_encoding_different) {
