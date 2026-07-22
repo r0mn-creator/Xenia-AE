@@ -1737,7 +1737,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
 
   // TESTRIG(halo3): read the resolved-companion capture recorded during this
   // frame's dump (now submitted + complete).
-  TestrigReadCapturedImage("VISTA_XFER_SRC");
+  TestrigReadCapturedImage("VISTA_POSTXFER_NOSRS");
   TestrigReadCapturedSharedMemory("SHM_44B0");
   TestrigReadCapturedEdram("EDRAM_T1216");
 }

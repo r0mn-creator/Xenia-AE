@@ -108,6 +108,29 @@ MSAA load mishandled like other Adreno MSAA issues; a redundant lossy value
 re-encode where a bit-reinterpret/skip would do since both are 32bpp; or a
 host-format packing bug). Fix candidates in the session notes.
 
+DISAMBIGUATION (July 22): forced the transfer path to use the per-sample-mask
+(non-gl_SampleID) mechanism instead of sample-rate-shading, via a
+kTestrigTransferForceNoSRS flag gating all 5 sampleRateShading branches in the
+transfer path (GetTransferShader x2, GetTransferPipelines x2,
+PerformTransfersAndResolveClears x1). RESULT: dest STILL uniform (0x00010000,
+distinct=2) and vista UNCHANGED. ⇒ the collapse is NOT in Adreno's gl_SampleID
+handling. It is in the transfer shader's SOURCE-READ / FORMAT-CONVERSION logic
+itself (the read→pack-as-guest-bits→re-encode-as-dest-format chain in
+GetTransferShader ~lines 3183-3300+), independent of the MSAA sample mechanism.
+Consistent with the constant (not "averaged") output and with the older
+"forced msaa=0 still navy". Flag reverted to false. The source-color read uses
+createTextureCall on the multisampled source RT (~line 3193); note the DUMP
+compute shader's per-sample texelFetch on an MSAA source worked fine last
+session (tile 608 varied), so if the read is the culprit it'd be a
+fragment-shader-specific / this-shader-specific issue, not general MSAA fetch.
+LEADING FIX CANDIDATES: (a) route the transfer SOURCE through a resolved 1x
+companion (we KNOW resolving this source gives varied 22989) instead of the
+per-sample MSAA fetch - jaggy but should preserve content; (b) for same-bitwidth
+(32bpp↔32bpp) color↔color transfers, replace the lossy decode/re-encode
+round-trip with a raw bit-reinterpret copy (matches real EDRAM); (c) diff this
+shader's generated SPIR-V vs a known-good reference and apply a targeted
+portability fix (SIN/COS-style).
+
 ## ★★★ DECISIVE July 20 — COLLAPSE PINPOINTED to the EDRAM→SHM RESOLVE SOURCE
 Built reliable DECOUPLED captures (deferred image/buffer copy recorded mid-frame
 at the composite draw, read after EndSubmission at swap — the tooling that was

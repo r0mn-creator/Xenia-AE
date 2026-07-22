@@ -2296,6 +2296,20 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
               .first->second;
 }
 
+// TESTRIG(halo3-transfer): force the ownership-transfer ("repaint") path to
+// use the per-sample-mask (one-draw-per-sample) mechanism instead of the
+// sample-rate-shading (gl_SampleID) mechanism, to test whether the vista
+// collapse is in Adreno's gl_SampleID handling of the transfer shader. This is
+// a real, supported alternate path (used on GPUs without sampleRateShading), so
+// forcing it is coherent - it just must be forced in ALL of: shader gen
+// (GetTransferShader), pipeline gen (GetTransferPipelines), and dispatch
+// (PerformTransfersAndResolveClears). Set false to restore normal behavior.
+// RESULT (July 22): forcing this path did NOT fix the collapse - dest stayed
+// uniform (0x00010000) and the vista unchanged. So the collapse is NOT in
+// Adreno's gl_SampleID handling; it's in the transfer shader's source-read /
+// format-conversion logic. Reverted to false (normal behavior).
+static constexpr bool kTestrigTransferForceNoSRS = false;
+
 VkShaderModule VulkanRenderTargetCache::GetTransferShader(
     TransferShaderKey key) {
   auto shader_it = transfer_shaders_.find(key);
@@ -2630,7 +2644,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
   spv::Id input_sample_id = spv::NoResult;
   spv::Id spec_const_sample_id = spv::NoResult;
   if (key.dest_msaa_samples != xenos::MsaaSamples::k1X) {
-    if (device_properties.sampleRateShading) {
+    if (device_properties.sampleRateShading && !kTestrigTransferForceNoSRS) {
       // One draw for all samples.
       builder.addCapability(spv::CapabilitySampleRateShading);
       input_sample_id = builder.createVariable(
@@ -2724,7 +2738,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
   // Load the destination sample index.
   spv::Id dest_sample_id = spv::NoResult;
   if (key.dest_msaa_samples != xenos::MsaaSamples::k1X) {
-    if (device_properties.sampleRateShading) {
+    if (device_properties.sampleRateShading && !kTestrigTransferForceNoSRS) {
       assert_true(input_sample_id != spv::NoResult);
       dest_sample_id = builder.createUnaryOp(
           spv::OpBitcast, type_uint,
@@ -4396,7 +4410,8 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(
   uint32_t dest_sample_count = uint32_t(1)
                                << uint32_t(key.shader_key.dest_msaa_samples);
   bool dest_is_masked_sample =
-      dest_sample_count > 1 && !device_properties.sampleRateShading;
+      dest_sample_count > 1 &&
+      !(device_properties.sampleRateShading && !kTestrigTransferForceNoSRS);
 
   VkPipelineShaderStageCreateInfo shader_stages[2];
   shader_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -4488,7 +4503,7 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(
           ? VK_SAMPLE_COUNT_4_BIT
           : VkSampleCountFlagBits(dest_sample_count);
   if (dest_sample_count > 1) {
-    if (device_properties.sampleRateShading) {
+    if (device_properties.sampleRateShading && !kTestrigTransferForceNoSRS) {
       multisample_state.sampleShadingEnable = VK_TRUE;
       multisample_state.minSampleShading = 1.0f;
       if (dest_sample_count == 2 && !msaa_2x_attachments_supported_) {
@@ -5210,7 +5225,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
             kTransferPipelineLayoutInfos[size_t(
                 transfer_pipeline_layout_index)];
         uint32_t transfer_sample_pipeline_count =
-            vulkan_device->properties().sampleRateShading
+            (vulkan_device->properties().sampleRateShading &&
+             !kTestrigTransferForceNoSRS)
                 ? 1
                 : uint32_t(1) << uint32_t(dest_rt_key.msaa_samples);
         bool transfer_is_stencil_bit =
@@ -6192,37 +6208,28 @@ void VulkanRenderTargetCache::TestrigCaptureVistaRtPostTransfer() {
     if (cap_n++ >= 4) {
       return;
     }
-    // Capture the repaint's INPUT: the SOURCE render target it copies forward
-    // (the composite's previous output, a NON-MSAA fmt3 image at tile 1216 -
-    // so it can be copied directly, no resolve needed). Comparing this against
-    // the already-measured post-transfer DEST (VISTA_POSTXFER, ~uniform)
-    // decides it: source varied + dest uniform => the format-converting repaint
-    // COLLAPSES it; source also uniform => repaint is faithful and the whole
-    // feedback loop is simply already collapsed upstream.
+    // Capture the repaint's OUTPUT (the DEST render target, post-transfer,
+    // pre-geometry). Baseline under normal (gl_SampleID) path: source=22989
+    // varied, dest=2 uniform (the repaint collapses). Under the forced
+    // no-sample-rate-shading path (kTestrigTransferForceNoSRS): if this DEST
+    // now comes back varied => Adreno's gl_SampleID transfer path was the bug;
+    // if still ~uniform => the collapse is in the format/value conversion.
     auto* src_vrt = static_cast<VulkanRenderTarget*>(transfers[i][0].source);
-    if (!src_vrt) {
-      XELOGI("VISTA_XFER_SRC: null source (transfers[{}] size={})", i,
-             transfers[i].size());
-      return;
-    }
-    RenderTargetKey sk = src_vrt->key();
-    if (sk.is_depth) {
-      return;
-    }
-    XELOGI("VISTA_XFER_SRC gate: dest base={} fmt={} msaa={} <- src base={} "
-           "fmt={} msaa={} (ntransfers={})",
+    RenderTargetKey sk = src_vrt ? src_vrt->key() : RenderTargetKey();
+    XELOGI("VISTA_POSTXFER gate: dest base={} fmt={} msaa={} <- src fmt={} "
+           "msaa={} (forceNoSRS={})",
            k.base_tiles, k.resource_format, uint32_t(k.msaa_samples),
-           sk.base_tiles, sk.resource_format, uint32_t(sk.msaa_samples),
-           transfers[i].size());
-    // The source is 4x MSAA too - resolve it to a 1x companion (slot 801) and
-    // capture, saving/restoring its tracked usage (read-only, non-destructive).
-    VkPipelineStageFlags saved_stage = src_vrt->current_stage_mask();
-    VkAccessFlags saved_access = src_vrt->current_access_mask();
-    VkImageLayout saved_layout = src_vrt->current_layout();
-    constexpr size_t kSrcSlot = 801;
-    ResolveColorRenderTargetForDump(*src_vrt, kSrcSlot);
-    if (kSrcSlot < resolved_dump_companions_.size()) {
-      ResolvedDumpCompanion& comp = resolved_dump_companions_[kSrcSlot];
+           sk.resource_format, uint32_t(sk.msaa_samples),
+           kTestrigTransferForceNoSRS ? 1 : 0);
+    // Resolve the 4x MSAA dest to a 1x companion (slot 800) and capture,
+    // saving/restoring its tracked usage (read-only, non-destructive).
+    VkPipelineStageFlags saved_stage = vrt->current_stage_mask();
+    VkAccessFlags saved_access = vrt->current_access_mask();
+    VkImageLayout saved_layout = vrt->current_layout();
+    constexpr size_t kDestSlot = 800;
+    ResolveColorRenderTargetForDump(*vrt, kDestSlot);
+    if (kDestSlot < resolved_dump_companions_.size()) {
+      ResolvedDumpCompanion& comp = resolved_dump_companions_[kDestSlot];
       if (comp.image != VK_NULL_HANDLE) {
         command_processor_.TestrigCaptureImageDeferred(
             comp.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, comp.width,
@@ -6232,10 +6239,10 @@ void VulkanRenderTargetCache::TestrigCaptureVistaRtPostTransfer() {
     VkImageSubresourceRange color_range =
         ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
     command_processor_.PushImageMemoryBarrier(
-        src_vrt->image(), color_range, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        vrt->image(), color_range, VK_PIPELINE_STAGE_TRANSFER_BIT,
         saved_stage, VK_ACCESS_TRANSFER_READ_BIT, saved_access,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, saved_layout);
-    src_vrt->SetUsage(saved_stage, saved_access, saved_layout);
+    vrt->SetUsage(saved_stage, saved_access, saved_layout);
     return;
   }
 }
