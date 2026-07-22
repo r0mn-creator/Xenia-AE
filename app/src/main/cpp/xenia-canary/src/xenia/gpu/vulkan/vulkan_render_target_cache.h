@@ -126,6 +126,13 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
               reg::RB_DEPTHCONTROL normalized_depth_control,
               uint32_t normalized_color_mask,
               const Shader& vertex_shader) override;
+  // TESTRIG(halo3-transfer): after this draw's ownership transfers (the
+  // copy-forward "repaint") have run in Update() but before the guest geometry
+  // draws, capture the vista's 4xMSAA G-buffer RT (tile 1216) resolved to 1x,
+  // to see whether the repaint carried the previous frame's content faithfully
+  // or corrupted it. Read-only / non-destructive: restores the RT's tracked
+  // usage so the subsequent geometry draw is unaffected. Read at IssueSwap.
+  void TestrigCaptureVistaRtPostTransfer();
   // Binding information for the last successful update.
   RenderPassKey last_update_render_pass_key() const {
     return last_update_render_pass_key_;

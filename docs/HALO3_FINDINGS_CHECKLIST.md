@@ -78,6 +78,36 @@ is a flat/uniform dark navy instead of the dark snowy landscape.
       memexport/precision/fill-% investigation chased a shader whose output
       never reaches the screen. Superseded.
 
+## ★★★★ DECISIVE July 22 — THE REPAINT (ownership-transfer shader) IS THE COLLAPSE
+Built a read-only, non-destructive capture at the exact moment AFTER a draw's
+ownership transfers run (the copy-forward "repaint") but BEFORE the guest
+geometry draws (VulkanRenderTargetCache::TestrigCaptureVistaRtPostTransfer,
+called from IssueDraw right after render_target_cache_->Update()). Confirmed the
+repaint and the geometry draw are in the SAME submission but SEPARATE render
+passes (natural boundary → safe to capture; no need to disable geometry).
+Captured the SAME tile-1216 transfer's INPUT vs OUTPUT (both 4xMSAA, resolved
+to 1x for capture; 256x256 sample, distinct_runs where 1-2 = uniform):
+  - Repaint SOURCE (fmt0 = k_8_8_8_8): distinct_runs = **22989 (richly VARIED)**
+    — this is real terrain/albedo content; proves the varied vista data DOES
+    reach a tile-1216 RT.
+  - Repaint DEST  (fmt2 = k_2_10_10_10): distinct_runs = **2 (UNIFORM)**.
+⇒ THE FORMAT-CONVERTING COPY-FORWARD ("transfer shader") COLLAPSES VARIED→UNIFORM
+on Adreno, for the tile-1216 fmt0(k_8_8_8_8)→fmt2(k_2_10_10_10) 4xMSAA transfer.
+Both formats are 32bpp, so on real hardware this is ~a byte-reinterpret that
+preserves everything; desktop RADV renders it correctly. So it's an
+Adreno-specific execution problem with that specific transfer shader / pipeline
+(TransferMode::kColorToColor, TransferShaderKey source_resource_format=fmt0,
+dest fmt2, source_msaa_samples=k4X). Read-only capture confirmed non-destructive
+(on-screen vista unchanged, UI still rendering).
+The transfer/copy-forward draw is in PerformTransfersAndResolveClears
+(vulkan_render_target_cache.cc); the shader is built by GetTransferShader /
+the SpirvShaderTranslator transfer path; pipeline via GetTransferPipelines.
+NEXT: read the kColorToColor transfer shader generation for the 32bpp→32bpp
+MSAA case and find why it collapses on Adreno (candidate causes: per-sample
+MSAA load mishandled like other Adreno MSAA issues; a redundant lossy value
+re-encode where a bit-reinterpret/skip would do since both are 32bpp; or a
+host-format packing bug). Fix candidates in the session notes.
+
 ## ★★★ DECISIVE July 20 — COLLAPSE PINPOINTED to the EDRAM→SHM RESOLVE SOURCE
 Built reliable DECOUPLED captures (deferred image/buffer copy recorded mid-frame
 at the composite draw, read after EndSubmission at swap — the tooling that was

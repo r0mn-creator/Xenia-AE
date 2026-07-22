@@ -1737,7 +1737,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
 
   // TESTRIG(halo3): read the resolved-companion capture recorded during this
   // frame's dump (now submitted + complete).
-  TestrigReadCapturedImage("RT1216_HOSTIMG");
+  TestrigReadCapturedImage("VISTA_XFER_SRC");
   TestrigReadCapturedSharedMemory("SHM_44B0");
   TestrigReadCapturedEdram("EDRAM_T1216");
 }
@@ -2555,6 +2555,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                     normalized_color_mask, *vertex_shader)) {
     return false;
   }
+
+  // TESTRIG(halo3-transfer): the ownership transfers (the copy-forward
+  // "repaint") for this draw just ran inside Update(); the vista's own geometry
+  // hasn't drawn yet. Capture the vista's 4xMSAA G-buffer RT (tile 1216) here,
+  // AFTER the repaint but BEFORE geometry, to see whether the repaint carried
+  // the previous frame's content faithfully or corrupted it. Read-only /
+  // non-destructive (restores RT state). See docs/HALO3_FINDINGS_CHECKLIST.md.
+  render_target_cache_->TestrigCaptureVistaRtPostTransfer();
 
   // Create the pipeline (for this, need the render pass from the render target
   // cache), translating the shaders - doing this now to obtain the used

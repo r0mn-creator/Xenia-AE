@@ -6169,6 +6169,77 @@ void VulkanRenderTargetCache::DestroyResolvedDumpCompanions() {
   resolved_dump_companions_.clear();
 }
 
+void VulkanRenderTargetCache::TestrigCaptureVistaRtPostTransfer() {
+  RenderTarget* const* rts = last_update_accumulated_render_targets();
+  const std::vector<Transfer>* transfers = last_update_transfers();
+  if (!rts || !transfers) {
+    return;
+  }
+  for (uint32_t i = 1; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+    if (!rts[i]) {
+      continue;
+    }
+    auto* vrt = static_cast<VulkanRenderTarget*>(rts[i]);
+    RenderTargetKey k = vrt->key();
+    // The vista's G-buffer color RT: tile 1216, 4x MSAA. Only capture on the
+    // draw where a transfer (the repaint) actually happened for it - otherwise
+    // we'd be sampling accumulated geometry, not the post-repaint state.
+    if (k.is_depth || k.base_tiles != 1216u ||
+        k.msaa_samples == xenos::MsaaSamples::k1X || transfers[i].empty()) {
+      continue;
+    }
+    static int cap_n = 0;
+    if (cap_n++ >= 4) {
+      return;
+    }
+    // Capture the repaint's INPUT: the SOURCE render target it copies forward
+    // (the composite's previous output, a NON-MSAA fmt3 image at tile 1216 -
+    // so it can be copied directly, no resolve needed). Comparing this against
+    // the already-measured post-transfer DEST (VISTA_POSTXFER, ~uniform)
+    // decides it: source varied + dest uniform => the format-converting repaint
+    // COLLAPSES it; source also uniform => repaint is faithful and the whole
+    // feedback loop is simply already collapsed upstream.
+    auto* src_vrt = static_cast<VulkanRenderTarget*>(transfers[i][0].source);
+    if (!src_vrt) {
+      XELOGI("VISTA_XFER_SRC: null source (transfers[{}] size={})", i,
+             transfers[i].size());
+      return;
+    }
+    RenderTargetKey sk = src_vrt->key();
+    if (sk.is_depth) {
+      return;
+    }
+    XELOGI("VISTA_XFER_SRC gate: dest base={} fmt={} msaa={} <- src base={} "
+           "fmt={} msaa={} (ntransfers={})",
+           k.base_tiles, k.resource_format, uint32_t(k.msaa_samples),
+           sk.base_tiles, sk.resource_format, uint32_t(sk.msaa_samples),
+           transfers[i].size());
+    // The source is 4x MSAA too - resolve it to a 1x companion (slot 801) and
+    // capture, saving/restoring its tracked usage (read-only, non-destructive).
+    VkPipelineStageFlags saved_stage = src_vrt->current_stage_mask();
+    VkAccessFlags saved_access = src_vrt->current_access_mask();
+    VkImageLayout saved_layout = src_vrt->current_layout();
+    constexpr size_t kSrcSlot = 801;
+    ResolveColorRenderTargetForDump(*src_vrt, kSrcSlot);
+    if (kSrcSlot < resolved_dump_companions_.size()) {
+      ResolvedDumpCompanion& comp = resolved_dump_companions_[kSrcSlot];
+      if (comp.image != VK_NULL_HANDLE) {
+        command_processor_.TestrigCaptureImageDeferred(
+            comp.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, comp.width,
+            comp.height);
+      }
+    }
+    VkImageSubresourceRange color_range =
+        ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
+    command_processor_.PushImageMemoryBarrier(
+        src_vrt->image(), color_range, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        saved_stage, VK_ACCESS_TRANSFER_READ_BIT, saved_access,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, saved_layout);
+    src_vrt->SetUsage(saved_stage, saved_access, saved_layout);
+    return;
+  }
+}
+
 VkDescriptorSet VulkanRenderTargetCache::ResolveColorRenderTargetForDump(
     VulkanRenderTarget& vulkan_rt, size_t slot) {
   const ui::vulkan::VulkanDevice* const vulkan_device =
