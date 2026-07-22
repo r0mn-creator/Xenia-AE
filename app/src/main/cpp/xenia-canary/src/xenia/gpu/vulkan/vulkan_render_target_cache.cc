@@ -5062,6 +5062,29 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
                                                  : TransferMode::kColorToColor;
             }
           }
+          // TESTRIG(halo3-transfer): EXPERIMENT - skip the color->color 4xMSAA
+          // copy-forward "repaint" for the vista's tile 1216, which was proven
+          // to collapse varied->uniform on Adreno. If the vista geometry
+          // refills the target, skipping the corrupting repaint should
+          // fix/improve it; if it gets worse, the transfer is load-bearing and
+          // the resolve-based route-1 fix is warranted. Set false to disable.
+          // RESULT (July 22): skipping did NOT change the vista (still uniform
+          // navy). So the collapsed transfer OUTPUT is not, by itself, what the
+          // composite ends up reading - removing the corruption doesn't help
+          // because the dest RT has no varied content of its own without the
+          // copy. Reverted to false.
+          static constexpr bool kTestrigSkipVistaColorTransfer = false;
+          if (kTestrigSkipVistaColorTransfer && !j &&
+              new_transfer_shader_key.mode == TransferMode::kColorToColor &&
+              dest_rt_key.base_tiles == 1216u &&
+              source_rt_key.msaa_samples != xenos::MsaaSamples::k1X) {
+            static int skip_n = 0;
+            if (skip_n++ < 8) {
+              XELOGI("RTTRANSFER SKIP tile1216 color->color srcfmt={} destfmt={}",
+                     source_rt_key.resource_format, dest_rt_key.resource_format);
+            }
+            continue;
+          }
           current_transfer_invocations_.emplace_back(transfer,
                                                      new_transfer_shader_key);
           if (j) {

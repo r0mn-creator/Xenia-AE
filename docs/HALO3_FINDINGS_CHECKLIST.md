@@ -123,6 +123,24 @@ createTextureCall on the multisampled source RT (~line 3193); note the DUMP
 compute shader's per-sample texelFetch on an MSAA source worked fine last
 session (tile 608 varied), so if the read is the culprit it'd be a
 fragment-shader-specific / this-shader-specific issue, not general MSAA fetch.
+SKIP TEST (July 22): skipped the tile-1216 color->color 4xMSAA transfer entirely
+(kTestrigSkipVistaColorTransfer, in the invocation-building loop). RESULT: vista
+UNCHANGED (still uniform navy). ⇒ removing the corrupting repaint alone does NOT
+help - the dest RT has no varied content of its own without a working copy. Two
+readings, NOT yet distinguished: (A) the transfer IS load-bearing (desktop needs
+it to carry the varied source into the dest) but skipping can't help since there's
+nothing good to preserve without a WORKING copy → route 1 could still fix it; (B)
+the transfer output is not on the composite's critical path → route 1 won't help.
+The dest output being a flat CONSTANT (every pixel identical, 0x00010000) is
+consistent with an Adreno multisampled-texture-sampling-in-fragment-shader bug
+returning a constant (→ route 1 fixes) OR a source-coordinate collapse (→ route 1
+may not). Reverted skip to false.
+★ NEXT (cheap decisive gate BEFORE building the large route-1): inject a known
+gl_FragCoord gradient as the transfer's DEST output for the vista case and check
+if it reaches the on-screen vista. Reaches screen ⇒ transfer output IS on the
+critical path ⇒ build route 1. Doesn't reach ⇒ transfer output is a dead end ⇒
+route 1 won't help, look elsewhere (which RT/tile the composite albedo actually
+resolves from).
 LEADING FIX CANDIDATES: (a) route the transfer SOURCE through a resolved 1x
 companion (we KNOW resolving this source gives varied 22989) instead of the
 per-sample MSAA fetch - jaggy but should preserve content; (b) for same-bitwidth
