@@ -3261,6 +3261,44 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
     }
   }
 
+  // TESTRIG(halo3-transfer): gradient probe. Override the freshly-read source
+  // color with a gl_FragCoord-based per-pixel gradient (guaranteed varied),
+  // gated to the vista's color->color 4xMSAA formats. Everything downstream
+  // (pack/re-encode/store) then carries the gradient into the dest. If the
+  // gradient shows up in the on-screen vista, the transfer OUTPUT is on the
+  // critical path (=> build the full route-1 fix, and the collapse was in the
+  // source READ since replacing that input fixes it); if the vista stays flat,
+  // the transfer output is a dead end (=> route 1 won't help, look elsewhere).
+  // RESULT (July 22): the vista stayed flat AND the transfer's dest RESOLVED
+  // to the identical uniform constant (0x00010000) with the gradient injected -
+  // exactly as without it. Combined with the skip test (removing the transfer
+  // changed nothing), the tile-1216 color->color transfer is NOT on the visible
+  // vista's critical path. Route 1 is NOT worth building. Reverted to false.
+  static constexpr bool kTestrigTransferGradientProbe = false;
+  if (kTestrigTransferGradientProbe && source_is_color && dest_is_color &&
+      !source_color_is_uint &&
+      key.source_msaa_samples != xenos::MsaaSamples::k1X &&
+      (source_color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
+       source_color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA ||
+       source_color_format == xenos::ColorRenderTargetFormat::k_2_10_10_10)) {
+    spv::Id fc = builder.createLoad(input_fragment_coord, spv::NoPrecision);
+    spv::Id inv64 = builder.makeFloatConstant(1.0f / 64.0f);
+    spv::Id gr = builder.createUnaryBuiltinCall(
+        type_float, ext_inst_glsl_std_450, GLSLstd450Fract,
+        builder.createBinOp(spv::OpFMul, type_float,
+                            builder.createCompositeExtract(fc, type_float, 0),
+                            inv64));
+    spv::Id gg = builder.createUnaryBuiltinCall(
+        type_float, ext_inst_glsl_std_450, GLSLstd450Fract,
+        builder.createBinOp(spv::OpFMul, type_float,
+                            builder.createCompositeExtract(fc, type_float, 1),
+                            inv64));
+    source_color[0][0] = gr;
+    source_color[0][1] = gg;
+    source_color[0][2] = builder.makeFloatConstant(0.5f);
+    source_color[0][3] = builder.makeFloatConstant(1.0f);
+  }
+
   if (output_fragment_stencil_ref != spv::NoResult &&
       source_stencil[0] != spv::NoResult) {
     // For the depth -> depth case, write the stencil directly to the output.

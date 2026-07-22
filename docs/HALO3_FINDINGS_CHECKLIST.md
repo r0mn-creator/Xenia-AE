@@ -78,7 +78,35 @@ is a flat/uniform dark navy instead of the dark snowy landscape.
       memexport/precision/fill-% investigation chased a shader whose output
       never reaches the screen. Superseded.
 
-## ★★★★ DECISIVE July 22 — THE REPAINT (ownership-transfer shader) IS THE COLLAPSE
+## ⚠️ RETRACTION July 22 PM — the transfer collapse is a RED HERRING for the vista
+Two cheap tests BOTH say the tile-1216 color->color transfer is NOT on the
+visible vista's critical path, so the "★★★★ transfer IS the collapse" section
+below (still true as a fact about that shader) does NOT explain the on-screen
+bug, and the resolve-based "route 1" fix is NOT worth building:
+ 1. SKIP test: skipped the transfer entirely (kTestrigSkipVistaColorTransfer) →
+    vista UNCHANGED (still uniform navy).
+ 2. GRADIENT-PROBE test: forced the transfer to output a gl_FragCoord gradient
+    (kTestrigTransferGradientProbe, overriding source_color post-read) → vista
+    UNCHANGED, AND the transfer's dest RT still RESOLVED to the identical
+    uniform constant 0x00010000 as without the probe. (The dest staying a fixed
+    constant regardless of the transfer's source is itself suspicious - it hints
+    the captured dest RT's uniform value may not even come from the transfer, or
+    the source-vs-dest "collapse" compared two RTs the transfer doesn't actually
+    connect the way assumed. Do not over-trust the "transfer collapses
+    22989->2" framing as the vista cause.)
+Both probes reverted to false. NET: the whole tile-1216 render-target-transfer
+line of investigation (July 20-22) is ruled out as the VISIBLE vista cause.
+The varied source RT (22989) and the transfer collapse are real but a side-show.
+★ NEXT (re-trace from the COMPOSITE side, dropping the tile-1216-transfer
+assumption): the composite samples its albedo texture from guest address
+0x044B0000. Trace, at the composite draw, EXACTLY which EDRAM tile / which RT /
+which resolve populated 0x044B0000 THIS frame, and capture that resolve's true
+source. Everything so far assumed 0x044B0000 <- tile 1216; verify that from the
+resolve side rather than inferring it. Also reconcile: last session EDRAM tile
+608 read back VARIED while 1216 was uniform - re-check whether the composite
+should be reading 608 (varied) and a wrong tile/instance is being bound.
+
+## ★★★★ (still factually true, but NOT the vista cause - see retraction above) July 22 — THE REPAINT (ownership-transfer shader) IS THE COLLAPSE
 Built a read-only, non-destructive capture at the exact moment AFTER a draw's
 ownership transfers run (the copy-forward "repaint") but BEFORE the guest
 geometry draws (VulkanRenderTargetCache::TestrigCaptureVistaRtPostTransfer,
