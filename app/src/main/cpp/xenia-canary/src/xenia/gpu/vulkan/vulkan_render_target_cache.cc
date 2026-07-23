@@ -1118,6 +1118,15 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
         draw_resolution_scale_x(), draw_resolution_scale_y(),
         copy_shader_constants, copy_group_count_x, copy_group_count_y);
     assert_true(copy_group_count_x && copy_group_count_y);
+    // TESTRIG(halo3-composite-trace): which resolve-copy shader feeds the
+    // albedo (0x044B0000)? That shader is where the varied EDRAM collapses.
+    if (resolve_info.copy_dest_base == 0x044B0000u) {
+      static int n = 0;
+      if (n++ < 6) {
+        XELOGI("RESOLVECOPY dest=0x044B0000 shader_index={} groups={}x{}",
+               uint32_t(copy_shader), copy_group_count_x, copy_group_count_y);
+      }
+    }
     if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
       const draw_util::ResolveCopyShaderInfo& copy_shader_info =
           draw_util::resolve_copy_shader_info[size_t(copy_shader)];

@@ -100,12 +100,26 @@ in the resolve_copy shader's EDRAM source addressing. It's specific to this
 resolve's params (NFS Carbon resolves fine) - likely the 4xMSAA-source /
 particular pitch/offset case. Frame 1 varied = SHM initial state before the
 broken resolve-copy takes over (or first-frame timing), a red herring.
-★ FIX DIRECTION: inspect the resolve_copy compute shader
-(shaders/resolve_full_32bpp.xesli / resolve_fast_32bpp*.xesli, selected by
-draw_util GetResolveCopyShader) and its EDRAM source-address math for the
-MSAA-source case; find the op Adreno mis-executes (collapsing the source offset
-to a constant) and apply a portability fix. Candidate: the same class of
-integer/precision issue, or a per-sample MSAA EDRAM read that collapses.
+★ SHADER IDENTIFIED (July 22 PM): the albedo (0x044B0000) resolve-copy uses
+shader_index=6 = **kFull32bpp** (resolve_full_32bpp.xesli/.cs.xesl), groups
+36x20 for 1152x640 (also index 0 kFast32bpp1x2xMSAA groups 18x80 for some
+sub-resolves). kFull32bpp: 1 thread = 4 host pixels, pixel_index =
+GlobalInvocationID.xy<<(2,0); reads EDRAM via XeResolveLoad4RGBAColors at
+XeResolveColorCopySourcePixelAddressIntsYHalfPixelOffsetFilling ->
+XeEdramOffsetInts (edram.xesli - integer div/mul tile addressing incl.
+msaa_samples=4X); packs via XePack32bpp4Pixels; writes shared memory at
+XeResolveDestPixelAddress. THIS shader collapses varied EDRAM -> uniform SHM on
+Adreno (NFS Carbon works, so likely param-specific: 4xMSAA source + full-path
+format conversion). Collapse is in ONE of: (a) source addr (XeEdramOffsetInts),
+(b) the MSAA sample load/unpack (XeResolveLoad4RGBAColors), or (c) dest addr
+(XeResolveDestPixelAddress) / GlobalInvocationID threading.
+★ NEXT (the real fix): PROBE the shader - recompile resolve_full_32bpp with its
+output replaced by GlobalInvocationID.x / the computed source address (scratchpad
+aecompile.py pipeline: xesl -> glslang -> spirv-opt -> .h bytecode array). If
+SHM shows a gradient => threads/addressing fine, collapse is in the LOAD/unpack;
+if constant => GlobalInvocationID or address collapses. Then apply a portability
+fix to the specific op (SIN/COS-style), or route this resolve through a path that
+works. Only kFull32bpp (and maybe kFast32bpp*4xMSAA) need the fix.
 
 ## ★★★ COMPOSITE-SIDE TRACE July 22 PM — verified inputs; 1216-clobber DISPROVEN; it's a per-frame COLLAPSE of the albedo resolve-copy
 Re-traced from the composite draw (psh 0x373E65D9). VERIFIED from the fetch
