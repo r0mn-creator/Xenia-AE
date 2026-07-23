@@ -99,6 +99,9 @@ class VulkanTextureCache final : public TextureCache {
   // actually samples vs what the load fills.
   void TestrigLogBoundTexture(uint32_t fetch_constant, const char* tag);
   void TestrigCaptureBoundImage(uint32_t fetch_constant);
+  // TESTRIG(halo3-composite-trace): log all valid texture bindings (guest
+  // address/format/dims) at the composite draw.
+  void TestrigLogCompositeBindings();
 
   VkImageView GetActiveBindingOrNullImageView(uint32_t fetch_constant_index,
                                               xenos::FetchOpDimension dimension,

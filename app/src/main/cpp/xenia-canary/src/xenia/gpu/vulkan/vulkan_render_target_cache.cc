@@ -1065,9 +1065,32 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
   DeferredCommandBuffer& command_buffer =
       command_processor_.deferred_command_buffer();
 
+  // TESTRIG(halo3-composite-trace): EXPERIMENT - the composite's albedo
+  // (0x044B0000) is resolved BOTH from tile 608 (varied terrain G-buffer color0,
+  // partial strips) AND, fully, from tile 1216 (which ends up uniform). Skip the
+  // tile-1216 full resolve to 0x044B0000 so the varied tile-608 strips survive.
+  // If the vista then shows terrain, the 1216 resolve clobbering the 608 albedo
+  // IS the bug. RESULT (July 22): skipping did NOT help - SHM 0x044B0000 still
+  // collapses to uniform in steady state (varied only on frame 1) even reading
+  // ONLY the tile-608 (varied EDRAM) strips. So the 1216 clobber is NOT the
+  // cause; the collapse is in the 608 EDRAM->SHM resolve-copy or a per-frame
+  // feedback. Reverted to false.
+  static constexpr bool kTestrigSkipVista1216Resolve = false;
+  bool testrig_skip_this_resolve =
+      kTestrigSkipVista1216Resolve &&
+      resolve_info.color_original_base == 1216u &&
+      resolve_info.copy_dest_base == 0x044B0000u &&
+      uint32_t(resolve_info.rb_copy_control.copy_src_select) == 0u;
+  if (testrig_skip_this_resolve) {
+    static int n = 0;
+    if (n++ < 8) {
+      XELOGI("RESOLVE SKIP 1216->0x044B0000 (keep varied 608 albedo)");
+    }
+  }
+
   // Copying.
   bool copied = false;
-  if (resolve_info.copy_dest_extent_length) {
+  if (!testrig_skip_this_resolve && resolve_info.copy_dest_extent_length) {
     if (GetPath() == Path::kHostRenderTargets) {
       // Dump the current contents of the render targets owning the affected
       // range to edram_buffer_.

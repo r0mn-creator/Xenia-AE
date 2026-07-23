@@ -980,6 +980,29 @@ void VulkanTextureCache::TestrigCaptureBoundImage(uint32_t fc) {
       vt->key().GetWidth(), vt->key().GetHeight());
 }
 
+void VulkanTextureCache::TestrigLogCompositeBindings() {
+  // TESTRIG(halo3-composite-trace): log EVERY valid texture binding at the
+  // composite draw - guest base address, format, dims, tiled - so we know
+  // exactly which guest regions the composite samples (albedo, HDR, etc.),
+  // verified from the fetch constants rather than assumed.
+  static int n = 0;
+  if (n++ >= 3) {
+    return;
+  }
+  for (uint32_t fc = 0; fc < 32; ++fc) {
+    const TextureBinding* b = GetValidTextureBinding(fc);
+    if (!b || !b->texture) {
+      continue;
+    }
+    VulkanTexture* vt = static_cast<VulkanTexture*>(b->texture);
+    TextureKey k = vt->key();
+    XELOGI(
+        "COMPOSITE_BIND fc{} addr=0x{:08X} {}x{} fmt={} tiled={} img=0x{:016X}",
+        fc, k.base_page << 12, k.GetWidth(), k.GetHeight(), uint32_t(k.format),
+        uint32_t(k.tiled), reinterpret_cast<uint64_t>(vt->image()));
+  }
+}
+
 void VulkanTextureCache::TestrigDumpGbufferImage() {
   Texture* t = TestrigFindTextureByBasePage(0x44B0u, 1152u);
   if (!t) {

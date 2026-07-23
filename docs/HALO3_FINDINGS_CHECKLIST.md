@@ -78,6 +78,40 @@ is a flat/uniform dark navy instead of the dark snowy landscape.
       memexport/precision/fill-% investigation chased a shader whose output
       never reaches the screen. Superseded.
 
+## ★★★ COMPOSITE-SIDE TRACE July 22 PM — verified inputs; 1216-clobber DISPROVEN; it's a per-frame COLLAPSE of the albedo resolve-copy
+Re-traced from the composite draw (psh 0x373E65D9). VERIFIED from the fetch
+constants (COMPOSITE_BIND, not assumed): the composite samples exactly TWO
+textures - fc0 = 0x044B0000 (1152x640, fmt6 k_8_8_8_8, tiled) = ALBEDO, and
+fc2 = 0x043FC000 (288x160, fmt32, tiled) = HDR.
+RESOLVE map (RESOLVESRC): 0x044B0000 is written BOTH from tile 608 (color0 of
+the 4xMSAA G-buffer, VARIED; 4 partial 160-row strips/frame, length 737280) AND
+from tile 1216 (one FULL 1152x640 resolve/frame, length 2949120). RTMAP: the
+4xMSAA terrain draws write cbase=[608,1216] (tile 608 = G-buffer color0, tile
+1216 = color1); separate NON-MSAA passes (pitch 1200) also write tile 1216.
+SKIP-1216 test: skipped the tile-1216 -> 0x044B0000 full resolve. Vista
+UNCHANGED, and SHM 0x044B0000 STILL collapses. ⇒ the 1216 clobber is NOT the
+cause (disproven).
+DECISIVE SHM capture (1216 skipped, at the composite draw): SHM 0x044B0000 =
+frame1 distinct_runs 7476 (VARIED) → steady state distinct_runs 1 (UNIFORM),
+the flat value CHANGING per frame (0x44484C00, 0x68707700) = the animating
+"flat navy that flickers". So the albedo is varied on frame 1 then collapses to
+one (animating) color per frame - reading ONLY tile 608 (which reads back
+VARIED in EDRAM every frame). ⇒ THE COLLAPSE IS IN THE tile-608 EDRAM->SHM
+RESOLVE-COPY (or a per-frame feedback that regenerates 0x044B0000 from its
+prior value and loses info on Adreno) - NOT the transfer, NOT the 1216 clobber.
+Reconcile with July 20: EDRAM tile608 VARIED every frame + SHM 0x044B0000
+UNIFORM steady state ⇒ the 608 resolve-copy collapses in steady state (varied
+frame 1). Suspect: the DUMP(RT->EDRAM) -> RESOLVE-COPY(EDRAM->SHM) ordering/
+barrier on Adreno - resolve-copy reads EDRAM before the dump publishes it in
+steady state (frame-1 timing differs), OR the vista terrain shader samples the
+previous albedo (feedback) and that read collapses.
+★ NEXT: capture EDRAM tile 608 AND SHM 0x044B0000 in the SAME steady-state
+frame to confirm EDRAM-608 varied + SHM uniform (⇒ 608 resolve-copy collapses);
+then inspect the dump->resolve-copy barrier for tile 608 specifically, AND check
+whether the terrain G-buffer draws (cbase=[608,1216]) SAMPLE 0x044B0000 (a
+feedback). Diagnostics (COMPOSITE_BIND log, SHM capture, resolve skip) all
+committed and gated/revertible.
+
 ## ⚠️ RETRACTION July 22 PM — the transfer collapse is a RED HERRING for the vista
 Two cheap tests BOTH say the tile-1216 color->color transfer is NOT on the
 visible vista's critical path, so the "★★★★ transfer IS the collapse" section

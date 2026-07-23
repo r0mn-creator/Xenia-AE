@@ -3294,15 +3294,18 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // samples unpublished/unordered data (load-vs-use / barrier ordering).
   if (pixel_shader &&
       pixel_shader->ucode_data_hash() == 0x373E65D9ADCF4380ull) {
-    // Diagnostic captures (DISABLED - the collapse is now localized to RT 1216
-    // being uniform near-black, a feedback-decay via the composite's own output
-    // resolved back into its albedo input 0x044B0000). Reusable capture infra
-    // kept for the next render-target-aliasing investigation. See checklist.
-    static int comp_cap_n = 0;
-    if (false && comp_cap_n++ < 3) {
-      texture_cache_->TestrigCaptureBoundImage(0);
+    // TESTRIG(halo3-composite-trace): re-trace from the composite side. Log
+    // EVERY texture the composite actually samples (guest address/format/dims),
+    // verified from the fetch constants rather than assumed, so we know exactly
+    // which guest regions feed it and can trace which resolve wrote each.
+    texture_cache_->TestrigLogCompositeBindings();
+    // With the tile-1216 clobber skipped, capture shared memory 0x044B0000 (the
+    // resolve-copy output that the composite's albedo texture loads from) to see
+    // whether tile 608's varied albedo actually reaches it, or the resolve-copy
+    // collapses it too.
+    static int shm_cap_n = 0;
+    if (shm_cap_n++ < 3) {
       TestrigCaptureSharedMemoryDeferred(0x044B0000ull, 256u * 1024u);
-      TestrigCaptureEdramDeferred(1216ull * 5120ull, 256u * 1024u);
     }
   }
 
