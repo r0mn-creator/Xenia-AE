@@ -7,6 +7,26 @@
     <string name="es_vulkan_vulkan_lib_path">Custom Driver Library Path</string>
     <string name="es_vulkan_adrenotools_force_max_clocks">Custom Driver Force Max Clocks</string>
 
+    <string name="driver_detected_gpu">Detected GPU</string>
+    <string name="driver_gpu_unknown">Unknown (Vulkan not available)</string>
+    <string name="driver_default_subtitle">Use the device\'s built-in Vulkan driver</string>
+    <string name="driver_version_subtitle">Version %1$s</string>
+    <string name="driver_active_marker"> ✓</string>
+    <string name="driver_delete_confirm">Remove this driver?</string>
+    <string name="driver_hint_text">Custom drivers can fix rendering bugs or improve performance on some GPUs (e.g. Mesa Turnip for Qualcomm Adreno). Only install a driver built for your detected GPU above. Long-press an installed driver to remove it.</string>
+
+    <string name="driver_download_section">Download a Driver</string>
+    <string name="driver_download_hint">Mesa Turnip is an open-source Vulkan driver that works across a wide range of Qualcomm Adreno GPUs, including this device\'s, and is known to fix some rendering issues (see Halo 3). These are community builds fetched directly from their GitHub project - use at your own discretion.</string>
+    <string name="driver_download_loading">Checking for available drivers…</string>
+    <string name="driver_download_empty">No drivers found.</string>
+    <string name="driver_download_error">Couldn\'t reach the driver list (%1$s)</string>
+    <string name="driver_download_size">%1$.1f MB</string>
+    <string name="driver_download_in_progress">Downloading…</string>
+    <string name="driver_download_installing">Installing…</string>
+    <string name="driver_download_failed">Download failed: %1$s</string>
+    <string name="driver_download_checking">Checking for available drivers…</string>
+    <string name="driver_download_installed">Installed %1$s</string>
+
     <string name="create_shortcut">Create Shortcut</string>
     <string name="disable_virtual_keyboard">Disable the virtual keyboard</string>
     <string name="joystick">Joystick</string>

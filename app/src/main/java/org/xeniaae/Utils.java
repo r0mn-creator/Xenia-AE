@@ -25,7 +25,11 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -151,7 +155,31 @@ public class Utils {
         try {
             ParcelFileDescriptor pfd = ctx.getContentResolver().openFileDescriptor(uri, "r");
             FileInputStream fis = new FileInputStream(pfd.getFileDescriptor());
-            ZipInputStream zis = new ZipInputStream(fis);
+            String libs_dir_name = Utils.getFileNameFromUri(uri);
+            libs_dir_name = libs_dir_name.substring(0, libs_dir_name.lastIndexOf('.'));
+            boolean ok = install_custom_driver_from_stream(ctx, libs_dir_name, fis, cb);
+            pfd.close();
+            return ok;
+        } catch (Exception e) {
+            Toast.makeText(ctx, e.toString(), Toast.LENGTH_SHORT).show();
+            return false;
+        }
+    }
+
+    /** Same as install_custom_driver_from_zip, for a driver zip already sitting on local storage
+     * (used by the "download a driver" flow once the zip has been fetched into the cache dir). */
+    static boolean install_custom_driver_from_file(Context ctx, String libs_dir_name, File zip_file, InstallCallback cb) {
+        try (FileInputStream fis = new FileInputStream(zip_file)) {
+            return install_custom_driver_from_stream(ctx, libs_dir_name, fis, cb);
+        } catch (Exception e) {
+            Toast.makeText(ctx, e.toString(), Toast.LENGTH_SHORT).show();
+            return false;
+        }
+    }
+
+    private static boolean install_custom_driver_from_stream(Context ctx, String libs_dir_name, InputStream zip_input, InstallCallback cb) {
+        try {
+            ZipInputStream zis = new ZipInputStream(zip_input);
 
             Map<String, byte[]> entries = new HashMap<>();
             for (ZipEntry ze = zis.getNextEntry(); ze != null; ze = zis.getNextEntry()) {
@@ -163,13 +191,8 @@ public class Utils {
                 entries.put(ze.getName(), baos.toByteArray());
                 zis.closeEntry();
             }
-
             zis.close();
-            fis.close();
-            pfd.close();
 
-            String libs_dir_name = Utils.getFileNameFromUri(uri);
-            libs_dir_name = libs_dir_name.substring(0, libs_dir_name.lastIndexOf('.'));
             File libs_dir = new File(Application.get_custom_driver_dir(), libs_dir_name);
 
             String driver_lib_path = null;
@@ -233,6 +256,103 @@ public class Utils {
             e.printStackTrace();
             return null;
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Custom driver bookkeeping — one entry per subfolder of
+    // Application.get_custom_driver_dir(), as produced by
+    // install_custom_driver_from_zip(). Shared by DriverSettingsActivity,
+    // SettingsFragment, and EmulatorSettings so they all show the same
+    // friendly name for a given vulkan_lib_path value.
+    // -------------------------------------------------------------------
+
+    public static class DriverInfo {
+        public final File dir;
+        public final String libraryPath;
+        public final String name;
+        public final String description;
+        public final String version;
+
+        DriverInfo(File dir, String libraryPath, String name, String description, String version) {
+            this.dir = dir;
+            this.libraryPath = libraryPath;
+            this.name = name;
+            this.description = description;
+            this.version = version;
+        }
+    }
+
+    public static List<DriverInfo> list_installed_drivers() {
+        List<DriverInfo> result = new ArrayList<>();
+        File[] entries = Application.get_custom_driver_dir().listFiles();
+        if (entries == null) return result;
+        Arrays.sort(entries, Comparator.comparing(File::getName));
+        for (File entry : entries) {
+            DriverInfo info = read_driver_info(entry);
+            if (info != null) result.add(info);
+        }
+        return result;
+    }
+
+    private static DriverInfo read_driver_info(File entry) {
+        if (entry.isFile()) {
+            if (!entry.getName().endsWith(".so")) return null;
+            return new DriverInfo(entry, entry.getAbsolutePath(), entry.getName(), null, null);
+        }
+        File metaFile = new File(entry, "meta.json");
+        if (metaFile.exists()) {
+            try {
+                JSONObject meta = new JSONObject(read_file_as_str(metaFile));
+                if (!meta.has("libraryName")) return null;
+                File lib = new File(entry, meta.getString("libraryName"));
+                if (!lib.exists()) return null;
+                String name = meta.has("name") ? meta.getString("name") : entry.getName();
+                String description = meta.has("description") ? meta.getString("description") : null;
+                String version = meta.has("driverVersion") ? meta.getString("driverVersion")
+                        : (meta.has("packageVersion") ? meta.getString("packageVersion") : null);
+                return new DriverInfo(entry, lib.getAbsolutePath(), name, description, version);
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        File[] files = entry.listFiles();
+        File soFile = null;
+        int soCount = 0;
+        if (files != null) {
+            for (File f : files) {
+                if (f.getName().endsWith(".so")) {
+                    soFile = f;
+                    soCount++;
+                }
+            }
+        }
+        if (soCount != 1) return null;
+        return new DriverInfo(entry, soFile.getAbsolutePath(), entry.getName(), null, null);
+    }
+
+    /** Friendly label for a raw vulkan_lib_path config value ("default"/empty/a real path). */
+    public static String driver_display_name_for_path(Context ctx, String path) {
+        if (path == null || path.isEmpty() || path.equals("default")) {
+            return ctx.getString(R.string._default);
+        }
+        for (DriverInfo info : list_installed_drivers()) {
+            if (info.libraryPath.equals(path)) return info.name;
+        }
+        return new File(path).getName();
+    }
+
+    public static void delete_driver(DriverInfo info) {
+        delete_recursive(info.dir);
+    }
+
+    private static void delete_recursive(File f) {
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File c : children) delete_recursive(c);
+            }
+        }
+        f.delete();
     }
 }
 

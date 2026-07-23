@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <androidx.appcompat.widget.Toolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="?attr/colorPrimary"
+        android:elevation="4dp"
+        android:theme="@style/ThemeOverlay.AppCompat.ActionBar"
+        app:popupTheme="@style/ThemeOverlay.AppCompat.Light" />
+
+    <androidx.core.widget.NestedScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:descendantFocusability="afterDescendants">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingBottom="24dp">
+
+            <TextView style="@style/SettingsSectionHeader" android:text="@string/driver_detected_gpu"/>
+            <TextView
+                android:id="@+id/detected_gpu_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="20dp"
+                android:paddingEnd="20dp"
+                android:paddingBottom="12dp"
+                android:textColor="?attr/colorOnSurface"
+                android:textSize="15sp"/>
+
+            <TextView style="@style/SettingsSectionHeader" android:text="@string/driver_download_section"/>
+            <include android:id="@+id/row_download_driver" layout="@layout/settings_row_click"/>
+            <TextView
+                android:id="@+id/download_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="20dp"
+                android:paddingEnd="20dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="12dp"
+                android:textColor="?attr/colorOnSurface"
+                android:alpha="0.6"
+                android:textSize="12sp"
+                android:text="@string/driver_download_hint"/>
+
+            <TextView style="@style/SettingsSectionHeader" android:text="@string/settings_custom_driver"/>
+
+            <LinearLayout
+                android:id="@+id/driver_list_container"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"/>
+
+            <include android:id="@+id/row_add_driver" layout="@layout/settings_row_click"/>
+
+            <TextView
+                android:id="@+id/driver_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="20dp"
+                android:paddingEnd="20dp"
+                android:paddingTop="16dp"
+                android:textColor="?attr/colorOnSurface"
+                android:alpha="0.6"
+                android:textSize="12sp"
+                android:text="@string/driver_hint_text"/>
+
+        </LinearLayout>
+    </androidx.core.widget.NestedScrollView>
+</LinearLayout>

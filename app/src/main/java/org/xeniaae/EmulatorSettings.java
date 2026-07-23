@@ -5,7 +5,6 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.DialogInterface;
 import android.content.Intent;
-import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.Window;
@@ -24,8 +23,6 @@ import androidx.preference.PreferenceDataStore;
 import androidx.preference.PreferenceFragmentCompat;
 import androidx.preference.PreferenceScreen;
 
-import org.json.JSONObject;
-
 import org.xeniaae.preference.CheckBoxPreference;
 import org.xeniaae.preference.ListPreference;
 import org.xeniaae.preference.SeekBarPreference;
@@ -43,7 +40,6 @@ public class EmulatorSettings extends AppCompatActivity {
     static final int WARNING_COLOR=0xffff8000;
     static final String Vulkan$vulkan_lib_path="Vulkan|vulkan_lib_path";
 
-    static final int REQUEST_CODE_SELECT_CUSTOM_DRIVER=6101;
     @SuppressLint("ValidFragment")
     public static class SettingsFragment extends PreferenceFragmentCompat implements
             Preference.OnPreferenceClickListener,Preference.OnPreferenceChangeListener{
@@ -230,9 +226,15 @@ public class EmulatorSettings extends AppCompatActivity {
             requireActivity().getOnBackPressedDispatcher().addCallback(back_callback);
 
             if(!new File(config_path).exists()){
-                root_pref.setEnabled(false);
-                Toast.makeText(requireContext(), config_path, Toast.LENGTH_LONG).show();
-                return;
+                // Missing (e.g. never booted a game yet, or the file was removed/corrupted
+                // externally) — recreate it from defaults instead of leaving the screen
+                // permanently disabled.
+                Utils.copy_file(Application.get_default_config_file(), new File(config_path));
+                if(!new File(config_path).exists()){
+                    root_pref.setEnabled(false);
+                    Toast.makeText(requireContext(), config_path, Toast.LENGTH_LONG).show();
+                    return;
+                }
             }
 
             try{
@@ -502,7 +504,7 @@ public class EmulatorSettings extends AppCompatActivity {
         @Override
         public boolean onPreferenceClick(@NonNull Preference preference) {
             if(preference.getKey().equals(Vulkan$vulkan_lib_path)){
-                show_select_custom_driver_list();
+                startActivity(new Intent(requireContext(), DriverSettingsActivity.class));
                 return false;
             }
             if(preference instanceof PreferenceScreen){
@@ -512,78 +514,12 @@ public class EmulatorSettings extends AppCompatActivity {
             return false;
         }
 
-        void create_list_dialog(String title, String[] items, DialogInterface.OnClickListener listener){
-            AlertDialog.Builder builder = new AlertDialog.Builder(getContext());
-            builder.setTitle(title)
-                    .setItems(items, listener)
-                    .setNegativeButton(android.R.string.cancel, null);
-            builder.create().show();
-        }
-
-        void show_select_custom_driver_list(){
-            File[] files=Application.get_custom_driver_dir().listFiles();
-            if(files==null||files.length==0){
-                create_list_dialog(getString(R.string.es_vulkan_vulkan_lib_path)
-                        , new String[]{getString(R.string._default),getString(R.string.driver_library_path_dialog_add_hint)}, new DialogInterface.OnClickListener() {
-                            @Override
-                            public void onClick(DialogInterface dialog, int which) {
-                                dialog.dismiss();
-                                if(which==0)
-                                    config.save_config_entry(Vulkan$vulkan_lib_path,"default");//FIXME:
-                                else
-                                    request_select_custom_driver_file();
-                            }
-                        });
-                return;
+        @Override
+        public void onResume() {
+            super.onResume();
+            if(config!=null){
+                setup_costom_driver_library_path(config.load_config_entry(Vulkan$vulkan_lib_path));
             }
-
-            String  items[]=new String[files.length+2];
-            items[0]=getString(R.string._default);
-            for(int i=0;i<files.length;i++){
-                if(files[i].isFile())
-                    items[i+1]=files[i].getName();
-                else{
-                    File[] sub_files=files[i].listFiles();
-                    if(sub_files.length==1)
-                        items[i+1]=files[i].getName()+"/"+sub_files[0].getName();
-                    else{
-                        File json_f=new File(files[i], "meta.json");
-                        if(json_f.exists()){
-                            try {
-                                JSONObject json = new JSONObject(Utils.read_file_as_str(json_f));
-                                items[i+1]=files[i].getName()+"/"+json.getString("libraryName");
-                            } catch (Exception e) {
-                                items[i+1]="";
-                            }
-                        }
-                        else
-                            items[i+1]="";
-                    }
-                }
-            }
-            items[files.length+1]=getString(R.string.driver_library_path_dialog_add_hint);
-            create_list_dialog(getString(R.string.es_vulkan_vulkan_lib_path), items, new DialogInterface.OnClickListener() {
-                @Override
-                public void onClick(DialogInterface dialog, int which) {
-                    dialog.dismiss();
-                    if(which==0){
-                        config.save_config_entry(Vulkan$vulkan_lib_path,"default");//FIXME:
-                        setup_costom_driver_library_path(null);
-                    }
-                    else if(which==files.length+1){
-                        request_select_custom_driver_file();
-                    }else{
-                        File f=new File(files[which-1].getParentFile(),items[which]);
-                        setup_costom_driver_library_path(f.getAbsolutePath());
-                    }
-                }
-            });
-        }
-        void request_select_custom_driver_file(){
-            Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("*/*");
-            ((Activity)requireActivity()).startActivityForResult(intent, REQUEST_CODE_SELECT_CUSTOM_DRIVER);
         }
         void setup_pref_title_color(Preference preference,String cur_val){
             if(preference instanceof CheckBoxPreference){
@@ -602,19 +538,9 @@ public class EmulatorSettings extends AppCompatActivity {
                 pref.set_is_modify_color(modify);
             }
         }
-        void setup_costom_driver_library_path(String new_path) {
-            final String key=Vulkan$vulkan_lib_path;
-            final String _default_path=getString(R.string._default);
-            if(new_path==null||new_path.isEmpty()){
-                findPreference( key).setSummary(_default_path);
-                return;
-            }
-
-            config.save_config_entry(key,new_path);
-            if(new_path.equals("default"))//FIXME:
-                findPreference(key).setSummary(_default_path);
-            else
-                findPreference(key).setSummary(new_path);
+        void setup_costom_driver_library_path(String path) {
+            findPreference(Vulkan$vulkan_lib_path).setSummary(
+                    Utils.driver_display_name_for_path(requireContext(), path));
         }
         @Override
         public boolean onPreferenceChange(@NonNull Preference preference, Object newValue) {
@@ -680,22 +606,5 @@ public class EmulatorSettings extends AppCompatActivity {
         }
 
         getSupportFragmentManager().beginTransaction().replace(R.id.settings_container,fragment).commit();
-    }
-
-    @Override
-    public void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-
-        if (resultCode != RESULT_OK || data == null) return;
-
-        Uri uri=data.getData();
-        String file_name = Utils.getFileNameFromUri(uri);
-
-        switch (requestCode){
-            case REQUEST_CODE_SELECT_CUSTOM_DRIVER:
-                if(file_name.endsWith(".zip"))
-                    Utils.install_custom_driver_from_zip(this,uri,(path)->{ fragment.setup_costom_driver_library_path(path);});
-                break;
-        }
     }
 }

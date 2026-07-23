@@ -2,7 +2,6 @@ package org.xeniaae;
 
 import android.app.AlertDialog;
 import android.content.Intent;
-import android.net.Uri;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
 import android.view.LayoutInflater;
@@ -14,8 +13,6 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.widget.SwitchCompat;
 import androidx.fragment.app.Fragment;
-
-import java.io.File;
 
 /**
  * The curated Settings tab: Dark Mode, Refresh Game List, Video (Resolution,
@@ -39,6 +36,15 @@ public class SettingsFragment extends Fragment {
     }
 
     @Override
+    public void onResume() {
+        super.onResume();
+        final View view = getView();
+        if (view != null) {
+            setRowSubtitle(view, R.id.row_custom_driver, currentDriverLabel());
+        }
+    }
+
+    @Override
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         setupSwitchRow(view, R.id.row_dark_mode, getString(R.string.dark_mode), null,
                 Application.is_dark_mode_enabled(requireContext()),
@@ -51,7 +57,7 @@ public class SettingsFragment extends Fragment {
                 currentResolutionLabel(), v -> showResolutionPicker(view));
 
         setupClickRow(view, R.id.row_custom_driver, getString(R.string.settings_custom_driver),
-                currentDriverLabel(), v -> showDriverPicker(view));
+                currentDriverLabel(), v -> startActivity(new Intent(requireContext(), DriverSettingsActivity.class)));
 
         final boolean vsyncOn = readGlobalBool("GPU|vsync", true);
         setupSwitchRow(view, R.id.row_frame_rate, getString(R.string.settings_frame_rate),
@@ -156,64 +162,11 @@ public class SettingsFragment extends Fragment {
     }
 
     // ---------------------------------------------------------------------
-    // Custom driver (from file) — "from net" is a larger, separate feature
-    // (community driver repo integration) and is not implemented here.
+    // Custom driver — management screen lives in DriverSettingsActivity.
     // ---------------------------------------------------------------------
 
-    private static final int REQUEST_CUSTOM_DRIVER = 9001;
-
     private String currentDriverLabel() {
-        final String val = readGlobalString("Vulkan|vulkan_lib_path");
-        if (val == null || val.isEmpty() || val.equals("default")) return getString(R.string._default);
-        final File f = new File(val);
-        return f.getName();
-    }
-
-    private void showDriverPicker(View root) {
-        final File[] files = Application.get_custom_driver_dir().listFiles();
-        final int installedCount = files == null ? 0 : files.length;
-        final String[] items = new String[installedCount + 2];
-        items[0] = getString(R.string._default);
-        for (int i = 0; i < installedCount; i++) items[i + 1] = files[i].getName();
-        items[installedCount + 1] = getString(R.string.driver_library_path_dialog_add_hint);
-
-        new AlertDialog.Builder(requireContext())
-                .setTitle(R.string.settings_custom_driver)
-                .setItems(items, (dialog, which) -> {
-                    if (which == 0) {
-                        writeGlobalString("Vulkan|vulkan_lib_path", "default");
-                        setRowSubtitle(root, R.id.row_custom_driver, getString(R.string._default));
-                    } else if (which == installedCount + 1) {
-                        requestSelectCustomDriverFile();
-                    } else {
-                        final File f = files[which - 1];
-                        writeGlobalString("Vulkan|vulkan_lib_path", f.getAbsolutePath());
-                        setRowSubtitle(root, R.id.row_custom_driver, f.getName());
-                    }
-                })
-                .show();
-    }
-
-    private void requestSelectCustomDriverFile() {
-        final Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
-        startActivityForResult(intent, REQUEST_CUSTOM_DRIVER);
-    }
-
-    @Override
-    public void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQUEST_CUSTOM_DRIVER || resultCode != android.app.Activity.RESULT_OK || data == null) return;
-        final Uri uri = data.getData();
-        if (uri == null) return;
-        final String fileName = Utils.getFileNameFromUri(uri);
-        if (fileName != null && fileName.endsWith(".zip")) {
-            Utils.install_custom_driver_from_zip(requireActivity(), uri, path -> {
-                writeGlobalString("Vulkan|vulkan_lib_path", path);
-                setRowSubtitle(requireView(), R.id.row_custom_driver, new File(path).getName());
-            });
-        }
+        return Utils.driver_display_name_for_path(requireContext(), readGlobalString("Vulkan|vulkan_lib_path"));
     }
 
     // ---------------------------------------------------------------------

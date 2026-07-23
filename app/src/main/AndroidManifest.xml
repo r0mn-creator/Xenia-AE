@@ -64,6 +64,9 @@
         <activity android:name="org.xeniaae.EmulatorSettings"
             android:exported="false"
             android:label="@string/settings"/>
+        <activity android:name="org.xeniaae.DriverSettingsActivity"
+            android:exported="false"
+            android:label="@string/settings_custom_driver"/>
         <activity android:name="org.xeniaae.KeyMapActivity"
             android:exported="false"
             android:label="@string/key_mappers"/>
