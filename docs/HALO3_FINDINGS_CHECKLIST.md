@@ -78,6 +78,43 @@ is a flat/uniform dark navy instead of the dark snowy landscape.
       memexport/precision/fill-% investigation chased a shader whose output
       never reaches the screen. Superseded.
 
+## ★★★★★★★ July 23 — REFINED ROOT CAUSE + 7 FAILED FIXES: Adreno collapses the per-thread EDRAM-read address in resolve_full_32bpp
+Refined the July-22 finding. The collapse is triggered specifically by the
+PRESENCE of the per-thread SOURCE-ADDRESS computation feeding the EDRAM buffer
+load in the FULL shader. Proof: a probe that outputs a CONSTANT (source addr +
+load dead-code-eliminated) writes correctly to ALL pixels (dest addr + threading
+fine in the SIMPLIFIED shader); ANY variant that keeps the per-thread source
+address collapses pixel_index/GlobalInvocationID to uniform => every thread
+reads the same EDRAM location => uniform resolved albedo. So earlier "dest works"
+was an artifact of the simplified probe; in the real/full shader BOTH source and
+dest collapse (all threads write one value -> uniform SHM). This is an Adreno
+DRIVER mis-compilation, not spirv-opt (reduced-opt also collapses).
+SEVEN shader-level fixes TRIED, ALL FAILED (each: recompiled via aecompile.py,
+built, on-device screenshots still uniform+flickering; all reverted, shader tree
+verified byte-identical to committed):
+  1. shift-by-comparison-vector -> explicit multiply (edram.xesli).
+  2. reduced spirv-opt (single/none instead of -O -O).
+  3. inline the whole XeEdramOffsetInts computation into main (bypass func call).
+  4. remove the wrap modulo (address %= ...).
+  5. division-free address (rt_sample.y*80+rt_sample.x, no int divide).
+  6. manual GlobalInvocationID (gl_WorkGroupID*gl_WorkGroupSize+gl_LocalInvocationID).
+  7. remove the per-thread early bounds-return.
+None changed the collapse. The shader (resolve_full_32bpp, shader_index=6, the
+kFull32bpp EDRAM->SHM resolve-copy for the 1152x640 4xMSAA-source albedo) is
+mis-compiled by the Adreno 740 driver such that the per-thread buffer-read index
+degenerates to uniform.
+★ NEXT-PHASE OPTIONS (all beyond shader-line tweaks): (A) reduce register
+pressure - drop from 4 pixels/thread to 1 (needs matching C++ group-count change
+in draw_util GetCopyShader + the dispatch); (B) buffer qualifiers volatile/
+coherent on the EDRAM SSBO / a different SSBO access pattern; (C) try a
+different/newer Adreno driver via the project's libadrenotools custom-driver
+support (driver bug => a different driver version may not have it); (D) force the
+FAST resolve shader (simpler, may dodge the complexity trigger) and verify output
+correctness; (E) bypass the compute resolve-copy for this case entirely (hardware
+resolve to a staging image -> copy to shared memory, or the code's TODO "direct
+host RT -> shared memory resolve"). Recommend (C) first (cheapest, and it's a
+driver bug) then (A)/(D).
+
 ## ★★★★★★ EXACT LOCALIZATION July 22 (shader probes) — XeEdramOffsetInts source addr returns UNIFORM; obvious fixes FAILED
 Probed resolve_full_32bpp by recompiling it (scratchpad/aecompile.py:
 xesl->glslang(GLSL)->spirv-opt -O -O->.h; VALIDATED - clean recompile reproduces
