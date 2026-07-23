@@ -43,12 +43,24 @@ a physical device.
 | Minimum host GPU | Vulkan 1.1 (Adreno 6xx+ / Mali G-series+ recommended) |
 | Package IDs | `org.xeniaae` (stable) / `org.xeniaae.canary` (diagnostic build, coexists on the same device) |
 
+> **The goal of this manual (its standard of completeness).** This document is
+> intended to become a *reconstruction specification*: if this PDF were the
+> only surviving artifact — no source code, no repository — a competent team
+> should be able to **rebuild Xenia-AE from this manual alone**. That means
+> every subsystem must eventually be described to the depth of its actual
+> algorithms, data structures, exact formats/register layouts, and per-operation
+> semantics — not merely what it does and where its files live. See
+> Appendix&nbsp;8.4 (Reconstruction-readiness tracker) for an honest,
+> per-subsystem assessment of how close each section currently is to that bar,
+> and what is still missing. **Every time a subsystem is worked on, deepen its
+> section toward reconstruction-grade and update the tracker.**
+>
 > This manual has two halves. Sections 2–3 explain the real Xbox 360 hardware
 > Xenia-AE has to reproduce, then walk through how each subsystem of the
 > emulator reproduces it, module by module, with real file references from
 > this codebase. Sections 4–6 cover the project's own custom diagnostic
-> tooling, its development/test history, and the current state of its most
-> significant open investigation.
+> tooling, its development/test history, and a fully worked case study
+> (Section&nbsp;7) of isolating a GPU bug end to end.
 
 ---
 
@@ -1295,6 +1307,36 @@ minimum: convert this file's Markdown to HTML, wrap it in a print-styled HTML
 document (cover page + CSS), and render with WeasyPrint. Keep this Markdown
 file as the source of truth for future edits; do not hand-edit a generated
 HTML/PDF copy.
+
+### 8.4 Reconstruction-readiness tracker
+
+Honest assessment of how close each section is to the **reconstruction-grade**
+bar defined in Section&nbsp;1 (rebuild-from-this-alone). Levels:
+**Overview** = explains what/why and where the code is, but not enough to
+reimplement; **Partial** = key mechanisms and some concrete detail, gaps
+remain; **Reconstruction-grade** = an expert could reimplement the subsystem
+from this text plus cited public specs. Current state (2026-07-23): the manual
+is an *overview/reference*; no section is yet reconstruction-grade. This is the
+work list to get there.
+
+| Section | Level | What's still needed for reconstruction-grade |
+|---|---|---|
+| 2. Hardware primer | Partial | Concrete Xenon/Xenos/EDRAM/memory numbers and conventions with citations to the public references (so the spec is self-contained about the target). |
+| 3.1 CPU/JIT | Overview | The full HIR opcode list + semantics; the PPC→HIR lowering rules per instruction class; the optimization passes' exact transforms; the ARM64 instruction-selection sequences per HIR op; VMX128→NEON per-op mapping incl. FPCR/flush-to-zero handling; the exact host↔guest thunk ABI and PPCContext layout. |
+| 3.2 GPU | Overview | PM4 packet formats; Xenos microcode ISA encoding (from `ucode.h`); the microcode→SPIR-V translation rules per instruction; **the EDRAM tiling/addressing math** (`XeEdramOffsetInts`, tile = 80×16 samples, MSAA sample layout — now well-understood from §7); the dump/resolve-copy/transfer shader algorithms; texture untiling/format-conversion tables; pipeline-state derivation. |
+| 3.3 Memory | Partial | The exact address-space map is present; still need the page-table/heap allocation algorithms, the physical-alias view table, and the shared-memory dirty-tracking/upload protocol in reproducible detail. |
+| 3.4 Kernel/OS | Overview | XEX2 container format + decrypt/decompress (LZX) specifics; the export-trampoline ABI and arg-marshaling rules; per-export behavioral contracts for the core set; object/handle-table semantics; VFS device contracts (STFS/SVOD/GDF layouts). |
+| 3.5 Audio | Overview | XMA context register block layout; the FFmpeg decode + PCM conversion contract; the 5.1→stereo downmix formula (partially given); AAudio/OpenSL setup parameters and fallback behavior. |
+| 3.6 Input | Overview | XInput state/gamepad/vibration struct layouts and the button bitmask; the Android→XInput mapping table (24-slot layout); the touch/physical convergence path. |
+| 3.7 Android layer | Partial | The JNI method surface (signatures) and lifecycle; the two-process model; the SAF-backed VFS device contracts; the CMake/NDK build graph and packaging. |
+| 4–5. Diagnostics/tooling | Partial | Reproducible enough as-is for the harness; add the debug-server wire format and the exact capture/readback sequences if these must be reconstructable. |
+| 6–7. History / case study | Reconstruction-grade *as narrative* | These are records, not spec; keep accurate. §7's EDRAM addressing detail should be promoted into §3.2 as reusable spec. |
+
+Method note: much of the missing detail already exists precisely in the code
+(headers like `ucode.h`, `xenos.h`, `hir/opcodes.h`, the `*.xesli` shaders) and
+in `docs/RENDER_PIPELINE_AUDIT.md` / `docs/HALO3_FINDINGS_CHECKLIST.md`; the work
+is to distill it into self-contained prose+tables here so the manual no longer
+depends on the code existing.
 
 ---
 
