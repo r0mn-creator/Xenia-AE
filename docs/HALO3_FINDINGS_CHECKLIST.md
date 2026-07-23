@@ -78,6 +78,48 @@ is a flat/uniform dark navy instead of the dark snowy landscape.
       memexport/precision/fill-% investigation chased a shader whose output
       never reaches the screen. Superseded.
 
+## ★★★★★★ EXACT LOCALIZATION July 22 (shader probes) — XeEdramOffsetInts source addr returns UNIFORM; obvious fixes FAILED
+Probed resolve_full_32bpp by recompiling it (scratchpad/aecompile.py:
+xesl->glslang(GLSL)->spirv-opt -O -O->.h; VALIDATED - clean recompile reproduces
+the committed 13893-dword bytecode byte-for-byte) with its output overridden,
+and reading SHM 0x044B0000:
+ - Output = CONSTANT 0xFFFFFFFF  -> SHM ALL 0xFFFFFFFF (65536/65536). ⇒ thread
+   dispatch + DEST address (XeResolveDestPixelAddress) + write path ALL WORK.
+ - Output = the computed SOURCE address (XeResolveColorCopySourcePixelAddress...
+   -> XeEdramOffsetInts) -> SHM UNIFORM 0x00E00B00 = byteswap(0x000BE000) =
+   778240 = 608*1280 = base_tiles(608) * tile_area(80*16), within-tile = 0. ⇒
+   the SOURCE ADDRESS is the SAME for every thread (pixel-0's address) = every
+   thread reads the same EDRAM location = uniform resolve output. THIS is the
+   collapse, inside XeEdramOffsetInts, NOT the load/unpack, NOT the dest, NOT
+   threading.
+KEY ASYMMETRY: the SAME pixel_index gives a VARYING dest address (constant-white
+proved all pixels written) but a UNIFORM source address. So XeEdramOffsetInts
+(which has integer vector div/mod, unlike the dest addr) is where pixel_index
+effectively collapses to 0 / the result is computed as uniform. Looks like an
+Adreno-driver optimization treating the source-address computation as uniform
+(hoisted, ~pixel 0) when the full shader runs (with the source path DCE'd via
+the constant probe, dest stays correct).
+FIXES TRIED THAT DID **NOT** WORK (reverted):
+ (1) rewrote the first line `pixel_index << xesl_uint2(xesl_greaterThanEqual(
+     msaa>=k4X,k2X))` as an explicit multiply `pixel_index * ((msaa>=k4X?2:1),
+     (msaa>=k2X?2:1))` in edram.xesli. Address STILL 0x00E00B00 (unchanged). Not
+     the shift.
+ (2) recompiled resolve_full_32bpp with REDUCED spirv-opt (single/none, 12121 vs
+     13893 dwords). Vista STILL uniform + flickering (mean per-frame 16->34->32->
+     18->19). Not an spirv-opt-level artifact.
+All shader files RESTORED to committed state (bytecode verified byte-identical
+to original). Nothing shader-side committed.
+★ NEXT FIX IDEAS (untried): (a) INLINE the XeEdramOffsetInts computation directly
+in resolve_full_32bpp main using pixel_index (bypass the function call / arg
+passing that may be where the uniformity mis-analysis happens); (b) rewrite the
+vector integer DIVISION `rt_sample_index / tile_size_samples` and the MODULO
+`address %= ...` as scalar ops or multiply-by-reciprocal-free forms (Adreno
+compute int div/mod is a classic mis-optimization site); (c) add an explicit
+thread-varying dependency / optimization barrier the driver can't hoist; (d)
+compare this shader's SPIR-V to the desktop-RADV-correct one for a structural
+diff. The bug is 100% inside XeEdramOffsetInts for the 4xMSAA-source, wrap=true
+resolve params.
+
 ## ★★★★★ REAL ROOT CAUSE July 22 PM — the EDRAM->SHM RESOLVE-COPY collapses the albedo
 Same-frame capture at the composite draw of the resolve-copy's INPUT vs OUTPUT
 for tile 608 (the varied albedo), 1216-resolve skipped:
