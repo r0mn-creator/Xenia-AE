@@ -78,6 +78,35 @@ is a flat/uniform dark navy instead of the dark snowy landscape.
       memexport/precision/fill-% investigation chased a shader whose output
       never reaches the screen. Superseded.
 
+## ✅✅✅ SOLVED (root cause CONFIRMED) July 23 — it's the QUALCOMM DRIVER; Turnip renders it PERFECTLY
+Loaded the Mesa **Turnip** open-source Adreno driver (v26.0.0 R8, vulkan.ad07xx.so,
+via adrenotools + the vulkan_lib_path cvar; log confirms driverID=MesaTurnip,
+Mesa 26.0.0-devel on Adreno 740) and booted Halo 3: **the menu 3D vista renders
+CORRECTLY** - snowy landscape, stormy sky, wreckage, all detail present, no flat
+navy, no flicker (vista std 0.5→7-16, distinct 1-2→19-26; per-frame variation is
+the animated scene, not the bug). Screenshot: scratchpad/TURNIP_menu1.png.
+⇒ DEFINITIVE: the resolve_full_32bpp resolve-copy shader LOGIC IS CORRECT. The
+bug was 100% the stock QUALCOMM Adreno driver mis-compiling that (valid) compute
+shader so the per-thread EDRAM-read address collapses to uniform. This is why all
+7 shader-level "fixes" below failed - there was nothing wrong in the shader to
+fix; only the Qualcomm codegen is broken.
+HOW TO REPRODUCE THE FIX (test rig): driver at
+/data/user/0/org.xeniaae.canary/driver/vulkan.ad07xx.so (placed via `run-as
+org.xeniaae.canary cp` from /data/local/tmp), config
+xenia-canary.config.toml `[Vulkan] vulkan_lib_path = '...vulkan.ad07xx.so'`.
+Turnip builds: github K11MCH1/AdrenoToolsDrivers (a740 = vulkan.ad07xx.so).
+REMAINING WORK (two independent tracks, both still worthwhile):
+ (1) STOCK-DRIVER users: rework the resolve so the Qualcomm driver doesn't
+     miscompile it - since the LOGIC is correct, retry register-pressure
+     reduction (4→1 pixels/thread) / restructuring, OR (better) the shortest-path
+     hardware-resolve / RT-as-texture rework in docs/RENDER_PIPELINE_AUDIT.md
+     (bypasses the buggy compute resolve on stock drivers AND is more efficient).
+ (2) Custom-driver support: make loading a user-supplied driver a first-class UI
+     feature (mechanism already exists: vulkan_lib_path + adrenotools). USER
+     DIRECTIVE - do this.
+NOTE: also worth verifying the SAME Turnip fix on the wider game set + Sierra 117
+jungle (the older character-corruption scene) - it may fix more than the menu.
+
 ## ★★★★★★★ July 23 — REFINED ROOT CAUSE + 7 FAILED FIXES: Adreno collapses the per-thread EDRAM-read address in resolve_full_32bpp
 Refined the July-22 finding. The collapse is triggered specifically by the
 PRESENCE of the per-thread SOURCE-ADDRESS computation feeding the EDRAM buffer

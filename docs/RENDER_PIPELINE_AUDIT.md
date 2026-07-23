@@ -35,7 +35,7 @@ driver, corrupting one of the G-buffers the game's composite reads.
 | 1 | GPU command processor (PM4) → Vulkan draws | Game's draws render the deferred G-buffer into host render targets that emulate EDRAM (4×MSAA, tiles 608=albedo, 1216=other). | ✅ 🔵 (geometry renders; EDRAM tile 608 reads back varied every frame) |
 | 2 | Host render targets hold EDRAM contents | Emulate the 10 MB EDRAM as host Vulkan images. | ✅ 🔵 |
 | 3 | **DUMP** `DumpRenderTargets` | Compute shader copies a host RT → `edram_buffer_` (the linear EDRAM emulation buffer). | ✅ (tile 608 EDRAM varied every frame — dump works) ⚠️ round-trip |
-| 4 | **RESOLVE-COPY** `resolve_full_32bpp` | Compute shader copies `edram_buffer_` → shared memory (guest RAM), converting tiling/format. | ❌ **BROKEN** — Adreno driver collapses the per-thread read address → every thread reads the same EDRAM location → uniform output. THE BUG. |
+| 4 | **RESOLVE-COPY** `resolve_full_32bpp` | Compute shader copies `edram_buffer_` → shared memory (guest RAM), converting tiling/format. | ⚠️ shader logic **CORRECT** (renders perfectly on Turnip) but **mis-compiled by the stock Qualcomm driver** → per-thread read address collapses → uniform. Fixed by a custom driver (Turnip); for stock-driver correctness use the shortcut in §4. |
 | 5 | **Texture LOAD** | Compute shader copies shared memory → a Vulkan texture image (untile). | ✅ (loaded image == shared memory byte-for-byte) ⚠️ round-trip |
 | 6 | **Composite draw** (psh 0x373E65D9) | Game's lighting/tonemap pass samples albedo (0x044B0000) + HDR (0x043FC000) textures, writes EDRAM tile 1216. | ✅ 🔵 (reaches screen — magenta test; only broken because its albedo input from stage 4 is uniform) |
 | 7 | Resolve composite RT → front buffer 0x04E20000 | Same resolve machinery as #4, but the composite output is 1× and lands correctly. | ✅ (front buffer / 2D UI present crisp) |
@@ -122,11 +122,17 @@ FALLBACK to the full path when the game does something the shortcut can't model.
 ---
 
 ## 6. Recommended order of attack
-1. **Custom Adreno driver** via libadrenotools — cheapest test; it's a driver
-   bug, a newer driver may lack it. If it fixes stage #4, we get correctness now
-   with zero architecture change while we build the shortcut for efficiency.
-2. **Option A** (hardware-resolve → shared memory) — moderate change, removes
-   the broken shader, keeps the rest.
+1. ✅ **Custom Adreno driver** via libadrenotools — **DONE / CONFIRMED (July 23)**:
+   Mesa Turnip renders the vista perfectly, proving the shader logic is correct
+   and the stock Qualcomm driver is the culprit. Two follow-ups:
+   - **Make user-supplied drivers a first-class UI feature** (USER DIRECTIVE).
+     Mechanism exists (`vulkan_lib_path` cvar + adrenotools); needs a clean UI to
+     import/select/enable a driver `.zip`/`.so` and show the active driver.
+   - Ship/recommend a bundled or easily-installed Turnip for stock-Qualcomm
+     devices as an interim correctness path.
+2. **Option A** (hardware-resolve → shared memory) — moderate change, gives
+   STOCK-driver correctness (bypasses the mis-compiled compute shader) without
+   requiring users to install a driver.
 3. **Option B** (RT-as-texture) — the real shortest-path goal; do this for the
    efficiency win regardless of how stage #4 is fixed.
 
