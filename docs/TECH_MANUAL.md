@@ -47,13 +47,32 @@ a physical device.
 > intended to become a *reconstruction specification*: if this PDF were the
 > only surviving artifact — no source code, no repository — a competent team
 > should be able to **rebuild Xenia-AE from this manual alone**. That means
-> every subsystem must eventually be described to the depth of its actual
-> algorithms, data structures, exact formats/register layouts, and per-operation
-> semantics — not merely what it does and where its files live. See
-> Appendix&nbsp;8.4 (Reconstruction-readiness tracker) for an honest,
-> per-subsystem assessment of how close each section currently is to that bar,
-> and what is still missing. **Every time a subsystem is worked on, deepen its
-> section toward reconstruction-grade and update the tracker.**
+> every relevant subsystem must eventually be described to the depth of its
+> actual algorithms, data structures, exact formats/register layouts, and
+> per-operation semantics. Two rules define *how* and *what* to write:
+>
+> 1. **Explanations, not source code.** The manual contains no source-code
+>    listings. Where code needs explaining, it is explained in prose, tables,
+>    and diagrams — the *what and why and how*, precisely enough to
+>    reimplement, without reproducing the implementation text. (Operational
+>    command examples — how to *use* a tool or the app — and data-layout tables
+>    are not "code" and are welcome.)
+> 2. **Document what is Xenia-AE-specific; treat mainline Xenia as the assumed
+>    base.** Xenia-AE = mainline Xenia + this project's own additions and
+>    changes. Anything that is *specific to Xenia-AE and not already part of
+>    mainline Xenia* MUST be documented here to reconstruction depth — that is
+>    the manual's unique job. Mainline-Xenia foundations are described only
+>    enough to give context and show where the AE-specific pieces attach; they
+>    are not re-specified in full (they are assumed available from the upstream
+>    Xenia project). When in doubt about whether something is AE-specific, say
+>    so and document it.
+>
+> See Appendix&nbsp;8.4 (Reconstruction-readiness tracker) for an honest,
+> per-subsystem assessment — including which parts are AE-specific (must reach
+> reconstruction-grade) versus mainline (context only). **Every time a subsystem
+> is worked on, distill what was learned into its section as prose/tables,
+> deepen the AE-specific parts toward reconstruction-grade, and update the
+> tracker.**
 >
 > This manual has two halves. Sections 2–3 explain the real Xbox 360 hardware
 > Xenia-AE has to reproduce, then walk through how each subsystem of the
@@ -781,21 +800,17 @@ Xenia-AE ships two parallel builds from the same source tree:
 Every piece of test-only code — a log line, an instrumentation block, a debug
 socket handler — is tagged so it is unambiguous at a glance that it is test
 scaffolding, not production logic, and so it can be found, ported, or stripped
-as a unit:
-
-```cpp
-// TESTRIG(memexport): magic-marker write to distinguish "address computed
-// wrong" from "address valid but exported data is zero".
-if (IsSpirvComputeShader()) {
-  StoreUint32ToSharedMemory(...);
-}
-```
-
-The `<area>` slug matches one of the live monitor-port subsystem names below,
-so a piece of instrumentation and its corresponding inspection port are easy
-to associate. An older, pre-convention tag, `DEBUG(halo3-vtx)`, still appears
-in some code carried over from earlier sessions and is being migrated
-incrementally rather than all at once.
+as a unit. The convention is a comment placed immediately above the code it
+labels, of the form `TESTRIG(<area>): <one-line reason>`, where `<area>` is a
+short lowercase subsystem slug (`gpu`, `memexport`, `audio`, `jit`, `mem`,
+`kernel`). The `<area>` slug deliberately matches one of the live monitor-port
+subsystem names (§4.2), so a piece of instrumentation and its corresponding
+inspection port are trivially associated, and a single text search for the slug
+finds every probe in that subsystem. Because the tag is a searchable, uniform
+marker, all diagnostic scaffolding for a subsystem can be located and removed
+as one unit when a change graduates from the diagnostic build to the shipping
+build. An older, pre-convention tag (`DEBUG(halo3-vtx)`) still appears in some
+carried-over code and is migrated to the `TESTRIG` form incrementally.
 
 ### 4.2 Live monitor ports
 
@@ -1311,32 +1326,36 @@ HTML/PDF copy.
 ### 8.4 Reconstruction-readiness tracker
 
 Honest assessment of how close each section is to the **reconstruction-grade**
-bar defined in Section&nbsp;1 (rebuild-from-this-alone). Levels:
-**Overview** = explains what/why and where the code is, but not enough to
-reimplement; **Partial** = key mechanisms and some concrete detail, gaps
-remain; **Reconstruction-grade** = an expert could reimplement the subsystem
-from this text plus cited public specs. Current state (2026-07-23): the manual
-is an *overview/reference*; no section is yet reconstruction-grade. This is the
-work list to get there.
+bar (Section&nbsp;1). Levels: **Overview** = explains what/why and roughly how,
+but not enough to reimplement; **Partial** = key mechanisms and some concrete
+detail, gaps remain; **Reconstruction-grade** = an expert could reimplement it
+from this text plus cited public specs. The **Scope** column applies rule 2 of
+Section&nbsp;1: **AE** = specific to Xenia-AE, must reach reconstruction-grade
+here; **Mainline** = a mainline-Xenia foundation, documented only as context
+(the upstream project is the assumed source for its full detail); **Mixed** =
+an AE-specific layer sitting on a mainline base (document the AE delta deeply,
+the base as context). Current state (2026-07-23): overview-level throughout —
+this table is the work list, prioritized by the AE-scoped rows.
 
-| Section | Level | What's still needed for reconstruction-grade |
-|---|---|---|
-| 2. Hardware primer | Partial | Concrete Xenon/Xenos/EDRAM/memory numbers and conventions with citations to the public references (so the spec is self-contained about the target). |
-| 3.1 CPU/JIT | Overview | The full HIR opcode list + semantics; the PPC→HIR lowering rules per instruction class; the optimization passes' exact transforms; the ARM64 instruction-selection sequences per HIR op; VMX128→NEON per-op mapping incl. FPCR/flush-to-zero handling; the exact host↔guest thunk ABI and PPCContext layout. |
-| 3.2 GPU | Overview | PM4 packet formats; Xenos microcode ISA encoding (from `ucode.h`); the microcode→SPIR-V translation rules per instruction; **the EDRAM tiling/addressing math** (`XeEdramOffsetInts`, tile = 80×16 samples, MSAA sample layout — now well-understood from §7); the dump/resolve-copy/transfer shader algorithms; texture untiling/format-conversion tables; pipeline-state derivation. |
-| 3.3 Memory | Partial | The exact address-space map is present; still need the page-table/heap allocation algorithms, the physical-alias view table, and the shared-memory dirty-tracking/upload protocol in reproducible detail. |
-| 3.4 Kernel/OS | Overview | XEX2 container format + decrypt/decompress (LZX) specifics; the export-trampoline ABI and arg-marshaling rules; per-export behavioral contracts for the core set; object/handle-table semantics; VFS device contracts (STFS/SVOD/GDF layouts). |
-| 3.5 Audio | Overview | XMA context register block layout; the FFmpeg decode + PCM conversion contract; the 5.1→stereo downmix formula (partially given); AAudio/OpenSL setup parameters and fallback behavior. |
-| 3.6 Input | Overview | XInput state/gamepad/vibration struct layouts and the button bitmask; the Android→XInput mapping table (24-slot layout); the touch/physical convergence path. |
-| 3.7 Android layer | Partial | The JNI method surface (signatures) and lifecycle; the two-process model; the SAF-backed VFS device contracts; the CMake/NDK build graph and packaging. |
-| 4–5. Diagnostics/tooling | Partial | Reproducible enough as-is for the harness; add the debug-server wire format and the exact capture/readback sequences if these must be reconstructable. |
-| 6–7. History / case study | Reconstruction-grade *as narrative* | These are records, not spec; keep accurate. §7's EDRAM addressing detail should be promoted into §3.2 as reusable spec. |
+| Section | Scope | Level | What the AE-specific part still needs for reconstruction-grade |
+|---|---|---|---|
+| 2. Hardware primer | — | Partial | Context for both; concrete target numbers/conventions with citations. (Not AE-specific; keep tight.) |
+| 3.1 CPU/JIT | Mixed | Overview | **AE = the ARM64 (`a64`) backend + Android JIT support.** Need: the ARM64 instruction-selection strategy per HIR op class, the VMX128→NEON per-op mapping incl. FPCR flush-to-zero / rounding-mode handling, the host↔guest thunk ABI, the code-cache + unwind approach, and the `setjmp/longjmp` fiber-reentry mechanism. The PPC decode→HIR→optimization→x64 pipeline is **mainline** — context only. |
+| 3.2 GPU | Mixed | Overview | **AE = the Adreno/mobile-specific work + AE's fixes.** Need (reconstruction-grade): the tile-based-GPU vertex-memexport workarounds; the MSAA dump companion path; the custom-driver (libadrenotools) integration; and AE's committed shader-translator fixes (portable Cody-Waite SIN/COS, RSQ, register-zero-init, degenerate-W clip, DepthReplacing execution mode, extended-range float16 memexport). The **EDRAM tiling/addressing math** (tile = 80×16 samples, MSAA sample layout, resolve-copy addressing) is mainline logic but is central to AE's Adreno bug story — capture it as spec here. The base command processor / PM4 / microcode→SPIR-V framework is **mainline** — context only. |
+| 3.3 Memory | Mainline | Partial | Mostly mainline; document only any AE-specific mapping/behavior. Context otherwise. |
+| 3.4 Kernel/OS | Mixed | Overview | Framework is mainline (context). **AE = the specific fixes/behaviors AE added** (e.g. the XThread handle-release ordering fix, offline-profile behavior) — document those to reconstruction depth. |
+| 3.5 Audio | Mixed | Overview | XMA/FFmpeg decode + `AudioSystem` are mainline (context). **AE = the Android AAudio + OpenSL ES drivers**: exact stream setup, the 5.1→stereo downmix formula, the AAudio LOW_LATENCY/EXCLUSIVE→fallback behavior, and the known volume-control gap. Reconstruction-grade. |
+| 3.6 Input | AE | Overview | **All AE.** The 24-slot Android→XInput mapping, the state packing, and the touch-overlay + physical-controller convergence path. Reconstruction-grade. |
+| 3.7 Android layer | AE | Partial | **All AE.** The JNI method surface + lifecycle, the two-process model, the SAF-backed VFS device contracts, the custom-driver directory/exec model, and the CMake/NDK build graph + packaging. Reconstruction-grade. |
+| 4–5. Diagnostics/tooling | AE | Partial | **All AE.** The `TESTRIG` convention, the monitor-port wire format, the toggle system, the decoupled-capture sequences, and the standalone Adreno probe methodology. Reconstruction-grade. |
+| 6–7. History / case study | AE | Record | Keep accurate as project record. Promote §7's EDRAM-addressing detail into §3.2 as reusable spec. |
 
-Method note: much of the missing detail already exists precisely in the code
-(headers like `ucode.h`, `xenos.h`, `hir/opcodes.h`, the `*.xesli` shaders) and
-in `docs/RENDER_PIPELINE_AUDIT.md` / `docs/HALO3_FINDINGS_CHECKLIST.md`; the work
-is to distill it into self-contained prose+tables here so the manual no longer
-depends on the code existing.
+Method note: most of the missing AE-specific detail already exists precisely in
+the code (the `a64` backend, the Android glue under `app/src/main/cpp/`, the
+`*.xesli` shaders, AE's committed fixes) and in `docs/RENDER_PIPELINE_AUDIT.md`
+/ `docs/HALO3_FINDINGS_CHECKLIST.md`. The work is to distill it into
+self-contained prose+tables here — explaining, not listing — so the manual no
+longer depends on the code existing.
 
 ---
 
