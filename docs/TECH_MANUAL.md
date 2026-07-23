@@ -1079,12 +1079,31 @@ diagnosing audio latency, since the app's *requested* configuration and the
 
 ---
 
-## 7. Current Investigation: the Halo 3 Menu 3D Vista
+## 7. Case Study: the Halo 3 Menu 3D Vista (root-caused 2026-07-23)
 
-> **WIP — unresolved.** Everything in this section describes an **active,
-> unfixed bug**. No patch has been applied or verified for it as of this
-> manual's writing; §7.4 ends at a localized but not-yet-confirmed root cause,
-> not a fix.
+> **RESOLVED — root cause confirmed; correctness fix in progress.** This was a
+> long-running investigation into why Halo 3's menu 3D vista rendered as flat,
+> flickering navy on the Adreno 740. It is now root-caused decisively: the
+> stock **Qualcomm** Adreno driver **mis-compiles a valid Xenia compute shader**
+> (the EDRAM→shared-memory resolve-copy), collapsing each GPU thread's read
+> address to a single value so every thread reads the same memory — flattening
+> the resolved image. Proof: the Mesa **Turnip** open-source Adreno driver
+> (loaded via the app's own custom-driver mechanism) renders the exact same
+> Xenia build's vista **perfectly**. So the emulator's logic was correct all
+> along; the bug was in the vendor driver's shader compiler.
+>
+> **Status of fixes:** (a) a custom driver (Turnip) is a confirmed, working
+> path today; (b) for stock-Qualcomm-driver users, a correctness fix is in
+> progress via the "shortest path" render rework described in
+> `docs/RENDER_PIPELINE_AUDIT.md` (hardware-resolve / render-target-as-texture,
+> which sidesteps the mis-compiled compute shader and is also more efficient);
+> (c) making custom-driver loading a first-class UI feature is a planned task.
+> The subsections below preserve the investigation narrative that led here —
+> useful as a worked example of isolating a GPU bug down to a single shader and
+> ultimately to the vendor driver. The full decision log (with the same-frame
+> input-vs-output captures that localized each stage, and the seven attempted
+> shader-level fixes that failed *because the shader was never wrong*) is in
+> `docs/HALO3_FINDINGS_CHECKLIST.md`.
 
 This section documents the project's largest single ongoing investigation as
 of this manual's writing. It is a live investigation, not a closed
@@ -1151,11 +1170,19 @@ disproved by better evidence and are explicitly retracted:
   underlying capability may prove useful for something else later, but MSAA
   handling itself is not the cause of this bug.
 
-### 7.4 Current root-cause localization
+### 7.4 An intermediate (later-superseded) localization
 
-The collapse has been localized to **render-target ownership aliasing** in
-the EDRAM emulation described in §3.2.3. The specific mechanism, established
-through direct, repeated-frame measurement:
+> **Note:** the render-target-aliasing theory in this subsection was a stopping
+> point *mid-investigation* and was **later disproven** — skipping the transfer
+> and forcing a gradient through it both left the vista unchanged. The
+> investigation continued (tracing from the composite side, then down to the
+> resolve-copy shader, then to the Qualcomm driver) to the confirmed root cause
+> in the banner above. This subsection is kept to show the reasoning at the
+> time.
+
+The collapse was, at this stage, believed to be **render-target ownership
+aliasing** in the EDRAM emulation described in §3.2.3. The mechanism, as it
+appeared then:
 
 The composite pass's input texture is fed by a resolve from a specific EDRAM
 tile range. That same tile range is used, within the same frame, by *two*
