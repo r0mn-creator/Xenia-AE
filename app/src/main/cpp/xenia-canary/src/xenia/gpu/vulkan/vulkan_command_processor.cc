@@ -1739,7 +1739,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // frame's dump (now submitted + complete).
   TestrigReadCapturedImage("VISTA_POSTXFER_NOSRS");
   TestrigReadCapturedSharedMemory("SHM_44B0");
-  TestrigReadCapturedEdram("EDRAM_T1216");
+  TestrigReadCapturedEdram("EDRAM_T608");
 }
 
 bool VulkanCommandProcessor::PushBufferMemoryBarrier(
@@ -3304,8 +3304,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // whether tile 608's varied albedo actually reaches it, or the resolve-copy
     // collapses it too.
     static int shm_cap_n = 0;
-    if (shm_cap_n++ < 3) {
+    if (shm_cap_n++ < 4) {
+      // Same-frame pair: EDRAM tile 608 (the resolve-copy's INPUT, known varied)
+      // vs shared memory 0x044B0000 (its OUTPUT). If EDRAM varied + SHM uniform
+      // in the same steady-state frame, the 608 EDRAM->SHM resolve-copy is the
+      // collapse. 608 * 5120 bytes/tile.
       TestrigCaptureSharedMemoryDeferred(0x044B0000ull, 256u * 1024u);
+      TestrigCaptureEdramDeferred(608ull * 5120ull, 256u * 1024u);
     }
   }
 

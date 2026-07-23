@@ -78,6 +78,35 @@ is a flat/uniform dark navy instead of the dark snowy landscape.
       memexport/precision/fill-% investigation chased a shader whose output
       never reaches the screen. Superseded.
 
+## ★★★★★ REAL ROOT CAUSE July 22 PM — the EDRAM->SHM RESOLVE-COPY collapses the albedo
+Same-frame capture at the composite draw of the resolve-copy's INPUT vs OUTPUT
+for tile 608 (the varied albedo), 1216-resolve skipped:
+  frame  EDRAM tile608 (input)   SHM 0x044B0000 (output)
+    1     59880 varied            7476 varied
+    2     59488 VARIED            1 UNIFORM (0x43464900)
+    3     59488 VARIED            1 UNIFORM (0x59636800)
+    4     59488 VARIED            1 UNIFORM (0x5F616500)
+⇒ THE tile-608 EDRAM->SHARED-MEMORY RESOLVE-COPY reads richly-varied EDRAM and
+writes a SINGLE UNIFORM value, in the SAME steady-state frame. Definitively
+localized (this supersedes the July 20 "resolve-copy is correct" - that was
+never cleanly tested for 608 alone; the SHM uniformity was mis-attributed to the
+1216 clobber, now disproven).
+MECHANISM: the uniform output is a single constant that CHANGES per frame (not
+stale varied data). A barrier/ordering race would yield STALE-but-VARIED data;
+one value repeated across every output pixel = every output thread reading the
+SAME EDRAM source location = an ADDRESS-COMPUTATION COLLAPSE in the resolve-copy
+compute shader on Adreno (NOT a race). Analogous to the SIN/COS Adreno issue but
+in the resolve_copy shader's EDRAM source addressing. It's specific to this
+resolve's params (NFS Carbon resolves fine) - likely the 4xMSAA-source /
+particular pitch/offset case. Frame 1 varied = SHM initial state before the
+broken resolve-copy takes over (or first-frame timing), a red herring.
+★ FIX DIRECTION: inspect the resolve_copy compute shader
+(shaders/resolve_full_32bpp.xesli / resolve_fast_32bpp*.xesli, selected by
+draw_util GetResolveCopyShader) and its EDRAM source-address math for the
+MSAA-source case; find the op Adreno mis-executes (collapsing the source offset
+to a constant) and apply a portability fix. Candidate: the same class of
+integer/precision issue, or a per-sample MSAA EDRAM read that collapses.
+
 ## ★★★ COMPOSITE-SIDE TRACE July 22 PM — verified inputs; 1216-clobber DISPROVEN; it's a per-frame COLLAPSE of the albedo resolve-copy
 Re-traced from the composite draw (psh 0x373E65D9). VERIFIED from the fetch
 constants (COMPOSITE_BIND, not assumed): the composite samples exactly TWO
