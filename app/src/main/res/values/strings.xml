@@ -557,4 +557,46 @@ This Config requires you to pair an analog and digitial flag together while digi
 2 = F16C
 -1 = Detect and utilize all possible processor features</string>
 
+    <!-- Cover art / TheGamesDB -->
+    <string name="settings_cover_art">Cover Art</string>
+    <string name="settings_cover_art_subtitle">Box art sources and TheGamesDB key</string>
+    <string name="settings_gamesdb_key">TheGamesDB API key</string>
+    <string name="settings_gamesdb_key_unset">Not set - using free Libretro art only</string>
+    <string name="settings_gamesdb_key_clear">Clear</string>
+    <string name="settings_gamesdb_key_help">Cover art is fetched from the free Libretro thumbnail set first. Adding a TheGamesDB API key enables a second source with wider coverage for games Libretro is missing.</string>
+    <string name="settings_gamesdb_get_key">Get an API key</string>
+    <string name="settings_gamesdb_get_key_subtitle">Opens thegamesdb.net - keys are free</string>
+    <!-- Post-processing (Video submenu) -->
+    <string name="settings_section_postprocess">Post-Processing</string>
+    <string name="settings_res_scale">Resolution Scale (Anti-Aliasing)</string>
+    <string name="settings_af">Anisotropic Filtering</string>
+    <string name="settings_restart_required">restart game to apply</string>
+    <!-- Patches -->
+    <string name="settings_open_patches">Open Patches Folder</string>
+    <string name="settings_open_patches_subtitle">Add .patch.toml game patches here</string>
+    <string name="settings_open_patches_failed">Could not create %1$s</string>
+    <string name="settings_open_patches_help">Put .patch.toml files in:\n\n%1$s\n\nThey load automatically when a matching game starts. In the file manager, this app also appears as a source in the side drawer.</string>
+    <string name="settings_copy_path">Copy path</string>
+    <string name="settings_path_copied">Path copied</string>
+    <!-- Per-game GPU driver -->
+    <string name="game_driver_use_global">Use global setting</string>
+    <string name="game_driver_force_default">Built-in driver (force)</string>
+    <string name="game_driver_set">Driver for this game: %1$s</string>
+    <!-- Game patches -->
+    <string name="patches_title">Game Patches</string>
+    <string name="patches_search_hint">Search games or Title ID</string>
+    <string name="patches_clear_search">Clear search</string>
+    <string name="patches_game_subtitle">%1$s \u00b7 %2$d patches \u00b7 %3$d on</string>
+    <string name="patches_apply_note">Changes take effect the next time this game is started.</string>
+    <string name="patches_by_author">by %1$s</string>
+    <string name="patches_not_toggleable">This patch has no is_enabled field and can\'t be toggled here</string>
+    <string name="patches_write_failed">Couldn\'t write to the patch file</string>
+    <string name="patches_none">No patch files found.\n\nPut .patch.toml files in:\n%1$s</string>
+    <string name="patches_no_match">No games match \"%1$s\"</string>
+    <string name="patches_installed_only">Only show games in my library</string>
+    <string name="patches_none_installed">None of the games in your library have patches available.\n\nUncheck the box above to browse patches for all games.</string>
+    <string name="patches_no_title_ids">Your library has no scanned Title IDs yet, so patches can\'t be matched to your games.\n\nAdd a game (or let the scan finish), or uncheck the box above to browse all patches.</string>
+    <string name="patches_file_empty">This file contains no patches.</string>
+    <string name="patches_back">\u2190 Back to all games</string>
+    <string name="patches_manage_subtitle">Browse and toggle patches per game</string>
 </resources>

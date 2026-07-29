@@ -36,15 +36,6 @@ public class SettingsFragment extends Fragment {
     }
 
     @Override
-    public void onResume() {
-        super.onResume();
-        final View view = getView();
-        if (view != null) {
-            setRowSubtitle(view, R.id.row_custom_driver, currentDriverLabel());
-        }
-    }
-
-    @Override
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         setupSwitchRow(view, R.id.row_dark_mode, getString(R.string.dark_mode), null,
                 Application.is_dark_mode_enabled(requireContext()),
@@ -53,43 +44,55 @@ public class SettingsFragment extends Fragment {
         setupClickRow(view, R.id.row_refresh_list, getString(R.string.settings_refresh_game_list), null,
                 v -> ((MainActivity) requireActivity()).refreshGameList());
 
-        setupClickRow(view, R.id.row_resolution, getString(R.string.settings_resolution),
-                currentResolutionLabel(), v -> showResolutionPicker(view));
+        // Category rows - each opens a submenu (SettingsCategoryActivity) rather
+        // than putting every setting in one long flat list.
+        setupClickRow(view, R.id.row_cat_video, getString(R.string.settings_section_video),
+                currentResolutionLabel() + " \u00b7 " + currentDriverLabel(),
+                v -> openCategory(SettingsCategoryActivity.CAT_VIDEO));
 
-        setupClickRow(view, R.id.row_custom_driver, getString(R.string.settings_custom_driver),
-                currentDriverLabel(), v -> startActivity(new Intent(requireContext(), DriverSettingsActivity.class)));
+        setupClickRow(view, R.id.row_cat_audio, getString(R.string.settings_section_audio),
+                getString(R.string.settings_audio_driver),
+                v -> openCategory(SettingsCategoryActivity.CAT_AUDIO));
 
-        final boolean vsyncOn = readGlobalBool("GPU|vsync", true);
-        setupSwitchRow(view, R.id.row_frame_rate, getString(R.string.settings_frame_rate),
-                vsyncOn ? getString(R.string.settings_frame_rate_30) : getString(R.string.settings_frame_rate_60),
-                !vsyncOn,
-                checked -> writeGlobalBool("GPU|vsync", !checked));
+        setupClickRow(view, R.id.row_cat_input, getString(R.string.key_mappers),
+                getString(R.string.virtual_pad_edit),
+                v -> openCategory(SettingsCategoryActivity.CAT_INPUT));
 
-        final SharedPrefsHelper prefs = new SharedPrefsHelper(requireContext());
-        setupSwitchRow(view, R.id.row_overlay, getString(R.string.settings_overlay),
-                getString(R.string.settings_overlay_subtitle),
-                prefs.getBoolean("show_status_overlay", false),
-                prefs::putBoolean_showStatusOverlay);
+        setupClickRow(view, R.id.row_cat_coverart, getString(R.string.settings_cover_art),
+                getString(R.string.settings_cover_art_subtitle),
+                v -> openCategory(SettingsCategoryActivity.CAT_COVERART));
 
-        setupSwitchRow(view, R.id.row_audio, getString(R.string.settings_audio_driver), null,
-                !readGlobalBool("APU|mute", false),
-                checked -> writeGlobalBool("APU|mute", !checked));
-
-        setupClickRow(view, R.id.row_key_mappers, getString(R.string.key_mappers), null,
-                v -> startActivity(new Intent(requireContext(), KeyMapActivity.class)));
-
-        setupClickRow(view, R.id.row_virtual_pad_edit, getString(R.string.virtual_pad_edit), null,
-                v -> startActivity(new Intent(requireContext(), VirtualControlEdit.class)));
-
-        setupClickRow(view, R.id.row_open_file_mgr, getString(R.string.open_file_manager), null,
-                v -> MainActivity.open_file_manager(requireActivity()));
-
-        setupClickRow(view, R.id.row_advanced_settings, getString(R.string.settings_advanced),
+        setupClickRow(view, R.id.row_cat_advanced, getString(R.string.settings_advanced),
                 getString(R.string.settings_advanced_subtitle),
-                v -> startActivity(new Intent(requireContext(), EmulatorSettings.class)));
+                v -> openCategory(SettingsCategoryActivity.CAT_ADVANCED));
+
+        // CANARY-AE DEBUG MODULE - delete this block for mainline Xenia AE.
+        // Every diagnostic toggle lives behind this one entry so the harness can
+        // be removed wholesale (see DebugSettingsActivity's header comment).
+        setupClickRow(view, R.id.row_debug, "Debug",
+                "Diagnostic probes and GPU driver flags",
+                v -> startActivity(new Intent(requireContext(), DebugSettingsActivity.class)));
 
         setupClickRow(view, R.id.row_about, getString(R.string.about), null,
                 v -> startActivity(new Intent(requireContext(), AboutActivity.class)));
+    }
+
+    private void openCategory(String category) {
+        final Intent intent = new Intent(requireContext(), SettingsCategoryActivity.class);
+        intent.putExtra(SettingsCategoryActivity.EXTRA_CATEGORY, category);
+        startActivity(intent);
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        // Subtitles summarise what is inside each category, so refresh them after
+        // returning from a submenu where those values may have changed.
+        final View view = getView();
+        if (view != null) {
+            setRowSubtitle(view, R.id.row_cat_video,
+                    currentResolutionLabel() + " \u00b7 " + currentDriverLabel());
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -151,15 +154,7 @@ public class SettingsFragment extends Fragment {
         return RESOLUTION_LABELS[2]; // 720p default
     }
 
-    private void showResolutionPicker(View root) {
-        new AlertDialog.Builder(requireContext())
-                .setTitle(R.string.settings_resolution)
-                .setItems(RESOLUTION_LABELS, (dialog, which) -> {
-                    writeGlobalString("Video|internal_display_resolution", RESOLUTION_VALUES[which]);
-                    setRowSubtitle(root, R.id.row_resolution, RESOLUTION_LABELS[which]);
-                })
-                .show();
-    }
+    // Resolution picker now lives in SettingsCategoryActivity (Video submenu).
 
     // ---------------------------------------------------------------------
     // Custom driver — management screen lives in DriverSettingsActivity.

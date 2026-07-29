@@ -67,6 +67,15 @@
         <activity android:name="org.xeniaae.DriverSettingsActivity"
             android:exported="false"
             android:label="@string/settings_custom_driver"/>
+        <!-- CANARY-AE DEBUG MODULE - delete this entry for mainline Xenia AE -->
+        <activity android:name="org.xeniaae.PatchesActivity"
+            android:exported="false"
+            android:label="@string/patches_title"/>
+        <activity android:name="org.xeniaae.SettingsCategoryActivity"
+            android:exported="false"/>
+        <activity android:name="org.xeniaae.DebugSettingsActivity"
+            android:exported="false"
+            android:label="Debug"/>
         <activity android:name="org.xeniaae.KeyMapActivity"
             android:exported="false"
             android:label="@string/key_mappers"/>

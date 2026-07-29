@@ -142,6 +142,11 @@ public class Application extends android.app.Application{
             Utils.extractAssetsDir(this,"content/E0300000A360E000/FFFE07D1/00010000/E0300000A360E000",default_profile_dir);
         }
 
+        // ~2 MB of community patch files on first run / after an app update - off
+        // the main thread so it never delays startup. Existing files are kept.
+        new Thread(() -> PatchManager.installBundledPatches(this),
+                "bundled-patch-install").start();
+
         if(!should_delay_load())
             Emulator.load_library();
 

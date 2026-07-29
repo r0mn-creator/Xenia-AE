@@ -183,13 +183,26 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         android.net.Uri gameDirUri = MainActivity.load_pref_game_dir(this);
         Emulator.get.setup_document_file_tree(gameDirUri != null ? DocumentFile.fromTreeUri(this, gameDirUri) : null);
         Emulator.get.setup_game_path(path);
-        Emulator.get.setup_launch_args(new String[]{
+        // Per-game GPU driver override, injected as a LAUNCH ARGUMENT rather than
+        // written into a config file. The driver is loaded during
+        // Emulator::Setup (emulator.cc:325), long before the per-game config is
+        // read (emulator.cc:1688), so a per-game TOML entry would be ignored.
+        // Launch args win over both config files (base/cvar.h
+        // ConfigVar::UpdateValue: commandline > game_config > config), and this
+        // leaves the global config untouched.
+        final java.util.ArrayList<String> launch_args = new java.util.ArrayList<>();
+        final String per_game_driver =
+                GameDriverStore.launchArgValue(this, game_title_id_);
+        if (per_game_driver != null) {
+            launch_args.add("--vulkan_lib_path=" + per_game_driver);
+            android.util.Log.i("XeniaAE",
+                    "Per-game driver for " + game_title_id_ + ": " + per_game_driver);
+        }
+        java.util.Collections.addAll(launch_args,
                 "--storage_root="+Application.get_app_data_dir().getAbsolutePath(),
                 "--config="+Application.get_global_config_file().getAbsolutePath(),
-                "--log_file="+Application.get_app_data_dir().getAbsolutePath()+"/xe.log",
-                /*"--storage_root=/storage/emulated/0/Download/xeniaae",
-                "--log_file=/storage/emulated/0/Download/xeniaae/xe.log",*/
-        });
+                "--log_file="+Application.get_app_data_dir().getAbsolutePath()+"/xe.log");
+        Emulator.get.setup_launch_args(launch_args.toArray(new String[0]));
         Emulator.get.setup_uri_info_list_file(Application.get_uri_info_list_file().getAbsolutePath());
         setContentView(R.layout.activity_emulator);
         sf = (SurfaceView) findViewById(R.id.surface_view);

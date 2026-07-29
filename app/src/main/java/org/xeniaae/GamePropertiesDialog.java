@@ -11,6 +11,11 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.widget.Toast;
 
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.StyleSpan;
+
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.DialogFragment;
@@ -43,7 +48,16 @@ public class GamePropertiesDialog extends DialogFragment {
         final int index = requireArguments().getInt(ARG_INDEX);
         final MainActivity.GameEntry game = MainActivity.sGames.get(index);
 
-        final String[] options = {
+        // "Remove from Library" is styled bold red as a destructive-action cue.
+        // setItems takes CharSequence[], so a SpannableString renders correctly
+        // here without needing a custom adapter.
+        final SpannableString remove = new SpannableString("Remove from Library");
+        remove.setSpan(new ForegroundColorSpan(0xFFD32F2F), 0, remove.length(),
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        remove.setSpan(new StyleSpan(android.graphics.Typeface.BOLD), 0, remove.length(),
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+
+        final CharSequence[] options = {
                 "Game Details",
                 "Launch Game",
                 getString(R.string.precache_shaders),
@@ -51,7 +65,8 @@ public class GamePropertiesDialog extends DialogFragment {
                 "Clear Box Art",
                 "Create Shortcut",
                 "Game Settings",
-                "Remove from Library"
+                "Game GPU Driver",
+                remove
         };
 
         return new MaterialAlertDialogBuilder(requireContext())
@@ -117,7 +132,23 @@ public class GamePropertiesDialog extends DialogFragment {
                 activity.startActivity(settings_intent);
                 break;
 
-            case 7: // Remove
+            case 7: { // Game GPU Driver - per-title override of the global driver.
+                // Deliberately NOT stored in the per-game config TOML: the driver
+                // is loaded during Emulator::Setup, before the per-game config is
+                // read, so it must be a launch argument instead (applied in
+                // EmulatorActivity). See GameDriverStore for the full reasoning.
+                String drv_title_id = game.titleId != null
+                        ? game.titleId : GameScanner.peekTitleId(activity, Uri.parse(game.uri));
+                if (drv_title_id == null) {
+                    Toast.makeText(activity, "Couldn't identify this game yet - try again shortly.",
+                            Toast.LENGTH_SHORT).show();
+                    break;
+                }
+                showDriverPicker(activity, drv_title_id, game.title);
+                break;
+            }
+
+            case 8: // Remove
                 new MaterialAlertDialogBuilder(activity)
                         .setTitle("Remove Game")
                         .setMessage("Remove \"" + game.title + "\" from your library?")
@@ -130,6 +161,48 @@ public class GamePropertiesDialog extends DialogFragment {
                         .show();
                 break;
         }
+    }
+
+    /**
+     * Pins a specific GPU driver to one game. Options: follow the global setting
+     * (default), force the device's built-in driver, or any driver installed via
+     * Settings > Video > Custom Driver.
+     *
+     * Different titles need different drivers on Adreno - e.g. Halo 3's menu
+     * vista requires Turnip (the stock driver mis-compiles the resolve shader),
+     * while other titles can regress on it. This lets both be right at once.
+     */
+    private void showDriverPicker(MainActivity activity, String titleId, String gameTitle) {
+        final java.util.List<String> labels = new java.util.ArrayList<>();
+        final java.util.List<String> values = new java.util.ArrayList<>();
+
+        labels.add(activity.getString(R.string.game_driver_use_global));
+        values.add(GameDriverStore.USE_GLOBAL);
+        labels.add(activity.getString(R.string.game_driver_force_default));
+        values.add(GameDriverStore.FORCE_DEFAULT);
+
+        for (Utils.DriverInfo d : Utils.list_installed_drivers()) {
+            labels.add(d.name);
+            values.add(d.libraryPath);
+        }
+
+        final String current = GameDriverStore.get(activity, titleId);
+        int checked = values.indexOf(current);
+        if (checked < 0) {
+            checked = 0;
+        }
+
+        new MaterialAlertDialogBuilder(activity)
+                .setTitle(gameTitle)
+                .setSingleChoiceItems(labels.toArray(new String[0]), checked, (d, which) -> {
+                    GameDriverStore.set(activity, titleId, values.get(which));
+                    Toast.makeText(activity,
+                            activity.getString(R.string.game_driver_set, labels.get(which)),
+                            Toast.LENGTH_LONG).show();
+                    d.dismiss();
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
     }
 
     private void createShortcut(MainActivity activity, MainActivity.GameEntry game) {

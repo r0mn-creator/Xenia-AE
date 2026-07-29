@@ -270,6 +270,48 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
         }
     }
 
+    /**
+     * Title IDs (uppercase) of every game in the library, for screens that need to
+     * tell "the user owns this" from "this merely exists" - e.g. the patch browser
+     * filtering ~480 bundled community patch files down to the user's own games.
+     *
+     * Reads the persisted library directly rather than going through sGames, so it
+     * works even when MainActivity hasn't run in this process yet (a Settings
+     * sub-screen can be the first thing opened after a cold start). Read-only - it
+     * deliberately does NOT populate or mutate sGames.
+     *
+     * Entries whose titleId hasn't been filled in yet by GameScanner are simply
+     * absent, so callers must treat an empty result as "unknown", not "owns none".
+     */
+    static java.util.Set<String> installedTitleIds(Context context) {
+        final java.util.Set<String> ids = new HashSet<>();
+        for (final GameEntry e : sGames) {          // already loaded: cheapest path
+            if (e.titleId != null) {
+                ids.add(e.titleId.toUpperCase());
+            }
+        }
+        if (!ids.isEmpty()) {
+            return ids;
+        }
+        final String json = PreferenceManager.getDefaultSharedPreferences(context)
+                .getString(PREF_GAME_LIBRARY, null);
+        if (json == null) {
+            return ids;
+        }
+        try {
+            final JSONArray array = new JSONArray(json);
+            for (int i = 0; i < array.length(); i++) {
+                final String id = array.getJSONObject(i).optString("titleId", null);
+                if (id != null && !id.isEmpty()) {
+                    ids.add(id.toUpperCase());
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "installedTitleIds failed: " + e.getMessage());
+        }
+        return ids;
+    }
+
     /** Restores sGames from SharedPreferences. Call once on a fresh launch. */
     private static void loadLibrary(Context context) {
         final String json = PreferenceManager.getDefaultSharedPreferences(context)

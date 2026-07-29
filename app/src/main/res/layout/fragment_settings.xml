@@ -14,20 +14,14 @@
         <include android:id="@+id/row_dark_mode" layout="@layout/settings_row_switch"/>
         <include android:id="@+id/row_refresh_list" layout="@layout/settings_row_click"/>
 
-        <TextView style="@style/SettingsSectionHeader" android:text="@string/settings_section_video"/>
-        <include android:id="@+id/row_resolution" layout="@layout/settings_row_click"/>
-        <include android:id="@+id/row_custom_driver" layout="@layout/settings_row_click"/>
-        <include android:id="@+id/row_frame_rate" layout="@layout/settings_row_switch"/>
-        <include android:id="@+id/row_overlay" layout="@layout/settings_row_switch"/>
-
-        <TextView style="@style/SettingsSectionHeader" android:text="@string/settings_section_audio"/>
-        <include android:id="@+id/row_audio" layout="@layout/settings_row_switch"/>
-
         <TextView style="@style/SettingsSectionHeader" android:text="@string/settings_section_more"/>
-        <include android:id="@+id/row_key_mappers" layout="@layout/settings_row_click"/>
-        <include android:id="@+id/row_virtual_pad_edit" layout="@layout/settings_row_click"/>
-        <include android:id="@+id/row_open_file_mgr" layout="@layout/settings_row_click"/>
-        <include android:id="@+id/row_advanced_settings" layout="@layout/settings_row_click"/>
+        <include android:id="@+id/row_cat_video" layout="@layout/settings_row_click"/>
+        <include android:id="@+id/row_cat_audio" layout="@layout/settings_row_click"/>
+        <include android:id="@+id/row_cat_input" layout="@layout/settings_row_click"/>
+        <include android:id="@+id/row_cat_coverart" layout="@layout/settings_row_click"/>
+        <include android:id="@+id/row_cat_advanced" layout="@layout/settings_row_click"/>
+        <!-- CANARY-AE DEBUG MODULE - delete for mainline Xenia AE -->
+        <include android:id="@+id/row_debug" layout="@layout/settings_row_click"/>
         <include android:id="@+id/row_about" layout="@layout/settings_row_click"/>
 
     </LinearLayout>
