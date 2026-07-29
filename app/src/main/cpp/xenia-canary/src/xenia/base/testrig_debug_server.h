@@ -94,6 +94,30 @@ inline int64_t NowMs() {
       .count();
 }
 
+// Reads Android system property `prop_name` as a tri-state boolean:
+//   "1"/"true"  -> true
+//   "0"/"false" -> false
+//   unset/other -> default_value
+// Unlike PropertyEnabled below (which can only DISABLE a default-on feature),
+// this can also ENABLE a default-off one, so experimental engine switches can be
+// driven from the Debug menu instead of requiring a rebuild.
+// TESTRIG(core): part of the Canary-AE debug module.
+inline bool PropertyBool(const char* prop_name, bool default_value) {
+  char value[PROP_VALUE_MAX] = {0};
+  int len = __system_property_get(prop_name, value);
+  if (len <= 0) {
+    return default_value;
+  }
+  const std::string v(value);
+  if (v == "1" || v == "true") {
+    return true;
+  }
+  if (v == "0" || v == "false") {
+    return false;
+  }
+  return default_value;
+}
+
 // Reads Android system property `prop_name`; "0" or "false" means explicitly
 // disabled, anything else (including unset) means `default_value`.
 inline bool PropertyEnabled(const std::string& prop_name,

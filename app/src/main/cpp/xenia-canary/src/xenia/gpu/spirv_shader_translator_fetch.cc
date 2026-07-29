@@ -80,6 +80,33 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
       if (instr.attributes.is_index_rounded) {
         index = builder_->createNoContractionBinOp(
             spv::OpFAdd, type_float_, index, builder_->makeFloatConstant(0.5f));
+      } else if (false) {  // TESTED 2026-07-25: did NOT fix Halo 3 - see below.
+        // RCP-PRECISION FIX ATTEMPT (2026-07-25, Halo 3 skinned-geometry
+        // collapse). RESULT: NEGATIVE - characters still collapse. Disabled
+        // rather than deleted so this isn't re-attempted from scratch; flip the
+        // `false` to re-enable. The reasoning below still describes a real
+        // upstream mechanism, it just isn't what breaks Halo 3 here.
+        // Guest shaders commonly compute a vertex index as
+        // floor(something * rcp(divisor)) - Halo 3's memexport CONSUMER
+        // (488D9488AB7ED7D8) does exactly this:
+        //   rcp r0.y, c78.x ; mul r0.y, r0.z, r0.y ; floors r0.y, r0.y
+        // Adreno's rcp is less accurate than desktop's, so an index that should
+        // land on exactly N comes out as N-epsilon (e.g. 11.9999997), and the
+        // floor below then addresses record N-1 - every affected vertex reads
+        // ANOTHER vertex's data. That matches the evidence exactly: the exported
+        // buffer contents were proven CORRECT and structurally identical to the
+        // RADV oracle (see RECDUMP in
+        // project_xenia_ae_halo3_memexport_mechanism), yet the skinned geometry
+        // renders as a collapsed ball - i.e. good data read from wrong slots.
+        // Upstream Xenia carries the same nudge as `ac6_ground_fix` with the
+        // note "Proper fix requires accurate RCP implementation"; AE's fork
+        // dropped it. Applied unconditionally here because the inaccuracy is a
+        // property of the hardware, not of one game. The epsilon is far smaller
+        // than any legitimate index spacing (indices are integers), so it cannot
+        // push a correctly-computed index to the next record.
+        index = builder_->createNoContractionBinOp(
+            spv::OpFAdd, type_float_, index,
+            builder_->makeFloatConstant(0.00025f));
       }
       index = builder_->createUnaryOp(
           spv::OpConvertFToS, type_int_,

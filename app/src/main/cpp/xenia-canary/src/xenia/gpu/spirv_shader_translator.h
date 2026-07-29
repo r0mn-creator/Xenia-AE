@@ -351,13 +351,15 @@ class SpirvShaderTranslator : public ShaderTranslator {
                         bool native_2x_msaa_no_attachments,
                         bool edram_fragment_shader_interlock,
                         uint32_t draw_resolution_scale_x = 1,
-                        uint32_t draw_resolution_scale_y = 1)
+                        uint32_t draw_resolution_scale_y = 1,
+                        bool memexport_only_in_compute = false)
       : features_(features),
         native_2x_msaa_with_attachments_(native_2x_msaa_with_attachments),
         native_2x_msaa_no_attachments_(native_2x_msaa_no_attachments),
         edram_fragment_shader_interlock_(edram_fragment_shader_interlock),
         draw_resolution_scale_x_(draw_resolution_scale_x),
-        draw_resolution_scale_y_(draw_resolution_scale_y) {}
+        draw_resolution_scale_y_(draw_resolution_scale_y),
+        memexport_only_in_compute_(memexport_only_in_compute) {}
 
   uint64_t GetDefaultVertexShaderModification(
       uint32_t dynamic_addressable_register_count,
@@ -630,8 +632,23 @@ class SpirvShaderTranslator : public ShaderTranslator {
     if (is_pixel_shader()) {
       return features_.fragment_stores_and_atomics;
     }
-    return features_.vertex_pipeline_stores_and_atomics ||
-           IsSpirvComputeShader();
+    if (IsSpirvComputeShader()) {
+      return true;
+    }
+    // ADRENO FIX ATTEMPT (2026-07-25, Halo 3 skinned-geometry collapse):
+    // when the compute-memexport path owns the export, a normal GRAPHICS vertex
+    // shader must NOT also perform its own memory export. On Adreno the vertex
+    // shader runs TWICE - a position-only BINNING pass plus the real shading
+    // pass (documented by Qualcomm) - and the binning run only computes a
+    // SUBSET of attributes, so its memexport stores write uninitialised garbage
+    // over the clean data the compute dispatch just produced. vulkan_pipeline_
+    // cache.cc already warns about this ("could partially overwrite the compute
+    // dispatch's clean output") but only disables the rasterizer-discard trick;
+    // nothing actually suppressed the stores until now.
+    if (memexport_only_in_compute_) {
+      return false;
+    }
+    return features_.vertex_pipeline_stores_and_atomics;
   }
 
   bool IsMemoryExportUsed() const {
@@ -726,6 +743,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
   bool native_2x_msaa_no_attachments_;
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
+  // If true, only the kMemExportCompute variant may emit memory export; normal
+  // graphics vertex shaders skip it (see IsMemoryExportSupported).
+  bool memexport_only_in_compute_ = false;
 
   // For safety with different drivers (even though fragment shader interlock in
   // SPIR-V only has one control flow requirement - that both begin and end must

@@ -17,6 +17,12 @@
 namespace xe {
 namespace gpu {
 
+// SENTINEL TEST toggle (2026-07-25). When true, memexport writes the guest
+// vertex index into component .x of every exported element instead of the real
+// value, so the CPU probe can verify the invariant "record N contains N".
+// CORRUPTS RENDERING BY DESIGN - diagnostic builds only. Set false to restore.
+static constexpr bool kMemExportSentinelTest = false;  // diagnostic only - see project_xenia_ae_halo3_memexport_mechanism (producer proven correct 2026-07-25)
+
 void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
   if (!export_eM) {
     return;
@@ -168,6 +174,35 @@ void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
     eM_original[eM_index] = builder_->createLoad(
         var_main_memexport_data_[eM_index], spv::NoPrecision);
   });
+
+  // ===== SENTINEL TEST (2026-07-25, Halo 3 skinned-geometry collapse) =====
+  // Every blind fix attempt so far failed because we could never tell whether
+  // the producer writes the RIGHT data to the RIGHT slot - cross-platform
+  // comparisons only ever showed the data was "plausible", never "correct".
+  // This replaces eM0.x with the guest VERTEX INDEX, so the CPU can check a
+  // scene-independent invariant: record N must contain N. Any mismatch proves
+  // the producer is writing wrong slots (or garbage), and the distribution of
+  // mismatches says which. Deliberately corrupts rendering - diagnostic only.
+  if (kMemExportSentinelTest) {
+    spv::Id sentinel_vertex_index;
+    if (IsSpirvComputeShader()) {
+      // Compute-emulated memexport: guest vertex index is GlobalInvocationId.x
+      // (local size is 1) - same source main() uses.
+      sentinel_vertex_index = builder_->createCompositeExtract(
+          builder_->createLoad(input_global_invocation_id_, spv::NoPrecision),
+          type_uint_, 0);
+    } else {
+      sentinel_vertex_index = builder_->createUnaryOp(
+          spv::OpBitcast, type_uint_,
+          builder_->createLoad(input_vertex_index_, spv::NoPrecision));
+    }
+    spv::Id sentinel_float = builder_->createUnaryOp(
+        spv::OpConvertUToF, type_float_, sentinel_vertex_index);
+    for_each_eM([&](uint32_t eM_index) {
+      eM_original[eM_index] = builder_->createCompositeInsert(
+          sentinel_float, eM_original[eM_index], type_float4_, 0);
+    });
+  }
 
   // Swap red and blue if needed.
   spv::Id format_info =

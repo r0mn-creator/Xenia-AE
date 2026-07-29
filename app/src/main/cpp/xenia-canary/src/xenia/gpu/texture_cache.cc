@@ -13,6 +13,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/testrig_debug_server.h"  // TESTRIG(gpu)
 #include "xenia/gpu/gpu_flags.h"
 
 DEFINE_int32(
@@ -336,6 +337,16 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     BindingInfoFromFetchConstant(fetch, binding.key, &binding.swizzled_signs);
     texture_bindings_in_sync_ |= index_bit;
     if (!binding.key.is_valid) {
+      // TESTRIG(halo3-geo-corruption): which fetch slot the
+      // INVALID_TEXFETCH_ALLOWED dword dump (texture_cache.cc,
+      // BindingInfoFromFetchConstant) came from - correlate by adjacency in
+      // the log, since that log site doesn't have the slot index.
+      static std::atomic<bool> testrig_gpu_enabled_slot{true};
+      static std::atomic<int64_t> testrig_gpu_next_check_ms_slot{0};
+      if (xe::testrig::HotPathEnabledCached("gpu", testrig_gpu_enabled_slot,
+                                             testrig_gpu_next_check_ms_slot)) {
+        XELOGI("INVALID_TEXFETCH_SLOT index={}", index);
+      }
       if (old_key.is_valid) {
         bindings_changed |= index_bit;
       }
@@ -878,6 +889,23 @@ void TextureCache::BindingInfoFromFetchConstant(
       break;
     case xenos::FetchConstantType::kInvalidTexture:
       if (cvars::gpu_allow_invalid_fetch_constants) {
+        // TESTRIG(halo3-geo-corruption): normally silent - if bone/skinning
+        // data is sampled via a texture fetch (some games use a "bone
+        // texture" for skinning) rather than a vertex fetch, an invalid
+        // texture fetch constant here could explain the jungle-scene
+        // character geometry corruption the same way an invalid vertex
+        // fetch constant could. See the matching log in
+        // vulkan_command_processor.cc (INVALID_FETCH_ALLOWED).
+        static std::atomic<bool> testrig_gpu_enabled{true};
+        static std::atomic<int64_t> testrig_gpu_next_check_ms{0};
+        if (xe::testrig::HotPathEnabledCached(
+                "gpu", testrig_gpu_enabled, testrig_gpu_next_check_ms)) {
+          XELOGI(
+              "INVALID_TEXFETCH_ALLOWED dw0=0x{:08X} dw1=0x{:08X} "
+              "dw2=0x{:08X} dw3=0x{:08X} dw4=0x{:08X} dw5=0x{:08X}",
+              fetch.dword_0, fetch.dword_1, fetch.dword_2, fetch.dword_3,
+              fetch.dword_4, fetch.dword_5);
+        }
         break;
       }
       XELOGW(

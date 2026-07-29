@@ -475,9 +475,31 @@ bool VulkanSharedMemory::UploadRanges(
   return successful;
 }
 
+// SLEDGEHAMMER BARRIER TEST (2026-07-25, Halo 3 skinned-geometry collapse).
+// State of the investigation: the memexport buffer contents in MEMORY are proven
+// CORRECT on Adreno (sentinel test reproduces RADV's exact slot fingerprint), yet
+// the skinned geometry still collapses. Every probe so far reads the buffer via
+// CPU readback, which proves memory is right but says nothing about what the
+// GPU's vertex fetch actually SEES. If Adreno serves stale cache lines to the
+// consuming draw, that explains the whole evidence set.
+// Rather than build capture tooling to OBSERVE that, test it directly: make every
+// shared-memory barrier maximal (all stages, all access). If the collapse
+// resolves, this is conclusively a synchronization/cache-visibility problem and
+// we can then narrow to the minimal correct masks. If nothing changes, cache
+// visibility is ruled out and GPU capture is the only remaining path.
+// Precedent: the kComputeWrite SHADER_READ->SHADER_WRITE fix below solved the
+// flat-navy vista bug, which was exactly this class of Adreno stale-data issue.
+// Expect a performance cost while enabled - diagnostic only.
+static constexpr bool kSledgehammerSharedMemoryBarriers = false;  // TESTED 2026-07-25: did NOT fix the collapse - cache visibility RULED OUT
+
 void VulkanSharedMemory::GetUsageMasks(Usage usage,
                                        VkPipelineStageFlags& stage_mask,
                                        VkAccessFlags& access_mask) const {
+  if (kSledgehammerSharedMemoryBarriers) {
+    stage_mask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    access_mask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    return;
+  }
   switch (usage) {
     case Usage::kComputeWrite:
       stage_mask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;

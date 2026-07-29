@@ -789,6 +789,29 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
     }
     const FormatInfo& format_info =
         *FormatInfo::Get(xenos::TextureFormat(stream.format));
+    // STREAMFMT probe (2026-07-24): the VALSHAPE probe interprets the whole
+    // memexport buffer as float32 and found NaN/1e38 values on Adreno - but that
+    // is only meaningful if the stream really stores 32-bit floats. If the stream
+    // format is a PACKED one (16_16_16_16, 8_8_8_8, ...) then reading it as
+    // float32 produces arbitrary bit patterns and the "garbage values" finding is
+    // an artifact of the probe, not a real defect. Log the declared format +
+    // element size once per distinct format so this is answerable without the
+    // (flaky) desktop oracle. Deliberately not testrig-gated: fires a handful of
+    // times total, then goes silent.
+    {
+      static std::atomic<uint32_t> logged_formats{0};
+      uint32_t fmt_bit = uint32_t(stream.format) & 31;
+      uint32_t seen = logged_formats.fetch_or(1u << fmt_bit);
+      if (!(seen & (1u << fmt_bit))) {
+        XELOGI(
+            "STREAMFMT format={} ({}) bits_per_pixel={} index_count={} "
+            "computed_size_bytes={} base_dwords=0x{:08X}",
+            uint32_t(stream.format), FormatInfo::GetName(format_info.format),
+            format_info.bits_per_pixel, uint32_t(stream.index_count),
+            uint32_t(stream.index_count) * (format_info.bits_per_pixel >> 3),
+            uint32_t(stream.base_address));
+      }
+    }
     if (format_info.type != FormatType::kResolvable) {
       XELOGE("Unsupported memexport format {}",
              FormatInfo::GetName(format_info.format));

@@ -11,6 +11,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/testrig_debug_server.h"  // TESTRIG(gpu)
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -1024,7 +1025,16 @@ VkImageView VulkanTextureCache::RequestSwapTexture(
   // Correlate against RESOLVE dest addrs to find which resolve feeds the front
   // buffer, then trace backward to see if the 3D vista made it into that
   // buffer (vs. the front buffer being a navy-cleared image nothing drew into).
-  XELOGI("SWAPSRC addr=0x{:08X}", fetch.base_address << 12);
+    {  // TESTRIG(gpu): was UNGATED - flooded ~650 lines/sec with diagnostics off,
+     // collapsing framerate to an apparent freeze (NFS Carbon stuck at the main
+     // menu, 2026-07-26). Leftover from the Halo 3 vista investigation.
+    static std::atomic<bool> tr_en{true};
+    static std::atomic<int64_t> tr_next{0};
+    if (xe::testrig::HotPathEnabledCached("gpu", tr_en, tr_next)) {
+    XELOGI("SWAPSRC addr=0x{:08X}", fetch.base_address << 12);
+    }
+  }
+
   TextureKey key;
   BindingInfoFromFetchConstant(fetch, key, nullptr);
   if (!key.is_valid || key.base_page == 0 ||

@@ -9,6 +9,11 @@
 
 #include "xenia/ui/vulkan/vulkan_instance.h"
 
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+#include <sys/system_properties.h>  // GPU PROBE: TU_DEBUG via system property
+#include <cstdlib>
+#endif
+
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -68,6 +73,29 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
   const char* const loader_library_name = "libvulkan.so.1";
 #endif
 #if XE_PLATFORM_ANDROID||XE_PLATFORM_AX360E
+    // ===== GPU PROBE (2026-07-25, Halo 3 skinned-geometry collapse) =====
+    // The custom driver is Mesa/Turnip - open source - which honours TU_DEBUG.
+    // Everything emulator-side is now verified correct (producer writes match
+    // RADV's exact fingerprint, cache visibility ruled out by a maximal-barrier
+    // test), so the remaining question is whether the GPU DRIVER/HARDWARE does
+    // something other than what it is asked. TU_DEBUG lets us change that
+    // directly - e.g. `sysmem` disables tiled/GMEM rendering, `nobin`/`forcebin`
+    // control the binning pass that Qualcomm documents as running the vertex
+    // shader twice.
+    // Driven by a system property so flags can be changed WITHOUT REBUILDING:
+    //   adb shell setprop debug.canary.tu_debug sysmem
+    //   adb shell setprop debug.canary.tu_debug nobin
+    //   adb shell setprop debug.canary.tu_debug ""     (default behaviour)
+    // Must be set before adrenotools loads the driver, since Turnip reads
+    // TU_DEBUG during initialisation.
+    {
+      char tu_debug_prop[PROP_VALUE_MAX] = {};
+      if (__system_property_get("debug.canary.tu_debug", tu_debug_prop) > 0 &&
+          tu_debug_prop[0]) {
+        setenv("TU_DEBUG", tu_debug_prop, 1);
+        XELOGI("GPUPROBE: TU_DEBUG={}", tu_debug_prop);
+      }
+    }
     std::string custom_lib_path=cvars::vulkan_lib_path;
     if(!custom_lib_path.empty()&&std::filesystem::exists(custom_lib_path)){
 

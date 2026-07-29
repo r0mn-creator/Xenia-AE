@@ -63,7 +63,23 @@ bool VulkanPipelineCache::Initialize() {
       render_target_cache_.msaa_2x_no_attachments_supported(),
       edram_fragment_shader_interlock,
       render_target_cache_.draw_resolution_scale_x(),
-      render_target_cache_.draw_resolution_scale_y());
+      render_target_cache_.draw_resolution_scale_y(),
+      // STEP 1 EXPERIMENT (2026-07-25) - REVERTED, see below.
+      // Intent: when compute-memexport is active make it the ONLY writer of the
+      // export buffer, so Adreno's position-only binning pass can't overwrite
+      // the compute output with partially-computed attributes (the hazard
+      // vulkan_pipeline_cache warns about ~30 lines below, which nothing
+      // actually mitigated).
+      // RESULT: passing `command_processor_.memexport_use_compute()` here
+      // HANGS the GPU - Halo 3 boots with audio but the swap count freezes
+      // (765 and static) and zero draws are issued. Suppressing memexport in the
+      // graphics vertex shader evidently breaks an invariant elsewhere (the
+      // command processor still computes memexport_ranges_ and issues the
+      // shared-memory barriers / descriptor bindings for a draw whose shader no
+      // longer declares the export). Any retry must ALSO stop the command
+      // processor treating those draws as memexport draws - not just silence the
+      // shader. Reverted to `false` (stock behaviour).
+      /* command_processor_.memexport_use_compute() */ false);
 
   if (edram_fragment_shader_interlock) {
     std::vector<uint8_t> depth_only_fragment_shader_code =
@@ -2686,6 +2702,24 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   // own (unreliable, tiled-binning) memory stores immediately afterward and
   // could partially overwrite the compute dispatch's clean output - so only
   // apply this discard-based emulation when compute-memexport is off.
+  // STEP 1b (2026-07-25): apply the discard ALWAYS for memexport draws, even
+  // when compute-memexport is on (previously `&& !memexport_use_compute()`).
+  // Rationale: rasterizer-discard is precisely what removes Adreno's
+  // position-only BINNING pass. The hazard the comment above describes - the
+  // graphics VS scribbling partially-computed attributes over the compute
+  // dispatch's clean output - only exists BECAUSE binning was re-enabled when
+  // compute was turned on. With discard applied in both modes the graphics VS
+  // runs exactly once with full attributes, so its stores write the SAME values
+  // compute already wrote (idempotent), instead of binning-pass garbage.
+  // Unlike the reverted Step 1, this keeps the draw self-consistent: the shader
+  // still declares its export and the command processor still sees a memexport
+  // draw, so no descriptor/barrier mismatch (that mismatch hung the GPU).
+  // RESULT: ✗ REVERTED. Characters still collapsed AND the lighting flickered.
+  // The flicker is itself a finding: if discarding rasterization on memexport
+  // draws damages lighting, then SOME memexport draws DO produce visible output,
+  // contradicting the "throwaway degenerate position" assumption above. So
+  // discard is only safe in the narrow case it was originally written for, and
+  // must NOT be broadened. Restored the original condition.
   if (creation_arguments.vertex_shader->shader().memexport_eM_written() &&
       !command_processor_.memexport_use_compute()) {
     rasterization_state.rasterizerDiscardEnable = VK_TRUE;

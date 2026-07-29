@@ -17,6 +17,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/testrig_debug_server.h"  // TESTRIG(gpu)
 #include "xenia/base/math.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/registers.h"
@@ -1051,12 +1052,21 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
   // wrote) and SWAPSRC (front buffer = 0x04E20000), this completes the chain:
   // front buffer <- which resolve <- which EDRAM tile <- which draws. Shows
   // whether the 3D vista's EDRAM tile ever resolves into the presented buffer.
-  XELOGI(
-      "RESOLVESRC copy_src_select={} color_base={} depth_base={} "
-      "dest_base=0x{:08X}",
-      uint32_t(resolve_info.rb_copy_control.copy_src_select),
-      resolve_info.color_original_base, resolve_info.depth_original_base,
-      resolve_info.copy_dest_base);
+    {  // TESTRIG(gpu): was UNGATED - flooded ~650 lines/sec with diagnostics off,
+     // collapsing framerate to an apparent freeze (NFS Carbon stuck at the main
+     // menu, 2026-07-26). Leftover from the Halo 3 vista investigation.
+    static std::atomic<bool> tr_en{true};
+    static std::atomic<int64_t> tr_next{0};
+    if (xe::testrig::HotPathEnabledCached("gpu", tr_en, tr_next)) {
+    XELOGI(
+          "RESOLVESRC copy_src_select={} color_base={} depth_base={} "
+          "dest_base=0x{:08X}",
+          uint32_t(resolve_info.rb_copy_control.copy_src_select),
+          resolve_info.color_original_base, resolve_info.depth_original_base,
+          resolve_info.copy_dest_base);
+    }
+  }
+
 
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
