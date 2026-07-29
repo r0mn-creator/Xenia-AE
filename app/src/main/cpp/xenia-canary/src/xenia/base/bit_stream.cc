@@ -23,8 +23,21 @@ BitStream::BitStream(uint8_t* buffer, size_t size_in_bits)
 BitStream::~BitStream() = default;
 
 void BitStream::SetOffset(size_t offset_bits) {
-  assert_false(offset_bits > size_bits_);
-  offset_bits_ = std::min(offset_bits, size_bits_);
+  // An out-of-range offset here is a normal, recoverable condition some XMA
+  // streams hit (e.g. Halo 3), and the assert_false that used to be here fired
+  // SIGTRAP on the XMA decoder thread in debug builds, killing the emulator.
+  // Only the crash is removed - the assignment is deliberately left UNCLAMPED so
+  // downstream behaviour is bit-identical to a release build, which never
+  // evaluated the assert.
+  //
+  // Do NOT "improve" this by clamping to size_bits_ (tried 2026-07-25, reverted
+  // 2026-07-26): clamping makes BitsRemaining() return 0 instead of underflowing
+  // to a huge value, which changes decoder control flow. Several callers here
+  // (xma_context_old.cc:245/464/473) have no bounds check of their own, and the
+  // clamp turned a crash into a HANG - NFS Carbon froze at its first load screen
+  // with the guest blocked and the GPU ring buffer empty (read_ptr==write_ptr,
+  // execute_calls stuck at ~67).
+  offset_bits_ = offset_bits;
 }
 
 size_t BitStream::BitsRemaining() { return size_bits_ - offset_bits_; }
