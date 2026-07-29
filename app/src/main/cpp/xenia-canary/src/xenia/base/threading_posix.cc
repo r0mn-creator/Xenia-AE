@@ -1324,12 +1324,30 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
     std::unique_lock lock(thread->handle_.state_mutex_);
     thread->handle_.state_ =
         create_suspended ? State::kSuspended : State::kRunning;
+    // suspend_count_ MUST be published in the same critical section as state_.
+    // Every Resume()/Suspend() call begins with WaitStarted(), which only waits
+    // for state_ != kUninitialized. If suspend_count_ were set in a later,
+    // separate critical section (as it used to be), a Resume() landing in the
+    // gap would observe the still-zero suspend_count_, take its
+    // "if (suspend_count_ == 0) return false" early-out, and silently DROP the
+    // resume - then this thread would set suspend_count_ = 1 and wait forever
+    // for a wakeup that already came and went.
+    //
+    // That lost wakeup is exactly how Halo 3 hung on the OnePlus 7 Pro
+    // (2026-07-29): all three guest threads parked here, so no guest code ever
+    // ran, nothing was ever written to the GPU ring buffer (read_ptr ==
+    // write_ptr == 0, execute_calls == 0) and the screen stayed black with zero
+    // errors logged. It reproduced there and not on the Odin 2 purely because
+    // this device widens the window - slower cores, plus TimerQueue and the
+    // logging writer both busy-spinning a full core each.
+    if (create_suspended) {
+      thread->handle_.suspend_count_ = 1;
+    }
     thread->handle_.state_signal_.notify_all();
   }
 
   if (create_suspended) {
     std::unique_lock lock(thread->handle_.state_mutex_);
-    thread->handle_.suspend_count_ = 1;
     thread->handle_.state_signal_.wait(
         lock, [thread] { return thread->handle_.suspend_count_ == 0; });
   }
