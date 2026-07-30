@@ -3452,6 +3452,104 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       XELOGI("{}", rcb.buffer());
     }
   }
+  // TESTRIG(halo3-consumer-matrix): user hypothesis (2026-07-30) - the vista is
+  // ONE solid mesh, so a bad transform makes it look cleanly flipped, while a
+  // character is MANY parts (arms/legs/head), so if each part gets a bad
+  // transform the parts pile onto each other and read as a "ball". This fits the
+  // user's own earlier observation that an intact HEAD is visible inside the
+  // ball: per-part mis-transform relocates parts while leaving each internally
+  // rigid, whereas true vertex collapse toward a point would destroy the head.
+  //
+  // The consumer applies c33/c34/c35 as a rotation basis and c36 as the
+  // translation column (ucode instr 66-75 of 488D9488AB7ED7D8, a mad chain:
+  // out = r.x*c33 + r.y*c34 + r.w*c35 + c36). The pre-existing ONE-SHOT
+  // CONSUMER_CONST dump above sampled c33..c36 as EXACT IDENTITY with a ZERO
+  // translation column - exactly the predicted mechanism. But per-part matrices
+  // vary PER DRAW by definition, so a single sample proves nothing.
+  //
+  // So count DISTINCT matrices across draws instead of dumping each one:
+  //   always identity      => parts really do all get the same no-op transform
+  //                           (hypothesis supported - a real mechanism at last)
+  //   many distinct values => parts DO get real per-part transforms, so the
+  //                           collapse is in the data they are applied to, not
+  //                           in the transform (hypothesis killed)
+  //
+  // Rate-limited deliberately: this shader ran 27223 times in one 20s capture,
+  // and both the Android harness and the desktop oracle have self-DoSed on
+  // unthrottled probes before (1.8M lines / 318MB once).
+  if (testrig_gpu_hot &&  // TESTRIG(gpu)
+      vertex_shader->ucode_data_hash() == 0x488D9488AB7ED7D8ull) {
+    const uint32_t* mtx_regvals = register_file_->values;
+    // FNV-1a over the RAW BITS of c33..c36 (16 dwords) so NaN payloads and -0.0
+    // are distinguished too, rather than comparing float values.
+    uint64_t fp = 14695981039346656037ull;
+    for (uint32_t c = 33; c <= 36; ++c) {
+      const uint32_t* cu =
+          &mtx_regvals[XE_GPU_REG_SHADER_CONSTANT_000_X + (c << 2)];
+      for (int i = 0; i < 4; ++i) {
+        fp ^= cu[i];
+        fp *= 1099511628211ull;
+      }
+    }
+    static uint64_t mtx_seen[32] = {};
+    static uint32_t mtx_seen_count = 0;
+    static uint64_t mtx_draws = 0;
+    static uint64_t mtx_identity_draws = 0;
+    static uint32_t mtx_dumped = 0;
+    ++mtx_draws;
+
+    // Identity basis with a zero translation column?
+    bool is_identity = true;
+    for (uint32_t c = 33; c <= 36 && is_identity; ++c) {
+      const float* cf = reinterpret_cast<const float*>(
+          &mtx_regvals[XE_GPU_REG_SHADER_CONSTANT_000_X + (c << 2)]);
+      for (int i = 0; i < 4; ++i) {
+        const float expect = (int(c) - 33 == i) ? 1.0f : 0.0f;
+        if (cf[i] != expect) {
+          is_identity = false;
+          break;
+        }
+      }
+    }
+    if (is_identity) {
+      ++mtx_identity_draws;
+    }
+
+    bool is_new = true;
+    for (uint32_t i = 0; i < mtx_seen_count; ++i) {
+      if (mtx_seen[i] == fp) {
+        is_new = false;
+        break;
+      }
+    }
+    if (is_new && mtx_seen_count < 32) {
+      mtx_seen[mtx_seen_count++] = fp;
+      // Dump the first few DISTINCT matrices in full - that is the interesting
+      // signal and it is bounded, unlike dumping per draw.
+      if (mtx_dumped < 8) {
+        ++mtx_dumped;
+        xe::StringBuffer mb;
+        mb.AppendFormat("CONSUMER_MTX distinct#{} draw={} identity={}",
+                        mtx_seen_count, mtx_draws, is_identity ? 1 : 0);
+        for (uint32_t c = 33; c <= 36; ++c) {
+          const float* cf = reinterpret_cast<const float*>(
+              &mtx_regvals[XE_GPU_REG_SHADER_CONSTANT_000_X + (c << 2)]);
+          mb.AppendFormat(" c{}=({:.9g},{:.9g},{:.9g},{:.9g})", c, cf[0], cf[1],
+                          cf[2], cf[3]);
+        }
+        XELOGI("{}", mb.buffer());
+      }
+    }
+    // Periodic summary - this line is the actual answer to the question.
+    if ((mtx_draws % 2048) == 0) {
+      XELOGI(
+          "CONSUMER_MTX_SUMMARY draws={} distinct_matrices={}{} "
+          "identity_draws={} ({}%)",
+          mtx_draws, mtx_seen_count, mtx_seen_count >= 32 ? "+capped" : "",
+          mtx_identity_draws,
+          mtx_draws ? (mtx_identity_draws * 100 / mtx_draws) : 0);
+    }
+  }
   // TESTRIG(halo3-blend): user hypothesis - the 3D scene renders correctly
   // but a blend mode makes it read as flat blue against the 2D UI
   // foreground. Log the actual blend state + color mask for the consuming
