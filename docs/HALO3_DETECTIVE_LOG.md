@@ -136,6 +136,21 @@ not, they *render*.
 narrows *where* to look (the memexport buffer data, and what terminates the fill)
 without answering it.
 
+**⚠️ Desktop paths changed 2026-07-30 (disk cleanup, 25 G → 20 G).** The
+authoritative layout is `~/xeniatest/README.md`.
+- **Known-good oracle:** `~/xeniatest/oracle/build/bin/Linux/Release/xenia_canary`
+  (worktree at tag `6e9bac0`, Release/RADV).
+- **Instrumented build goes in a SEPARATE folder:** `~/xeniatest/oracle-probe/`
+  (worktree at the same commit) so the known-good build is never modified.
+- ☠️ **Never delete `~/xeniatest/canary-git`** — `oracle/`, `oracle-probe/` and
+  `canary-fork/` are git worktrees whose `gitdir` lives inside it. It is the
+  shared object store and the largest directory; deleting it destroys all three.
+  Only its `build/` was removed.
+- Probes ported there must be **modules, off by default** (cvar-gated, e.g.
+  `--probe_consumer_mtx=true`, tagged `PROBE(<area>)`), so with everything off it
+  is a standard Xenia build that can be validated against real games first. Same
+  rule as the Android TESTRIG harness.
+
 **Next test, and the standing blocker:** every remaining lead needs the **RADV
 oracle reference** at the *menu* (now cheap thanks to T1). The oracle binary exists
 at `/home/roman/xeniatest/oracle/build/bin/Linux/Release/xenia_canary` (built
