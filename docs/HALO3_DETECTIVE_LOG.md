@@ -89,7 +89,14 @@ multiples of 4 — perfectly consistent.
 Not previously on the eliminated list. `LoopConstant = {count:8, start:8, step:8}`,
 `aL = iterator * step + start` (`xenos.h`).
 
-**Result at the menu:** **`l15 = 0x0001000D`** ⇒ **count = 13, start = 1, step = 0.**
+**Result at the menu:** **`l15 = 0x0001000D`** ⇒ **count = 13, start = 0, step = 1.**
+
+⚠️ **CORRECTED 2026-07-30 (T6).** I first hand-decoded this as `start=1, step=0`
+and concluded "aL is constant across all 13 iterations". **That was a bad manual
+bit-decode.** The real fields are `start=0, step=1`, so `aL = 0,1,2…12` and
+`c[144+aL]` **does vary per iteration** (c144..c156). Everything below that was
+premised on a constant `aL` is therefore void — the gate is *not* proven
+all-or-nothing per draw. Decode bitfields with code, not by eye.
 
 **Rules IN / implications:**
 - **`step = 0` ⇒ `aL = 1` for all 13 iterations**, so `c[144+aL]` is *always*
@@ -115,6 +122,38 @@ shows **zero visible correlation** with the result: it is not the amount of real
 data that decides the look, it is the flood of zero-input vertices that render
 regardless. ⚠️ I initially mis-stated this as "unfilled parts go missing" — they do
 not, they *render*.
+
+### ★★ T6 — RADV REFERENCE (the standing blocker, now cleared)
+Built `~/xeniatest/oracle-probe/` (worktree at `6e9bac0`, Release/RADV) with the
+Android probes ported as **cvar-gated modules, default off**
+(`--probe_master --probe_consumer_mtx --probe_loop_consts`, tagged `PROBE(...)`).
+
+**Build validated stock first, per the modules rule:** with all probes off the
+run produced **0 probe lines, 0 errors**, launched the title, on RADV RENOIR —
+i.e. a normal Xenia build, so its numbers are trustworthy.
+
+**Result — Halo 3, RADV (renders CORRECTLY):**
+```
+PROBE_LOOPCONST l15=0x0001000D count=13 start=0 step=1 (l0=0x00050001 l16=0x00050001)
+CONSUMER_MTX distinct#1 draw=1 identity=1 c33=(1,0,0,0) c34=(0,1,0,0) c35=(0,0,1,0) c36=(0,0,0,1)
+```
+
+| measurement | Android (Adreno, ball) | RADV (correct) | verdict |
+|---|---|---|---|
+| `l15` raw | `0x0001000D` | `0x0001000D` | **IDENTICAL** |
+| `c33..c36` | identity, 10240/10240 draws | identity | **SAME** |
+
+**⇒ T2 and T4 are now properly CLOSED, not just "unconfirmed":**
+- The identity transform is **by design** — the platform that renders Halo 3
+  *correctly* uses the exact same identity matrix. It is not the bug.
+- Loop constants are **not** a platform difference.
+Both behave exactly as ground rule #4 predicts for guest-written values.
+
+⚠️ **Caveat, stated honestly:** the RADV run logged only **1** consumer draw
+(`draw=1`), so no `CONSUMER_MTX_SUMMARY` (that needs 2048). The identity match is
+on the first draw only, versus Android's 10240. Directionally conclusive and
+consistent with rule #4, but a longer RADV run reaching the menu proper would
+make it airtight.
 
 ### Corrections to previously recorded conclusions
 - **Y-flip cannot cause the ball** — but only in its *global* form. A single
