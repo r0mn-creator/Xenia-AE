@@ -198,6 +198,29 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
             android.util.Log.i("XeniaAE",
                     "Per-game driver for " + game_title_id_ + ": " + per_game_driver);
         }
+        // TESTRIG(readback-memexport): CPU-side probes that scan the memexport
+        // target buffer (RECFIELD0/VTXDIST) read GUEST RAM, which the GPU's
+        // memexport writes never reach unless readback_memexport copies them
+        // back. Without it those probes read ZEROS and look like a total fill
+        // failure - an artifact, not a finding. Exposed as a runtime property so
+        // it can be matched against the desktop oracle's --readback_memexport
+        // without a rebuild, and it stays OFF by default because the copy-back
+        // is expensive.
+        try {
+            Process gp = new ProcessBuilder("/system/bin/getprop",
+                    "debug.canary.readback_memexport").redirectErrorStream(true).start();
+            java.io.BufferedReader gr = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(gp.getInputStream()));
+            String gv = gr.readLine();
+            gr.close();
+            gp.waitFor();
+            if (gv != null && (gv.trim().equals("1") || gv.trim().equals("true"))) {
+                launch_args.add("--readback_memexport=true");
+                android.util.Log.i("XeniaAE", "readback_memexport ENABLED via property");
+            }
+        } catch (Exception e) {
+            // Property unreadable - leave readback off (the safe default).
+        }
         java.util.Collections.addAll(launch_args,
                 "--storage_root="+Application.get_app_data_dir().getAbsolutePath(),
                 "--config="+Application.get_global_config_file().getAbsolutePath(),

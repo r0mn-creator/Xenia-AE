@@ -155,6 +155,65 @@ on the first draw only, versus Android's 10240. Directionally conclusive and
 consistent with rule #4, but a longer RADV run reaching the menu proper would
 make it airtight.
 
+### ★★★ T7 — Format-correct paired VALUE comparison (Adreno vs RADV). MAJOR NEGATIVE.
+**Why:** the in-tree comment stated *"the FILL metric is a red herring (RADV renders
+correctly while filling LESS of this buffer than Adreno). Same slots, same
+consumers, same draw counts -> the only surviving explanation is that the exported
+VALUES differ."* The earlier `VALSHAPE` attempt at that was RETRACTED because it
+read every dword as `float32` - but this is an 80-byte INTERLEAVED record
+(Stride=20 dwords) with SIX formats, so 16 of 20 dwords are packed half/short/
+2_10_10_10/8_8_8_8 data whose bit patterns merely *look* like NaN/denormals as
+float. That artifact produced the bogus "NaN smoking gun".
+
+**Layout, decoded from BOTH shaders' own vfetch instructions (producer instr
+90-100, consumer instr 38-45 - they agree):**
+`dw0-3 FMT_32_32_32_32_FLOAT` (the ONLY genuine float32 field) · `dw4-5` half4 ·
+`dw6-7`/`dw8-11` short4 · `dw12-13` half4 · `dw14` half2 · `dw15` short2 ·
+`dw16` 2_10_10_10 · `dw17-18` 8_8_8_8.
+
+**Method:** new `RECFIELD0` probe reads ONLY dw0-3 per record as float4 and reports
+valid/zero/nonfinite counts plus per-axis mean, sd and range. Identical code in
+both trees. ⚠️ **Both sides run with readback_memexport ON** (see the correction
+below - the first attempt at this was invalid without it).
+
+**Result at the Halo 3 main menu:**
+
+| metric | Android (Adreno, BALL) | RADV (renders CORRECTLY) |
+|---|---|---|
+| valid records | **561**/7168 (7.85%) | **494**/7168 (6.89%) |
+| zero records | 6603 | 6666 |
+| nonfinite | 4-8 | 8 |
+| sd (x,y,z) | 1.13e37, 1.63e37, 1.73e37 | 1.30e37, 1.46e37, 2.10e37 |
+| x range | [-1.51e38, 1.08e38] | [-7.87e37, 1.65e38] |
+
+**⇒ STATISTICALLY IDENTICAL. Adreno even has MORE valid records than the platform
+that renders correctly.**
+
+**Rules OUT (two big ones):**
+- **"The exported VALUES differ"** - the stated last surviving explanation. For
+  field0, the only genuine float32 field, they do not.
+- **"Underfill is the bug"** - ~93% zero records is **NORMAL**; RADV does the same
+  and renders fine. The long-running "dense prefix 5-14%" concern is a non-issue,
+  now confirmed by an independent, format-correct measurement.
+
+**What that leaves (untested):**
+1. The other fields (dw4-19, the packed half/short data) - not compared yet.
+2. **The consumer's READ, not the buffer's contents**: if Adreno computes a
+   different slot / fetch address per invocation than RADV, both platforms can hold
+   identical data yet draw different geometry. This is now the leading candidate.
+3. Something outside this buffer entirely.
+
+### ⚠️ Correction: my first T7 run was invalid
+I first compared RADV **with** `--readback_memexport=true` against Android
+**without** it, and got Android `valid=0/7168` (100% zero) - which looks like a
+total fill failure and is pure artifact: CPU-side probes read GUEST RAM, and the
+GPU's memexport writes never reach it unless readback copies them back. The memory
+file warned about exactly this and I walked into it anyway. Fixed by exposing
+readback as a runtime toggle (`setprop debug.canary.readback_memexport 1`, default
+OFF since the copy-back is expensive) so it can be matched to the oracle without a
+rebuild. **Always confirm both sides have readback ON before comparing buffer
+contents.**
+
 ### Corrections to previously recorded conclusions
 - **Y-flip cannot cause the ball** — but only in its *global* form. A single
   viewport flip is affine/invertible, so it cannot collapse distinct vertices.

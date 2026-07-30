@@ -2901,6 +2901,84 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               hist[1], hist[2], hist[3], hist[4], hist[5], hist[6], hist[7],
               hist[8], hist[9]);
         }
+        // TESTRIG(halo3-recordfields): FORMAT-CORRECT value comparison.
+        //
+        // Why this exists: the fill metric is a proven red herring (RADV renders
+        // correctly while filling LESS of this buffer than Adreno; same slots,
+        // same consumers, same draw counts), so the only surviving explanation
+        // is that the exported VALUES differ. The earlier VALSHAPE probe tried
+        // that and had to be RETRACTED, because it read every dword as float32 -
+        // but this is an 80-byte INTERLEAVED record (Stride=20 dwords) holding
+        // SIX different formats, so 16 of its 20 dwords are packed half/short/
+        // 2_10_10_10/8_8_8_8 data whose bit patterns merely LOOK like NaN and
+        // denormals when reinterpreted as float. That artifact is what produced
+        // the bogus "NaN smoking gun".
+        //
+        // Record layout, decoded from the producer's own vfetch instructions
+        // (shader 9EA48FC2B26C325D, instr 90-100):
+        //   dw 0-3   FMT_32_32_32_32_FLOAT   <-- the ONLY genuine float32 field
+        //   dw 4-5   FMT_16_16_16_16_FLOAT       (half4)
+        //   dw 6-7   FMT_16_16_16_16
+        //   dw 8-9   FMT_16_16_16_16
+        //   dw 10-11 FMT_16_16_16_16
+        //   dw 12-13 FMT_16_16_16_16_FLOAT
+        //   dw 14    FMT_16_16_FLOAT
+        //   dw 15    FMT_16_16
+        //   dw 16    FMT_2_10_10_10
+        //   dw 17-18 FMT_8_8_8_8
+        // So read ONLY dwords 0-3 per record, as float4.
+        //
+        // The discriminator is SPREAD, not magnitude: if skinned positions
+        // collapse into the "tight degenerate cluster" that the p0=TRUE decode
+        // predicts, the standard deviation across records is tiny; a correct
+        // buffer spans a broad world-space range. Scene/animation state differs
+        // between platforms so raw values are not comparable - the SHAPE is.
+        // Identical code runs in the RADV oracle tree for direct comparison.
+        if (vsize == 573440) {
+          const uint32_t kStrideDw = 20;
+          const uint32_t recs = dwords / kStrideDw;
+          uint32_t rec_zero = 0, rec_nonfinite = 0, rec_valid = 0;
+          double sx = 0, sy = 0, sz = 0, sxx = 0, syy = 0, szz = 0;
+          float mnx = 3.4e38f, mxx = -3.4e38f;
+          float mny = 3.4e38f, mxy = -3.4e38f;
+          float mnz = 3.4e38f, mxz = -3.4e38f;
+          for (uint32_t r = 0; r < recs; ++r) {
+            const float* f =
+                reinterpret_cast<const float*>(&vd[r * kStrideDw]);
+            if (!std::isfinite(f[0]) || !std::isfinite(f[1]) ||
+                !std::isfinite(f[2])) {
+              ++rec_nonfinite;
+              continue;
+            }
+            if (f[0] == 0.0f && f[1] == 0.0f && f[2] == 0.0f) {
+              ++rec_zero;
+              continue;
+            }
+            ++rec_valid;
+            sx += f[0]; sy += f[1]; sz += f[2];
+            sxx += double(f[0]) * f[0];
+            syy += double(f[1]) * f[1];
+            szz += double(f[2]) * f[2];
+            if (f[0] < mnx) mnx = f[0];
+            if (f[0] > mxx) mxx = f[0];
+            if (f[1] < mny) mny = f[1];
+            if (f[1] > mxy) mxy = f[1];
+            if (f[2] < mnz) mnz = f[2];
+            if (f[2] > mxz) mxz = f[2];
+          }
+          double n = rec_valid ? double(rec_valid) : 1.0;
+          double vx = sxx / n - (sx / n) * (sx / n);
+          double vy = syy / n - (sy / n) * (sy / n);
+          double vz = szz / n - (sz / n) * (sz / n);
+          XELOGI(
+              "RECFIELD0 recs={} valid={} zero={} nonfinite={} "
+              "mean=({:.4g},{:.4g},{:.4g}) sd=({:.4g},{:.4g},{:.4g}) "
+              "xrange=[{:.4g},{:.4g}] yrange=[{:.4g},{:.4g}] "
+              "zrange=[{:.4g},{:.4g}]",
+              recs, rec_valid, rec_zero, rec_nonfinite, sx / n, sy / n, sz / n,
+              vx > 0 ? std::sqrt(vx) : 0.0, vy > 0 ? std::sqrt(vy) : 0.0,
+              vz > 0 ? std::sqrt(vz) : 0.0, mnx, mxx, mny, mxy, mnz, mxz);
+        }
         // VALSHAPE probe (2026-07-24): the RADV oracle proved the FILL metric is
         // a red herring (RADV renders correctly while filling LESS of this buffer
         // than Adreno). Same slots, same consumers, same draw counts -> the only
