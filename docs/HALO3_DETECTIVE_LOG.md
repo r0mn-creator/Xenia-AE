@@ -259,6 +259,74 @@ plausible records sit. Identical code both trees, readback ON both sides.
 extreme outliers, and never treat a *count* of loosely-defined "valid" items as a
 quality measure. Classify by magnitude and location.
 
+### ★★★★ T9 — field0 premise VERIFIED FALSE, and the ball mechanism found in ucode
+User asked to verify the field0 premise before building further on it. **Good call -
+it is false, and T7/T8 profiled a field the shader discards.**
+
+**field0 is DEAD.** Consumer `488D9488AB7ED7D8`:
+```
+/* 38 */  vfetch_full r2.xywz, r0.y, vf1, FMT_32_32_32_32_FLOAT, Stride=20  <- field0 -> r2
+/* 53 */  (p0) sgts r2._y__, -r_abs[0].x     <- r2.y OVERWRITTEN
+/* 54 */  (p0) sgts r2.__z_, -r_abs[0].x     <- r2.z OVERWRITTEN
+/* 55 */  (p0) sgts r2.___w, -r_abs[0].x     <- r2.w OVERWRITTEN
+/* 56 */  (p0) sgts r2.x___, -r_abs[0].x     <- r2.x OVERWRITTEN
+/* 66 */  (p0) mad r4  = r2.wwww*c35 + c36   <- uses the OVERWRITTEN r2
+/* 74 */  (p0) mad r15 = r2.xxxx*c33 + r9
+/* 262*/  (p0) mad r0  = r0.zxyy*r2.zzzz + r15.zxyy   (r2.z==0 => r0 = r15)
+/* 418*/       max oPos, r0, r0
+```
+`sgts` computes `-|r0.x| > 0`, always FALSE => 0.0. So on the p0 path the transform
+runs on ZEROS and yields just `c36`, the translation column of that identity
+matrix => **the ORIGIN. Every p0-true vertex is sent to the origin. That is the
+ball, written plainly in the ucode.**
+
+**Also: the slot formula is confirmed** - instr 35-37:
+`r0.y = floor((vtxIndex + c229.x) / c78.x)` with `c78.x=4`, `c229.x=0.5`.
+
+**What actually decides p0 (NOT dw0-3):**
+```
+/* 46 */ sge  r0.z = (r7.x  >= c229.w)   <- r7 from Offset=12 (half4)
+       + seqs r0.w = (r11.w == 0)        <- r11 from Offset=17 (8_8_8_8)
+/* 47 */ add  r0.z = r0.w + r0.z
+/* 49 */ setp_ne_push -> p0 = (c228.x==0) && (r0.z != 0);  c228=(0,1,8,30) so
+         c228.x==0 always holds => p0 = (r0.z != 0)
+```
+
+### ★★★★ THE LEAD: `r7.x` is read UNINITIALIZED, and the two trees init it differently
+`vfetch_mini r7.w__z, Offset=12` writes **only `.w` and `.z`**. Instr 46 reads
+**`r7.x`**, which nothing ever wrote.
+
+Direct source comparison:
+```cpp
+// UPSTREAM 6e9bac0 (RADV, renders CORRECTLY) - spirv_shader_translator.cc:554
+var_main_registers_ = builder_->createVariable(spv::NoPrecision,
+    spv::StorageClassFunction, type_register_array, "xe_var_registers");
+                                                        // NO initializer
+
+// XENIA-AE (Adreno, BALL) - spirv_shader_translator.cc:550, commit 54e6a4d6
+var_main_registers_ = builder_->createVariable(spv::NoPrecision,
+    spv::StorageClassFunction, type_register_array, "xe_var_registers",
+    register_array_zero);                               // ZERO-INITIALIZED
+```
+A SPIR-V Function-storage variable without an initializer is *indeterminate* per
+spec. So:
+- **AE:** `r7.x = 0` => `(0 >= 1)` false => `r0.z = 0`
+- **Upstream/RADV:** indeterminate => may differ => `r0.z` may be 1
+
+`r0.z` gates `p0`, and `p0` gates the origin-collapse path. **So the two platforms
+can take different branches through this shader because of a register the GAME
+never initialized - and AE's own zero-init fix (54e6a4d6) is what makes AE's value
+deterministic and possibly different from what the game relies on.**
+
+⚠️ Not yet proven to be THE cause - the p0 polarity and what the non-p0 path draws
+still need care, and `r11.w` (dw17's high byte) also feeds `r0.z`. But this is the
+first *verified platform difference on the exact code path that produces the ball*.
+
+**Next experiment (cheap, decisive):** change AE's register-array initializer from
+0.0 to a value >= 1.0 (or drop the initializer) and have the user look at Halo 3.
+If the characters change, the mechanism is confirmed. Requires a live visual check -
+per the standing rule, only the user's view counts.
+
 ### Corrections to previously recorded conclusions
 - **Y-flip cannot cause the ball** — but only in its *global* form. A single
   viewport flip is affine/invertible, so it cannot collapse distinct vertices.
