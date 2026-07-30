@@ -214,6 +214,51 @@ OFF since the copy-back is expensive) so it can be matched to the oracle without
 rebuild. **Always confirm both sides have readback ON before comparing buffer
 contents.**
 
+### ★★★ T8 — Magnitude/slot classification. T7's framing CORRECTED by the user.
+**User's critique:** *"More valid records doesn't necessarily mean better valid
+records."* Correct, and it invalidates how I read T7:
+- T7's "valid" only meant *not-all-zero and finite*, so a record holding 1.5e38
+  counted as valid. Both platforms sit at 1e37-1e38, which are NOT plausible
+  world-space positions (real ones are ~1e0-1e4) - so T7 compared garbage to
+  garbage.
+- T7's mean/sd are dominated by 1e38 outliers, so wildly different datasets would
+  still look "statistically identical". **"Statistically identical" was an
+  unsound inference from those aggregates.**
+- Adreno having MORE valid records is not reassurance; extra bogus records
+  rendering IS the degenerate-cluster mechanism.
+
+**Method:** `RECFIELD2` classifies each record's field0 by MAGNITUDE instead of
+averaging - `plausible` (all |xyz|<1e5), `small` (<1e-3, collapsed to origin),
+`huge` (>=1e20, garbage), `mid` - plus a 10-bucket histogram of WHERE the
+plausible records sit. Identical code both trees, readback ON both sides.
+
+| metric | RADV (CORRECT) | Adreno (BALL) |
+|---|---|---|
+| zero | 6702 | 6582 |
+| **plausible** | **35** | **44** |
+| small | 52 | 51 |
+| mid | 105 | 140 |
+| **huge (garbage)** | **268** | **344** |
+| plausible x-range | [-3758, 1141] | [-2179, **21880**] |
+| plausible location | **all in first 10%** | **all in first 10%** |
+
+**Findings:**
+1. **The user's point is confirmed:** Adreno's extra records are disproportionately
+   JUNK - +76 huge, +35 mid, but only +9 plausible.
+2. **⚠️ The field0 premise is shaky.** Only **35-44 of 7168 records (0.5%)** hold
+   plausible positions on EITHER platform, and RADV renders a correct vista from
+   just 35. Either field0 is not the geometry that matters, or the consumer reads
+   only a tiny prefix. Every plausible record on both platforms is in the FIRST
+   10% of the buffer.
+3. **RADV carries 268 garbage records and renders correctly.** So garbage here is
+   NORMAL and tolerated => the fault cannot be "Adreno has garbage". It must be
+   **which records get fetched and drawn** - the consumer's addressing, not the
+   buffer contents. Reinforces T7's leading candidate.
+
+**Methodological rule earned:** never conclude "identical" from mean/sd on data with
+extreme outliers, and never treat a *count* of loosely-defined "valid" items as a
+quality measure. Classify by magnitude and location.
+
 ### Corrections to previously recorded conclusions
 - **Y-flip cannot cause the ball** — but only in its *global* form. A single
   viewport flip is affine/invertible, so it cannot collapse distinct vertices.

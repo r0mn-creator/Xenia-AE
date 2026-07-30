@@ -2979,6 +2979,74 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               vx > 0 ? std::sqrt(vx) : 0.0, vy > 0 ? std::sqrt(vy) : 0.0,
               vz > 0 ? std::sqrt(vz) : 0.0, mnx, mxx, mny, mxy, mnz, mxz);
         }
+        // TESTRIG(halo3-recordfields2): REFINEMENT of RECFIELD0 after a correct
+        // critique: "more valid records doesn't necessarily mean BETTER valid
+        // records."
+        //
+        // RECFIELD0's "valid" only meant not-all-zero and finite, so a record
+        // holding 1.5e38 counted as valid - and BOTH platforms sit at 1e37-1e38,
+        // which are not plausible world-space positions (real ones are ~1e0-1e4).
+        // So that comparison compared garbage to garbage. Worse, mean/sd are
+        // dominated by those outliers, so two totally different datasets would
+        // still look "statistically identical". And Adreno having MORE valid
+        // records may itself be the defect - extra bogus records rendering as
+        // the degenerate cluster - not evidence of health.
+        //
+        // So classify by MAGNITUDE and by SLOT instead of averaging:
+        //   plaus  : all |xyz| < 1e5  -> a believable world-space position
+        //   small  : all |xyz| < 1e-3 -> collapsed toward the origin (the "ball")
+        //   huge   : any |xyz| >= 1e20 -> exploded / garbage bit patterns
+        //   mid    : everything else
+        // plus a 10-bucket histogram of WHERE the plausible records sit in the
+        // buffer, so we can tell whether both platforms populate the SAME slots.
+        // Identical code runs in the other tree for direct comparison.
+        if (vsize == 573440) {
+          const uint32_t kStrideDw = 20;
+          const uint32_t recs = dwords / kStrideDw;
+          uint32_t n_plaus = 0, n_small = 0, n_huge = 0, n_mid = 0;
+          uint32_t n_zero2 = 0, n_nf2 = 0;
+          uint32_t plaus_hist[10] = {0};
+          float pmin = 3.4e38f, pmax = -3.4e38f;
+          double plaus_absmax = 0.0;
+          for (uint32_t r = 0; r < recs; ++r) {
+            const float* f =
+                reinterpret_cast<const float*>(&vd[r * kStrideDw]);
+            if (!std::isfinite(f[0]) || !std::isfinite(f[1]) ||
+                !std::isfinite(f[2])) {
+              ++n_nf2;
+              continue;
+            }
+            if (f[0] == 0.0f && f[1] == 0.0f && f[2] == 0.0f) {
+              ++n_zero2;
+              continue;
+            }
+            float ax = std::fabs(f[0]), ay = std::fabs(f[1]),
+                  az = std::fabs(f[2]);
+            float amax = ax > ay ? (ax > az ? ax : az) : (ay > az ? ay : az);
+            if (amax >= 1.0e20f) {
+              ++n_huge;
+            } else if (amax < 1.0e-3f) {
+              ++n_small;
+            } else if (amax < 1.0e5f) {
+              ++n_plaus;
+              ++plaus_hist[(uint64_t(r) * 10) / recs];
+              if (f[0] < pmin) pmin = f[0];
+              if (f[0] > pmax) pmax = f[0];
+              if (amax > plaus_absmax) plaus_absmax = amax;
+            } else {
+              ++n_mid;
+            }
+          }
+          XELOGI(
+              "RECFIELD2 recs={} zero={} nonfinite={} plausible={} small={} "
+              "mid={} huge={} plaus_xrange=[{:.4g},{:.4g}] plaus_absmax={:.4g} "
+              "plaushist= {} {} {} {} {} {} {} {} {} {}",
+              recs, n_zero2, n_nf2, n_plaus, n_small, n_mid, n_huge,
+              n_plaus ? pmin : 0.0f, n_plaus ? pmax : 0.0f, plaus_absmax,
+              plaus_hist[0], plaus_hist[1], plaus_hist[2], plaus_hist[3],
+              plaus_hist[4], plaus_hist[5], plaus_hist[6], plaus_hist[7],
+              plaus_hist[8], plaus_hist[9]);
+        }
         // VALSHAPE probe (2026-07-24): the RADV oracle proved the FILL metric is
         // a red herring (RADV renders correctly while filling LESS of this buffer
         // than Adreno). Same slots, same consumers, same draw counts -> the only
