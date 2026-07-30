@@ -513,6 +513,30 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(
   if (translation.GetOrCreateShaderModule() == VK_NULL_HANDLE) {
     return false;
   }
+  // TESTRIG(halo3-spirvdump): dump the TRANSLATED SPIR-V so Adreno and RADV can be
+  // byte-compared.
+  //
+  // Both platforms now measurably declare the SAME float-control modes
+  // (denorm_flush_to_zero / signed_zero_inf_nan_preserve / rounding_mode_rte all
+  // =1), and they run the same translator code on the same guest ucode with the
+  // same constants. So the generated SPIR-V SHOULD be byte-identical.
+  //
+  //   identical  -> Xenia emits the same program to both, and the divergence is
+  //                 entirely in the DRIVER's SPIR-V->ISA compilation. No
+  //                 equation change on our side is a real fix, only a workaround
+  //                 shaped around Adreno's compiler.
+  //   different  -> we have found exactly where OUR side diverges, which is far
+  //                 more actionable.
+  //
+  // Writes to <dump dir>/spv/. Only the two Halo 3 memexport shaders, so this is
+  // inherently bounded.
+  if (!cvars::dump_shaders.empty()) {
+    uint64_t h = shader.ucode_data_hash();
+    if (h == 0x488D9488AB7ED7D8ull || h == 0x9EA48FC2B26C325Dull) {
+      translation.Dump(std::filesystem::path(cvars::dump_shaders) / "spv", "spv");
+    }
+  }
+
 
   // TODO(Triang3l): Log that the shader has been successfully translated in
   // common code.

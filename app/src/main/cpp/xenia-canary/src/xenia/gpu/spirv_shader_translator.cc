@@ -15,6 +15,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/spirv_shader.h"
@@ -828,6 +829,30 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
     execution_model = IsSpirvTessEvalShader()
                           ? spv::ExecutionModelTessellationEvaluation
                           : spv::ExecutionModelVertex;
+  }
+  // TESTRIG(halo3-floatcontrols): the user's model - "the GPUs do the math
+  // differently, so we may need to plug in an equation that helps the Android
+  // GPU solve it properly" - predicts divergence exactly where a permitted 1-ULP
+  // difference is AMPLIFIED by an exact comparison. This shader is full of them
+  // (seq / floors / trunc / cndeq / setp_ne / sge), so a single differing bit
+  // becomes a different BRANCH and then wholesale geometry collapse.
+  //
+  // These three execution modes are the knobs that decide whether that
+  // divergence is even allowed. They are requested ONLY if the device reports
+  // support, so Adreno and RADV can silently end up under different float
+  // semantics for identical SPIR-V. Log what each platform actually got, once,
+  // so the two can be compared instead of assumed.
+  {
+    static bool logged_float_controls = false;
+    if (!logged_float_controls) {
+      logged_float_controls = true;
+      XELOGI(
+          "FLOATCONTROLS denorm_flush_to_zero_f32={} "
+          "signed_zero_inf_nan_preserve_f32={} rounding_mode_rte_f32={}",
+          features_.denorm_flush_to_zero_float32 ? 1 : 0,
+          features_.signed_zero_inf_nan_preserve_float32 ? 1 : 0,
+          features_.rounding_mode_rte_float32 ? 1 : 0);
+    }
   }
   if (features_.denorm_flush_to_zero_float32) {
     // Flush to zero, similar to the real hardware, also for things like Shader

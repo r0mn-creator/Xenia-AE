@@ -221,6 +221,26 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         } catch (Exception e) {
             // Property unreadable - leave readback off (the safe default).
         }
+        // TESTRIG(shader-dump): dump translated SPIR-V when the property is set,
+        // so it can be byte-compared against the desktop RADV oracle. Off by
+        // default; passed as a launch arg rather than written into the config,
+        // because hand-editing the config file corrupts its ownership.
+        try {
+            Process dp = new ProcessBuilder("/system/bin/getprop",
+                    "debug.canary.dump_shaders").redirectErrorStream(true).start();
+            java.io.BufferedReader dr = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(dp.getInputStream()));
+            String dv = dr.readLine();
+            dr.close();
+            dp.waitFor();
+            if (dv != null && (dv.trim().equals("1") || dv.trim().equals("true"))) {
+                launch_args.add("--dump_shaders="
+                        + Application.get_app_data_dir().getAbsolutePath() + "/shaderdump");
+                android.util.Log.i("XeniaAE", "dump_shaders ENABLED via property");
+            }
+        } catch (Exception e) {
+            // Property unreadable - leave shader dumping off.
+        }
         java.util.Collections.addAll(launch_args,
                 "--storage_root="+Application.get_app_data_dir().getAbsolutePath(),
                 "--config="+Application.get_global_config_file().getAbsolutePath(),

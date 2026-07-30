@@ -404,6 +404,61 @@ Probe logs are 10-200 MB. Writing them under `/tmp` **filled the tmpfs (0 MB fre
 and killed a run mid-flight. Write oracle logs to `~/xeniatest/logs/` (on disk),
 not the scratchpad, and delete them after reading.
 
+### ★★★★ T12 — Float controls IDENTICAL, but the generated SPIR-V DIFFERS
+Prompted by the user's model: *"both hand math to the GPU, the GPUs work
+differently, so we may need to plug in an equation that helps the Android GPU
+solve it properly."*
+
+**T12a - float-control modes are IDENTICAL.** Added a `FLOATCONTROLS` log to both
+trees. Adreno and RADV both report
+`denorm_flush_to_zero_f32=1 signed_zero_inf_nan_preserve_f32=1
+rounding_mode_rte_f32=1`. So both run under the SAME declared IEEE semantics -
+this rules out the simplest form of "loose float rules cause divergence", and
+means basic add/mul/mad are bit-identical by spec.
+
+**T12b - but the emitted SPIR-V is NOT the same.** Wired up
+`Shader::Translation::Dump` in the Vulkan path (it existed but nothing called it)
+and dumped the two Halo 3 memexport shaders from both platforms:
+
+| shader | Android (AE) | RADV (upstream 6e9bac0) | delta |
+|---|---|---|---|
+| consumer `488D9488AB7ED7D8` | 188824 | 180104 | +8720 |
+| producer `9EA48FC2B26C325D` | 499620 | 422444 | **+77176 (+18%)** |
+
+Same ucode hash, same modification ID, materially different program. Disassembled
+opcode deltas for the consumer:
+
+| opcode | AE | RADV | delta |
+|---|---|---|---|
+| `OpLabel` | 225 | 155 | **+70** |
+| `OpBranch` | 135 | 79 | **+56** |
+| `OpSelectionMerge` | 89 | 75 | +14 |
+| `OpPhi` | 32 | 18 | +14 |
+| `OpFMul` | 330 | 278 | +52 |
+| `OpFDiv` | 27 | 12 | +15 |
+
+**+70 basic blocks and +56 branches** injected into the same shader.
+
+⚠️ **This is EXPECTED, not automatically a bug** - the Android side is Xenia-AE,
+which carries precision fixes upstream lacks, and each adds conditional handling.
+But it reframes the hunt in a useful way: **AE has already "plugged in equations",
+and one of them may be what breaks Halo 3.**
+
+### ⇒ Next: bisect AE's own precision fixes (all add branches, none tested vs this bug)
+| fix | commit | status vs the ball |
+|---|---|---|
+| register zero-init | `54e6a4d6` | **TESTED, ruled out (T10)** |
+| RSQ precision | `c14047bc` | **untested** |
+| Cody-Waite SIN/COS | `a0b2f29e` | **untested** |
+| degenerate-W clip | `6a4b9932` | **untested** (was tested against flat-navy only) |
+
+Make each runtime-toggleable exactly like `debug.canary.reginit` (TESTRIG module,
+default ON = current behaviour) and bisect. The W-clip is the most suspicious for
+a collapse-to-a-point symptom: it deliberately forces W to a negative sentinel so
+degenerate vertices CLIP, so a misfire removes or mislocates geometry.
+
+⚠️ Clear the shader cache between toggles or old pipelines are reused.
+
 ### Corrections to previously recorded conclusions
 - **Y-flip cannot cause the ball** — but only in its *global* form. A single
   viewport flip is affine/invertible, so it cannot collapse distinct vertices.
