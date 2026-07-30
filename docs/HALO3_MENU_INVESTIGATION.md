@@ -1356,3 +1356,66 @@ record image->persistent-buffer inside the load (deferred), read that buffer at
 the next flushable point (swap) - to finally see whether the load writes a
 uniform or varied image for this texture. Infra (deferred CmdVkCopyImageToBuffer,
 readback helpers, GPU trace) is now in place for it.
+
+---
+
+# ★ CONFIRMED 2026-07-30: the menu vista and the in-game character collapse are the SAME shader pair
+
+Live gameplay capture on the Odin 2 (Adreno 740), Sierra 117, with the user
+visually confirming *"still a ball"* on screen during the capture window.
+Method: GPU TESTRIG probe toggled ON for a 20 s window only (it is a live
+`setprop`, so it can be enabled after the level has loaded — leaving it on
+through menus/loading makes the game effectively unplayable at ~9,500 log
+lines/sec).
+
+## Result — identical producer/consumer pair in both contexts
+
+| shader | role | MENU | GAMEPLAY (ball on screen) |
+|---|---|---|---|
+| **`9EA48FC2B26C325D`** | **producer** (`eM != 0`) | 25402 | **31640** |
+| **`488D9488AB7ED7D8`** | **consumer** (`eM = 0x0`) | 20736 | **27223** |
+| `C5E0199746AB8E83` | producer (amplification variant) | 727 | 185 |
+| `D3AFBA6827D428C6` | producer | 431 | **0** |
+| `74F10091EC03A958` | producer | 0 | 185 |
+| `E63384A95752C73D` | producer | 0 | 185 |
+
+Memexport-writing draws during gameplay were **dominated** by
+`9EA48FC2B26C325D` (3955 of 4109, i.e. 96%). The consumer
+`488D9488AB7ED7D8` runs with `eM=0x0` and vertex counts **4–64 in multiples of
+4** — matching this document's earlier menu-side characterization exactly.
+
+## Why this matters
+1. **The main-menu vista bug and the character collapse are very likely one
+   defect**, not two related ones: the same producer/consumer memexport pair is
+   corrupt in both. The differing symptom is just geometry shape — a mostly-flat
+   terrain mesh with garbage vertices still reads as terrain, while a compact
+   character rig whose vertices collapse toward one garbage value reads as a
+   ball.
+2. **The main menu is now the standard repro.** It boots in seconds, needs no
+   controller, no level load, and no difficulty selection, and exercises the
+   exact same shader pair. Every future experiment on the collapse should be run
+   at the menu first.
+
+## Hypotheses this KILLS
+- "A structurally similar sibling skinning shader with a different hash draws the
+  characters" — ruled out; gameplay is dominated by the menu's own producer.
+- `D3AFBA6827D428C6` as the character shader — ruled out. It has the most
+  skinning-*looking* structure (zero `vfetch`, an indexed 4-row matrix palette at
+  `c[16+a0]`..`c[19+a0]`) and appears **only at the menu**, never in gameplay.
+  ⚠️ A shader looking like skinning is not evidence that it draws characters —
+  measure, don't infer from ucode shape.
+- A viewport **Y-flip** as a cause of the ball: impossible. A Y-flip is affine
+  and invertible, so it cannot collapse distinct vertices to a point; it would
+  yield an upside-down character. The artifact shape is diagnostic — a zeroed
+  axis scale flattens to a *line*, an empty viewport draws *nothing*, and a
+  *ball* means convergence on a point, which can only happen per-vertex upstream
+  of the viewport. Independently: the ball appears on **both** stock and Turnip
+  drivers, while the inverted vista appears **only** under Turnip.
+
+## Controller automation note (for remote/headless repro)
+`adb shell input keyevent <code>` sends DOWN+UP within ~1 ms. The guest polls
+controller state once per frame, so at low framerate **most taps fall entirely
+between two polls and are never seen** — presses appear to "randomly" not
+register. Use **`input gamepad keyevent --longpress <code>`**, which holds the
+button long enough to be sampled; this works reliably. Verified codes: A = 96,
+DPAD_UP = 19, DPAD_DOWN = 20.
