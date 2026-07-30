@@ -18,6 +18,11 @@
 #include "xenia/base/math.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/spirv_shader.h"
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+#include <sys/system_properties.h>
+#include <cstdlib>
+#include <cstring>
+#endif
 
 namespace xe {
 namespace gpu {
@@ -544,12 +549,68 @@ void SpirvShaderTranslator::StartTranslation() {
       // that games were authored/tested against - zero is the safest
       // portable choice, and costs nothing extra since Adreno already
       // clears memory at allocation in the common case anyway.
-      id_vector_temp_.assign(register_count(), const_float4_0_);
-      spv::Id register_array_zero =
-          builder_->makeCompositeConstant(type_register_array, id_vector_temp_);
-      var_main_registers_ = builder_->createVariable(
-          spv::NoPrecision, spv::StorageClassFunction, type_register_array,
-          "xe_var_registers", register_array_zero);
+      // TESTRIG(halo3-reginit): make the initial register value SWITCHABLE at
+      // runtime, because it is a live suspect for the Halo 3 character collapse.
+      //
+      // Halo 3's memexport CONSUMER (488D9488AB7ED7D8) reads r7.x at ucode instr
+      // 46 (`sge r0.z, r7.xxxx, c229.wwww`) but the only fetch that writes r7
+      // (instr 42, `vfetch_mini r7.w__z, Offset=12`) writes ONLY .w and .z - so
+      // r7.x is read UNINITIALIZED. That value feeds r0.z -> p0, and the p0 path
+      // provably drives the vertex to the ORIGIN (instr 53-56 overwrite all of r2
+      // with sgts(-|r0.x|>0)==0, so the transform at 66-74 yields just c36, the
+      // translation column of an identity matrix). Every p0-true vertex therefore
+      // lands on the same point - the "ball".
+      //
+      // Upstream xenia-canary (6e9bac0, which renders Halo 3 CORRECTLY on RADV)
+      // creates xe_var_registers with NO initializer, which is INDETERMINATE per
+      // the SPIR-V spec. We zero it. So the two can take different branches here
+      // purely because of a register the GAME never initialized.
+      //
+      //   debug.canary.reginit unset / "0" -> 0.0  (default, current behaviour)
+      //                        "1", "2.5" -> that float in all lanes
+      //                        "none"     -> NO initializer (match upstream)
+      //
+      // ⚠️ Changing this alters generated SPIR-V, so the shader cache must be
+      // cleared between tests or the old pipelines are reused.
+      float reg_init_value = 0.0f;
+      bool reg_init_enabled = true;
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+      {
+        char reginit_prop[PROP_VALUE_MAX] = {};
+        if (__system_property_get("debug.canary.reginit", reginit_prop) > 0 &&
+            reginit_prop[0]) {
+          if (!std::strcmp(reginit_prop, "none")) {
+            reg_init_enabled = false;
+          } else {
+            reg_init_value = float(std::atof(reginit_prop));
+          }
+        }
+      }
+#endif
+      if (reg_init_enabled) {
+        spv::Id init_lane = reg_init_value == 0.0f
+                                ? const_float_0_
+                                : builder_->makeFloatConstant(reg_init_value);
+        spv::Id init_float4;
+        if (reg_init_value == 0.0f) {
+          init_float4 = const_float4_0_;
+        } else {
+          std::vector<spv::Id> lanes(4, init_lane);
+          init_float4 = builder_->makeCompositeConstant(type_float4_, lanes);
+        }
+        id_vector_temp_.assign(register_count(), init_float4);
+        spv::Id register_array_init =
+            builder_->makeCompositeConstant(type_register_array,
+                                            id_vector_temp_);
+        var_main_registers_ = builder_->createVariable(
+            spv::NoPrecision, spv::StorageClassFunction, type_register_array,
+            "xe_var_registers", register_array_init);
+      } else {
+        // Match upstream exactly: no initializer => indeterminate.
+        var_main_registers_ = builder_->createVariable(
+            spv::NoPrecision, spv::StorageClassFunction, type_register_array,
+            "xe_var_registers");
+      }
     }
     if (memexport_used) {
       var_main_memexport_address_ = builder_->createVariable(

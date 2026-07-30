@@ -327,6 +327,43 @@ first *verified platform difference on the exact code path that produces the bal
 If the characters change, the mechanism is confirmed. Requires a live visual check -
 per the standing rule, only the user's view counts.
 
+### T10 — Register initialization RULED OUT (both variants), and T9's p0 reading is WRONG
+T9 found a genuine platform difference: upstream `6e9bac0` creates
+`xe_var_registers` with **no initializer** (indeterminate per SPIR-V spec) while
+Xenia-AE **zero-initializes** it (`54e6a4d6`), and Halo 3's consumer reads `r7.x`
+**uninitialized** (instr 42 writes only `.w`/`.z`; instr 46 reads `.x`).
+
+Made the init value switchable at runtime (`debug.canary.reginit`, TESTRIG module,
+default `0` = current behaviour; also accepts a float, or `none` for no
+initializer). ⚠️ Shader cache MUST be cleared between values or old pipelines are
+reused - verified each run regenerated it (`Created new pipeline cache` = 1).
+
+| reginit | meaning | result (user's live view) |
+|---|---|---|
+| `0` | current AE behaviour | **ball** (baseline) |
+| `1` | forces `sge r0.z = (1.0 >= 1.0)` TRUE | **still a ball** |
+| `none` | **matches upstream EXACTLY** | **still a ball** |
+
+**⇒ Register initialization is NOT the cause.** Since `r7.x` and `r11.w` are the
+only inputs to `r0.z`, and changing `r7.x`'s value across its whole meaningful
+range changes nothing, either `r11.w` dominates or the predicate reading is wrong.
+
+**⇒ And T9's `p0` interpretation is WRONG.** `reginit=1` should have forced `p0`
+TRUE for *every* vertex; under T9's reading ("p0-true => r2 zeroed => position =
+origin") the entire vista should have collapsed. It did not - it rendered normally
+(still inverted, which is the separate orientation defect). So `(p0)` predication
+here does not mean what I assumed; `setp_ne_push` has predicate-STACK/push
+semantics and there are `(!p0)` paths I did not trace.
+
+### ★ Methodological conclusion (earned the hard way, 3 failures in one session)
+Static ucode reading by eye has now produced **three** wrong results today:
+1. `l15` bit-decode (`start`/`step` swapped) - T4/T6
+2. field0 assumed to be the position when it is overwritten before use - T7/T8
+3. `p0` semantics - T9/T10
+
+Every result that HELD UP came from **identical instrumentation on both platforms,
+diffed**. Rule: **do not act on ucode inference; measure it on both sides.**
+
 ### Corrections to previously recorded conclusions
 - **Y-flip cannot cause the ball** — but only in its *global* form. A single
   viewport flip is affine/invertible, so it cannot collapse distinct vertices.
