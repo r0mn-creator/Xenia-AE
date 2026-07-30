@@ -364,6 +364,46 @@ Static ucode reading by eye has now produced **three** wrong results today:
 Every result that HELD UP came from **identical instrumentation on both platforms,
 diffed**. Rule: **do not act on ucode inference; measure it on both sides.**
 
+### T11 — Shared-memory clobber RULED OUT (paired)
+**Hypothesis:** the consumer reads Xenia's GPU-side shared-memory buffer, not guest
+RAM. `SharedMemory` skips re-uploading a page once marked `gpu_written`
+(`RangeWrittenByGpu` -> `MakeRangeValid`). If those pages go invalid between the
+producer's memexport and the consumer's fetch, `RequestRange` uploads guest RAM
+over them, overwriting exported vertices with zeros. Attractive because it lives
+OUTSIDE the shader, where every in-shader hypothesis has already failed.
+
+**Method:** `MEMEXPORT_COHERENCY` probe in `SharedMemory::RequestRange`, placed
+BEFORE the `if (!current_upload_range) return true;` early-out so it counts every
+request, not just uploads. Logs only requests intersecting the measured memexport
+target (Adreno `0x0574E480`, RADV `0x05752D80`, both 573440 bytes / `0x8C000`).
+Identical code both trees.
+
+| | requests | clobbers | rate |
+|---|---|---|---|
+| Adreno (BALL) | 13824 | 192 | **1.39%** |
+| RADV (CORRECT) | 118016 | 1437 | **1.22%** |
+
+**⇒ RULED OUT.** Both re-upload over the range at essentially the same rate, and
+RADV does it MORE in absolute terms while rendering correctly.
+
+### Running elimination list (all paired against RADV unless noted)
+transform constants · slot divisor `c78` · loop constants `l15` · sibling shaders ·
+global Y-flip · **fill % (twice)** · exported values (field0) · register
+initialization (0 / 1 / none) · **shared-memory clobber**
+
+### ★ What to try next: SHADER-SIDE instrumentation (ground truth, not inference)
+Every failure this session traces to inferring what the shader does by reading
+ucode. The fix is to stop inferring: have the CONSUMER shader itself write its
+computed values - the slot index it derives, the evaluated `p0`, and the final
+`oPos` - into a debug SSBO, then read that back on both platforms and diff.
+That settles the `p0` question with data instead of my third guess at predicate
+semantics, and it is the one instrument not yet built.
+
+### ⚠️ Ops note
+Probe logs are 10-200 MB. Writing them under `/tmp` **filled the tmpfs (0 MB free)**
+and killed a run mid-flight. Write oracle logs to `~/xeniatest/logs/` (on disk),
+not the scratchpad, and delete them after reading.
+
 ### Corrections to previously recorded conclusions
 - **Y-flip cannot cause the ball** — but only in its *global* form. A single
   viewport flip is affine/invertible, so it cannot collapse distinct vertices.

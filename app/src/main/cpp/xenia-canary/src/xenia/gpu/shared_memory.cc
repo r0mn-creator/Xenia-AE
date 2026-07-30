@@ -425,6 +425,48 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length,
   if (any_data_resolved_out) {
     *any_data_resolved_out = any_data_resolved;
   }
+  // TESTRIG(halo3-memexport-coherency): does the memexport target get RE-UPLOADED
+  // from guest RAM, clobbering what the GPU exported?
+  //
+  // The consumer does NOT read guest RAM - it reads Xenia's GPU-side shared
+  // memory buffer. SharedMemory tracks page validity and skips re-uploading a
+  // page once it is marked gpu_written (RangeWrittenByGpu -> MakeRangeValid).
+  // If those pages go invalid again (CPU write-watch fires, eviction, etc.)
+  // between the producer's memexport and the consumer's fetch, RequestRange
+  // uploads guest RAM over them - overwriting the exported vertices with
+  // whatever the CPU last had there (typically zeros). The consumer then reads
+  // zeros and the geometry collapses.
+  //
+  // This is attractive precisely because it lives OUTSIDE the shader: every
+  // in-shader hypothesis has failed (register init, transform constants, slot
+  // divisor, loop constants, exported values), and RADV renders correctly while
+  // carrying 268 garbage records - so the fault is unlikely to be the data.
+  //
+  // Halo 3's memexport target: 0x0574E480, 573440 bytes (measured, vf=94,
+  // producer 9EA48FC2B26C325D). Logs only uploads that intersect it, so this is
+  // inherently rate-limited.
+  {
+    const uint32_t kMemexportBase = 0x0574E480u;
+    const uint32_t kMemexportSize = 573440u;
+    const uint32_t req_end = start + length;
+    if (start < (kMemexportBase + kMemexportSize) && req_end > kMemexportBase) {
+      static uint64_t mx_uploads = 0;
+      static uint64_t mx_requests = 0;
+      ++mx_requests;
+      if (current_upload_range) {
+        ++mx_uploads;
+      }
+      // Log the first few, then every 256th, so a steady stream is visible
+      // without flooding.
+      if (mx_requests <= 8 || (mx_requests % 256) == 0) {
+        XELOGI(
+            "MEMEXPORT_COHERENCY req#{} start=0x{:08X} len=0x{:08X} "
+            "upload_ranges={} CLOBBER={} (uploads={}/{} requests)",
+            mx_requests, start, length, current_upload_range,
+            current_upload_range ? 1 : 0, mx_uploads, mx_requests);
+      }
+    }
+  }
   if (!current_upload_range) {
     return true;
   }
