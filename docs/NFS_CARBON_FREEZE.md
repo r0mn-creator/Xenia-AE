@@ -50,6 +50,45 @@ menu wants a content-enumeration result that never arrives. This is CPU-side
 kernel emulation (XAM content APIs), **not** the GPU backend - so it is
 independent of the Halo 3 work.
 
+## ★★★ SOLVED (2026-07-31): the SAVE FILE is the trigger
+User's hypothesis - *"I wonder if the save file isn't compatible anymore... can we
+temporarily remove it and see if it pushes through"* - **CORRECT.**
+
+The save lives under the PROFILE XUID, not the zero XUID the game resolves:
+```
+content/E0300000A360E000/454107EC/00000001/ALIAS_RO/ALIAS_RO   286764 bytes
+content/E0300000A360E000/454107EC/Headers/00000001/ALIAS_RO.header  328 bytes
+```
+(dated 2026-07-26, written in an earlier session)
+
+**Test:** backed the save up to `~/xeniatest/save_backups/` (tar, 7 entries),
+then MOVED it aside on-device to `454107EC.disabled` (moved, not deleted - the
+app recreates its own with correct ownership), cleared the shader cache and
+relaunched.
+
+| signal | WITH save | WITHOUT save |
+|---|---|---|
+| frame diff (overlay cropped) | `bbox=None`, **0 px changed** | **`bbox=(0,0,1920,950)`** every frame |
+| 6-frame sequence over 48 s | identical md5s | **6 DISTINCT md5s, all transitions changed** |
+| guest kernel calls | **0 new** in 30 s | **+40 in 10 s**, streaming |
+| progress | stuck at main menu | **past the menu -> animated title -> LOADING** |
+| errors | 0 | 0 |
+
+⇒ **The freeze is caused by the existing save file.** With it removed, NFS gets
+further than any previously recorded run.
+
+⚠️ NOT caused by this project's changes: a pristine `c3bccd37` build froze too.
+The save was most likely written incompletely/corrupt in an earlier session (its
+header is only 328 bytes and references content in `ALIAS_RO`), and the game's
+load path never recovers from it - it polls forever instead of failing.
+
+### What this means for users
+A corrupt save silently bricks the title at the main menu with **zero errors
+logged**. Worth handling: validate the content header on load and fall back to
+"no save" rather than letting the guest spin. The per-game content folder is
+`content/<XUID>/<TITLEID>/` under the storage root, so a "Clear Save Data" action
+in the game's long-press menu would give users a way out.
+
 ## Next step
 Map the spinning JIT PC back to a guest address and find what should write it.
 ⚠️ JIT frames have no usable unwind info on this platform, so `debuggerd` gives
