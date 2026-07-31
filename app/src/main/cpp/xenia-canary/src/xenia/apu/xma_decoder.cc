@@ -409,6 +409,21 @@ void XmaDecoder::Pause() {
   }
   paused_ = true;
 
+  // Wake the worker before waiting on it.
+  //
+  // WorkerThreadMain only checks paused_ AFTER it returns from
+  // `xe::threading::Wait(work_event_)`, so if the decoder happens to be idle
+  // when a pause is requested - very common: pausing at a menu, or when the app
+  // is backgrounded - nothing ever signals pause_fence_ and this Wait() blocks
+  // forever. That deadlock is what made Emulator::Pause() hang, which is why the
+  // Android pause/resume entry points had been stubbed out entirely (the pause
+  // menu showed but emulation kept running at full speed).
+  //
+  // Shutdown() already does exactly this for the same reason.
+  if (work_event_) {
+    work_event_->Set();
+  }
+
   pause_fence_.Wait();
 }
 

@@ -8,6 +8,8 @@
  */
 
 #include <jni.h>
+#include <mutex>
+#include <thread>
 
 #include <android/asset_manager.h>
 #include <android/configuration.h>
@@ -717,17 +719,59 @@ namespace ae{
     bool is_paused(){
         return g_windowed_app_ref->emu->is_paused();
     }
+    // Pause/resume were stubbed out, so the pause menu showed but emulation kept
+    // running at full speed - measured on the Odin: with the pause dialog up,
+    // execute_calls kept climbing and the :emu process kept burning CPU. Same
+    // when the app was backgrounded. is_paused() was reporting honestly (it
+    // queries the real emulator), which is why nothing looked wrong.
+    //
+    // Emulator::Pause()/Resume() are fully implemented upstream (pause graphics,
+    // pause audio, suspend every guest thread that can_debugger_suspend()).
+    // Re-enabled here.
+    //
+    // Called DIRECTLY rather than via CallInUIThread (the other commented-out
+    // variant): Pause() takes the global critical region and suspends guest
+    // threads, so bouncing it through the UI thread risks deadlocking against
+    // whatever already holds that lock.
+    //
+    // NOTE: thread suspension relies on the POSIX suspend/resume signal
+    // machinery in threading_posix.cc, which had a lost-wakeup bug fixed in
+    // cd464ff6 (suspend_count_ published in a separate critical section from
+    // state_). That fix is a prerequisite for this being reliable.
+    // ⚠️ pause()/resume() are DELIBERATELY STUBS. Do not "fix" by simply
+    // calling Emulator::Pause() - that was tried on 2026-07-31 and it does not
+    // work yet. What was learned, so the next attempt starts from here:
+    //
+    // 1. Calling Emulator::Pause() from the Android UI thread ANRs the app
+    //    ("Canary AE isn't responding"). It takes the global critical region and
+    //    suspends guest threads, so it must be dispatched to a worker thread.
+    //
+    // 2. It then DEADLOCKED in XmaDecoder::Pause() -> Fence::Wait(). Root cause:
+    //    the XMA worker only checks paused_ after returning from
+    //    Wait(work_event_), so an idle decoder never signals pause_fence_.
+    //    ** That one IS fixed ** - xma_decoder.cc now sets work_event_ before
+    //    waiting, mirroring what Shutdown() already did. Upstream has the same
+    //    bug. With that fix Emulator::Pause() completes and reports
+    //    is_paused()==true.
+    //
+    // 3. THE REMAINING BLOCKER: guest threads keep running anyway. Measured with
+    //    Pause() reporting success, the guest RENDER and MAIN_THREAD threads
+    //    still burned CPU (+713 and +102 jiffies over 6 s) and execute_calls
+    //    kept climbing. Emulator::Pause() suspends every thread whose
+    //    can_debugger_suspend() is true - and that DEFAULTS to true
+    //    (cpu/thread.h), only XHostThread clears it - so the loop is reaching
+    //    them and PosixCondition<Thread>::Suspend() is not actually suspending.
+    //    That path is pthread_kill(SignalType::kThreadSuspend); the next step is
+    //    to check whether that signal handler is installed for guest threads and
+    //    whether Suspend()'s return value is being silently discarded (it is -
+    //    Emulator::Pause() ignores it).
+    //
+    // Until guest threads genuinely suspend, enabling these only pauses audio
+    // and graphics while the guest keeps running against a paused GPU, which is
+    // worse than not pausing at all.
     void pause(){
-        //g_windowed_app_ref->emu->Pause();
-        /*g_windowed_app_ref->app_context().CallInUIThread([]{
-            g_windowed_app_ref->emu->Pause();
-        });*/
     }
     void resume(){
-        //g_windowed_app_ref->emu->Resume();
-        /*g_windowed_app_ref->app_context().CallInUIThread([]{
-            g_windowed_app_ref->emu->Resume();
-        });*/
     }
     void quit(){
     }
