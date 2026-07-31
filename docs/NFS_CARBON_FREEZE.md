@@ -37,7 +37,37 @@ debug overlay prints a live counter, so every frame differs and it looks like
 motion. Crop the overlay strip (bottom ~12%) and compare only the game area.
 Four frames 5 s apart is enough.
 
-## Leading suspect
+## ★ LEADING SUSPECT (2026-07-31): Xbox Live logon polling
+User's hypothesis - *"after loading the alias the game tries to connect to Xbox
+Live"* - fits the evidence better than anything else.
+
+**`xam` is only 68% implemented: 55 of 173 imports are stubs.** Among the
+unimplemented ones:
+```
+NetDll_XNetGetConnectStatus      <- the classic "am I connected yet?" poll
+NetDll_XNetConnect
+NetDll_XnpLogonGetStatus
+NetDll_XnpLogonGetQVals / SetQVals / SetQEvent / ClearQEvent   <- logon queue
+NetDll_XNetQosLookup / XNetQosGetListenStats
+NetDll_WSARecv / WSASend / WSAEventSelect
+```
+`XNetGetConnectStatus` and `XnpLogonGetStatus` are exactly what a title polls in a
+loop while waiting for Live sign-in. If they return an unchanging "pending", the
+guest spins forever.
+
+**This matches the measured signature precisely:** guest main thread spinning in
+JIT code, CPU burning, GPU re-submitting one static frame, ZERO errors - and
+crucially **zero kernel-call log lines**, which is explained if the poll lands on
+a stub that returns immediately without logging.
+
+**Confirming test (not yet run):** enable `log_high_frequency_kernel_calls` (via
+the property-gated launch-arg pattern used for `readback_memexport` /
+`dump_shaders`, since the config file must not be hand-edited) and check whether
+the guest is hammering one of these NetDll entry points during the freeze. If so,
+implementing `XNetGetConnectStatus` / `XnpLogonGetStatus` to report a definitive
+"not connected / offline" rather than "pending" should let the title proceed.
+
+## Superseded suspect
 Last guest activity before going silent:
 ```
 SAF_DiscImageDevice::ResolvePath(\content\0000000000000000\454107EC\00000001)
@@ -50,7 +80,7 @@ menu wants a content-enumeration result that never arrives. This is CPU-side
 kernel emulation (XAM content APIs), **not** the GPU backend - so it is
 independent of the Halo 3 work.
 
-## ★★★ SOLVED (2026-07-31): the SAVE FILE is the trigger
+## ⚠️ RETRACTED: the save file is NOT the trigger (corrected 2026-07-31)
 User's hypothesis - *"I wonder if the save file isn't compatible anymore... can we
 temporarily remove it and see if it pushes through"* - **CORRECT.**
 
@@ -74,8 +104,18 @@ relaunched.
 | progress | stuck at main menu | **past the menu -> animated title -> LOADING** |
 | errors | 0 | 0 |
 
-⇒ **The freeze is caused by the existing save file.** With it removed, NFS gets
-further than any previously recorded run.
+⇒ ~~The freeze is caused by the existing save file.~~ **WRONG - RETRACTED.**
+
+**Disproved by two follow-up tests the user ran:**
+1. Created a BRAND-NEW alias ("ELI", 286764 bytes, freshly written by the game)
+   -> **froze at the identical place.** So it is not a corrupt/stale save.
+2. Ran with **NO alias at all** (chose "No" at the create-alias prompt)
+   -> **still froze at the identical place.**
+
+So the save is exonerated completely. The one run that got further (title screen ->
+alias prompt) did so for some other reason - most likely it had simply not yet
+reached the stall point, not because the save was absent. **A single passing run
+is not evidence; the control test is.**
 
 ⚠️ NOT caused by this project's changes: a pristine `c3bccd37` build froze too.
 The save was most likely written incompletely/corrupt in an earlier session (its
