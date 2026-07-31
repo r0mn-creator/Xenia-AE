@@ -499,6 +499,56 @@ with no further shader archaeology. If it is identical across all three
 compilers, driver codegen is effectively excluded and suspicion falls on AE's
 forked texture/render-target caches.
 
+### T14 — Driver matrix + SPIR-V byte-comparison ⇒ the FORKED GPU BACKEND is what is left
+**T14a - driver bisect (no rebuild, per-game picker):**
+
+| driver | compiler | result |
+|---|---|---|
+| Turnip R8 | Mesa 26.0 | ball |
+| **Turnip R6** | **Mesa, older** | **ball** |
+
+Two INDEPENDENT Mesa compiler versions produce the identical defect from
+byte-identical shaders. Driver SPIR-V→ISA codegen is now a weak explanation.
+(Stock Qualcomm still untested, but the vista's flat-navy makes it a poor probe.)
+
+**T14b - SPIR-V byte comparison with ALL AE fixes OFF:**
+
+| shader | AE fixes ON | AE fixes OFF | RADV | remaining delta |
+|---|---|---|---|---|
+| consumer | 188824 | 185048 | 180104 | **+4944** |
+| producer | 499620 | 461380 | 422444 | **+38936** |
+
+Disabling all four documented fixes removed only about HALF the difference.
+Producer opcode deltas that REMAIN (AE vs RADV, fixes off):
+
+| opcode | AE | RADV | delta |
+|---|---|---|---|
+| `OpAtomicOr` | 88 | 22 | **+66 (4x)** |
+| `OpAtomicAnd` | 88 | 22 | **+66 (4x)** |
+| `OpSwitch` | 142 | 24 | **+118 (6x)** |
+| `OpLabel` | 2287 | 1699 | +588 |
+| `OpBranch` | 1525 | 1054 | +471 |
+
+**⇒ Interpretation (and the limit of this test):** the memexport translator diff
+itself is benign (accessor refactor, an OFF sentinel toggle, a compute-only
+validation bypass), and `spirv_compatibility.h` - present upstream, absent in AE -
+is only a cosmetic `OpXxx`→`Op::OpXxx` shim. The remaining +38936 bytes are
+therefore **generational**: AE's GPU backend is a FORK of an older canary, so its
+whole translator emits different code. **That confounds the SPIR-V comparison -
+it cannot isolate a fault by itself.**
+
+### ⇒ CONCLUSION: the remaining suspect is AE's FORKED GPU BACKEND
+Everything else is eliminated with paired measurement (see the list above), and
+this independently re-derives the July finding already in the older notes: *"the
+menu background is a render-target / HDR-resolve issue in AE's forked GPU backend
+... needs the render_target_cache + vulkan_render_target_cache port"*.
+
+**Next step is the port**, not another probe:
+`texture_cache` + `vulkan_texture_cache` + `render_target_cache` +
+`vulkan_render_target_cache` from upstream. Large, and **must be NFS-regression-
+tested** (NFS Carbon is the canary for GPU-backend breakage). Everything cheaper
+has now been tried.
+
 ### Corrections to previously recorded conclusions
 - **Y-flip cannot cause the ball** — but only in its *global* form. A single
   viewport flip is affine/invertible, so it cannot collapse distinct vertices.
