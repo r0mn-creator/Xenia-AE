@@ -21,17 +21,80 @@
             app:title="@string/app_name"
             app:titleTextColor="?attr/colorOnSurface" />
 
-        <com.google.android.material.tabs.TabLayout
-            android:id="@+id/tabs"
+        <!--
+          Tab strip flanked by LB / RB hints, so it's discoverable that the
+          shoulder buttons page between tabs (already wired in MainActivity:
+          KEYCODE_BUTTON_L1/R1 -> moveTab(-1/+1)).
+
+          The strip is centred with wrap_content instead of the previous
+          match_parent + tabGravity="fill", otherwise the tabs eat the full width
+          and leave nowhere for the badges to sit.
+        -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:background="?attr/colorSurface"
-            app:tabGravity="fill"
-            app:tabIndicatorColor="?attr/colorPrimary"
-            app:tabIndicatorHeight="3dp"
-            app:tabMode="fixed"
-            app:tabSelectedTextColor="?attr/colorPrimary"
-            app:tabTextColor="?attr/colorOnSurface" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <!-- Left spacer keeps the tab strip centred even though the two
+                 badges aren't exactly equal in width. -->
+            <Space
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/hint_bumper_l"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="10dp"
+                android:background="@drawable/bumper_badge"
+                android:contentDescription="@string/bumper_hint_l_desc"
+                android:paddingStart="10dp"
+                android:paddingTop="2dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="2dp"
+                android:text="@string/bumper_l"
+                android:textColor="?attr/colorOnSurface"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.tabs.TabLayout
+                android:id="@+id/tabs"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="?attr/colorSurface"
+                app:tabIndicatorColor="?attr/colorPrimary"
+                app:tabIndicatorHeight="3dp"
+                app:tabMode="auto"
+                app:tabPaddingEnd="12dp"
+                app:tabPaddingStart="12dp"
+                app:tabSelectedTextColor="?attr/colorPrimary"
+                app:tabTextColor="?attr/colorOnSurface" />
+
+            <TextView
+                android:id="@+id/hint_bumper_r"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:background="@drawable/bumper_badge"
+                android:contentDescription="@string/bumper_hint_r_desc"
+                android:paddingStart="10dp"
+                android:paddingTop="2dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="2dp"
+                android:text="@string/bumper_r"
+                android:textColor="?attr/colorOnSurface"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <Space
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+        </LinearLayout>
 
     </com.google.android.material.appbar.AppBarLayout>
 

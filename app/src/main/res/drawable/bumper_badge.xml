@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Rounded outline for the LB / RB bumper hints flanking the tab strip.
+
+  Drawn as a shape rather than shipped as a PNG so it stays crisp at every
+  density and follows the app's dark-mode toggle: the stroke and the label both
+  use ?attr/colorOnSurface, so it reads as a dark outline on the light toolbar
+  and a light outline on the dark one, with no second asset.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="7dp" />
+    <stroke
+        android:width="1dp"
+        android:color="?attr/colorOnSurface" />
+    <solid android:color="@android:color/transparent" />
+</shape>

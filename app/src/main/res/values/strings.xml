@@ -592,6 +592,12 @@ This Config requires you to pair an analog and digitial flag together while digi
     <string name="patches_not_toggleable">This patch has no is_enabled field and can\'t be toggled here</string>
     <string name="patches_write_failed">Couldn\'t write to the patch file</string>
     <string name="patches_none">No patch files found.\n\nPut .patch.toml files in:\n%1$s</string>
+    <!-- LB/RB hints flanking the tab strip. Deliberately NOT translated -
+         they are the physical button labels printed on an Xbox controller. -->
+    <string name="bumper_l" translatable="false">LB</string>
+    <string name="bumper_r" translatable="false">RB</string>
+    <string name="bumper_hint_l_desc">Left bumper: previous tab</string>
+    <string name="bumper_hint_r_desc">Right bumper: next tab</string>
     <string name="patches_no_match">No games match \"%1$s\"</string>
     <string name="patches_installed_only">Only show games in my library</string>
     <string name="patches_none_installed">None of the games in your library have patches available.\n\nUncheck the box above to browse patches for all games.</string>
