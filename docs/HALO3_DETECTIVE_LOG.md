@@ -603,9 +603,44 @@ export code across `eM0`-`eM4` where AE duplicates it per register. But unlike t
 label/branch counts it **cannot** be dismissed as toolchain drift, and it is far
 cheaper to chase than the full texture/render-target-cache port.
 
-**NEXT: determine why that sub-dword path is emitted 4x more.** Compare how each
-tree walks `eM0`-`eM4` and the export format switch in
-`spirv_shader_translator_memexport.cc`.
+### ⇒ T15 FOLLOW-UP: the atomic lead is **CLOSED - benign device adaptation**
+Chased it and it is NOT a fault. Verified with fresh dumps (the counts are real:
+AE 88 / RADV 22 `OpAtomicAnd`, single-function modules both).
+
+Everything in the memexport path is **identical** between trees: `for_each_eM`,
+`store_needed_eM`, the `element_size_switch`, every format arm, and every
+`StoreUint32ToSharedMemory` call site (7 each). And the emitted export code
+appears the SAME number of times - **`OpBitFieldInsert` = 309 in BOTH**, and
+`xe_var_memexport` references = **120 in BOTH**.
+
+The whole difference is ONE runtime value inside `StoreUint32ToSharedMemory`:
+```cpp
+uint32_t binding_count_log2 = GetSharedMemoryStorageBufferCountLog2();
+if (!binding_count_log2) { store(...); return; }   // single binding
+// else: SwitchBuilder over binding_count cases, each containing a store()
+```
+driven by device `max_storage_buffer_range` (`spirv_shader_translator.h:374`):
+`>=512MB -> 1 binding` · `>=256MB -> 2` · else **4**.
+
+RADV reports >=512 MB so the 512 MB shared memory fits ONE SSBO. **Adreno reports
+less, so Xenia splits it across 4 bindings** and emits a switch with a store in
+each arm - 4x the atomics, and the extra `OpSwitch`es.
+
+**The arithmetic closes it exactly:** AE 88/8 = **11**, RADV 22/2 = **11** -
+matching the **11 `eM0` exports** in the producer ucode on both sides. Same logic,
+same export count, different binding fan-out.
+
+⇒ **Not a defect.** Xenia correctly adapting to a device limit.
+⚠️ Worth remembering though: Adreno genuinely writes memexport through a
+**4-way binding switch** where RADV uses a direct store. That is a real
+behavioural difference in the write path (binding-boundary straddling, switch
+dispatch) even though the emission is correct - keep it in mind, but it is not
+evidence of a bug on its own.
+
+**Methodological note:** `OpBitFieldInsert`=309 and `xe_var_memexport`=120 being
+IDENTICAL is what killed this - counting a *second* marker alongside the
+suspicious one separated "emitted more times" from "emitted differently". Do that
+routinely before calling an opcode delta a lead.
 
 ### Corrections to previously recorded conclusions
 - **Y-flip cannot cause the ball** — but only in its *global* form. A single
