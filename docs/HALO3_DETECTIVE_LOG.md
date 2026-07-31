@@ -549,6 +549,64 @@ menu background is a render-target / HDR-resolve issue in AE's forked GPU backen
 tested** (NFS Carbon is the canary for GPU-backend breakage). Everything cheaper
 has now been tried.
 
+### ★★★ T15 — `spirv_compatibility.h` is cosmetic, BUT it exposes a toolchain gap AND a real semantic lead
+Investigated after I dismissed the file in one line off a partial grep. The
+dismissal was right; the reasoning behind it was incomplete.
+
+**What the file is (verified by census, not by glance):** 468 lines =
+**387 `#define`s** + only **18 structural lines** (`#pragma once`, 2 includes,
+`namespace spv {` braces, line-continuations). Every macro is
+`OldName` -> `Namespace::NewName` (`OpNop`->`Op::OpNop`,
+`DecorationBlock`->`Decoration::Block`). **Zero runtime behaviour** - it cannot
+change one emitted instruction.
+
+**Why it exists:** its own header - *"Compatibility layer for glslang spirv.hpp11
+migration"*. glslang moved from `spirv.hpp` (unscoped enums) to `spirv.hpp11`
+(scoped enum classes); upstream updated glslang and added the shim instead of
+rewriting thousands of call sites.
+
+**★ AE does not have the file because AE's glslang PREDATES that migration.**
+Verified: `third_party/glslang/SPIRV/spirv.hpp11` exists upstream, **ABSENT in
+AE**. Its absence is not a missing feature - it is a **fingerprint of a toolchain
+generation gap**. (AE vendors glslang rather than submoduling it, so
+`git rev-parse` on that dir returns the PARENT repo HEAD - do not misread it as a
+submodule revision.)
+
+**⇒ This CORRECTS T14b.** The stylistic SPIR-V deltas - `OpLabel` +588,
+`OpBranch` +471, `OpSwitch` +118 - are explained by the builder generation. Block
+structuring, phi placement and switch-vs-branch lowering are the SPIR-V
+*builder's* job, and a different glslang legitimately emits different shapes from
+identical input. **So those counts are NOT evidence of a fault**, and T14b's
+byte-comparison is confounded exactly as suspected.
+
+### ★★ BUT the atomics are NOT explained by that - and they are in the write path
+| opcode | AE | upstream | ratio |
+|---|---|---|---|
+| `OpAtomicOr` | 88 | 22 | **4x** |
+| `OpAtomicAnd` | 88 | 22 | **4x** |
+
+Checked directly:
+- `StoreUint32ToSharedMemory` (the ONLY SPIR-V atomic emitter) is
+  **byte-identical** in both trees.
+- Its memexport call sites number **7 in each** tree.
+- Atomics are emitted **only when `replace_mask != NoResult`**, i.e. for
+  **sub-dword writes** - the 16-bit and 8-bit packed fields of the 80-byte record.
+
+A builder-version change cannot invent 66 atomic ops. So **AE's translator emits
+the sub-dword export path ~4x more times for this shader than upstream does.**
+That is a **semantic** difference in the exact code that WRITES the buffer whose
+contents drive the collapse - the first thing found all session that is both
+semantic and inside the memexport write path.
+
+⚠️ **Not yet a fault.** Could still be benign structure - e.g. upstream sharing
+export code across `eM0`-`eM4` where AE duplicates it per register. But unlike the
+label/branch counts it **cannot** be dismissed as toolchain drift, and it is far
+cheaper to chase than the full texture/render-target-cache port.
+
+**NEXT: determine why that sub-dword path is emitted 4x more.** Compare how each
+tree walks `eM0`-`eM4` and the export format switch in
+`spirv_shader_translator_memexport.cc`.
+
 ### Corrections to previously recorded conclusions
 - **Y-flip cannot cause the ball** — but only in its *global* form. A single
   viewport flip is affine/invertible, so it cannot collapse distinct vertices.
