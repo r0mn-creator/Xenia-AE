@@ -868,6 +868,13 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
 }
 
 spv::Id SpirvShaderTranslator::PortableSinCos(spv::Id x, bool is_cos) {
+  // TESTRIG(halo3-fixbisect): debug.canary.fix_sincos=0 falls back to the
+  // driver's GLSLstd450Sin/Cos (upstream behaviour) for bisection. Default ON.
+  if (!XeProbeFixEnabled("debug.canary.fix_sincos")) {
+    return builder_->createUnaryBuiltinCall(
+        type_float_, ext_inst_glsl_std_450_,
+        is_cos ? GLSLstd450Cos : GLSLstd450Sin, x);
+  }
   // GLSLstd450Sin/Cos precision (in particular, large-argument range
   // reduction quality) is vendor-defined. Proven via an isolated Vulkan
   // compute probe (independent of any game) that this Adreno's native
@@ -1204,6 +1211,13 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
       // made for kRcp below instead of a hardware reciprocal intrinsic.
       spv::Id operand = GetOperandComponents(
           operand_storage[0], instr.scalar_operands[0], 0b0001);
+      // TESTRIG(halo3-fixbisect): debug.canary.fix_rsq=0 restores the driver's
+      // GLSLstd450InverseSqrt (upstream behaviour) for bisection. Default ON.
+      if (!XeProbeFixEnabled("debug.canary.fix_rsq")) {
+        return builder_->createUnaryBuiltinCall(
+            type_float_, ext_inst_glsl_std_450_, GLSLstd450InverseSqrt,
+            operand);
+      }
       spv::Id sqrt_result = builder_->createUnaryBuiltinCall(
           type_float_, ext_inst_glsl_std_450_, GLSLstd450Sqrt, operand);
       return builder_->createNoContractionBinOp(spv::OpFDiv, type_float_,

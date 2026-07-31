@@ -25,6 +25,9 @@
 namespace xe {
 namespace gpu {
 
+// TESTRIG(halo3-fixbisect): runtime switch for AE-only precision fixes.
+bool XeProbeFixEnabled(const char* prop_name);
+
 class SpirvShaderTranslator : public ShaderTranslator {
  public:
   union Modification {

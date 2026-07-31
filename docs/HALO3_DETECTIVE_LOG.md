@@ -459,6 +459,46 @@ degenerate vertices CLIP, so a misfire removes or mislocates geometry.
 
 ⚠️ Clear the shader cache between toggles or old pipelines are reused.
 
+### T13 — ALL of AE's own precision fixes RULED OUT (bisected)
+T12 showed AE injects +70 basic blocks / +56 branches into these shaders versus
+upstream, so one of AE's own "plugged-in equations" was a live suspect. Made each
+individually switchable (TESTRIG module, all default ON = shipped behaviour;
+`debug.canary.fix_rsq` / `fix_sincos` / `fix_wclip`, plus `reginit` from T10).
+Shader cache cleared before every run so nothing reused stale pipelines.
+
+| test | config | result (user's live view) |
+|---|---|---|
+| T13a | `fix_wclip=0` (upstream: W==0 -> +Inf) | **still a ball** |
+| T13b | `fix_rsq=0` (driver `InverseSqrt` restored) | **still a ball** |
+| T13c | **ALL OFF** - wclip + rsq + sincos + reginit=none | **still a ball** |
+
+T13c was run as a combination on purpose: if any single fix were the cause,
+all-off would have fixed it. **⇒ All four are eliminated, including any
+interaction between them.**
+
+Notable because the RSQ fix's own commit message says it exists precisely because
+*"Adreno's approximation diverges from RADV's enough to flip floor/truncs-based
+export-slot math in some shaders (e.g. Halo 3's menu terrain skinning pass)"* -
+i.e. it was written for THIS shader, and it is still not the deciding factor.
+
+### Where the difference must now live
+With AE's shader-translation differences eliminated, and constants / buffer
+contents / fill / coherency / float-control modes all measured identical, what
+remains is:
+1. **The rest of AE's forked GPU backend** - texture cache and render-target
+   cache, the parts upstream refactored and AE never ported.
+2. **The Adreno driver's own SPIR-V -> ISA compilation.** Not a stretch: this has
+   ALREADY been proven once on this exact title - the flat-navy vista was the
+   Qualcomm driver mis-compiling a valid resolve shader, fixed only by switching
+   to Turnip.
+
+### Next (cheap, no rebuild): vary the DRIVER
+The per-game driver picker makes this a `setprop`/relaunch. If the ball changes
+between stock Qualcomm, Turnip R6 and Turnip R8, it localizes to driver codegen
+with no further shader archaeology. If it is identical across all three
+compilers, driver codegen is effectively excluded and suspicion falls on AE's
+forked texture/render-target caches.
+
 ### Corrections to previously recorded conclusions
 - **Y-flip cannot cause the ball** — but only in its *global* form. A single
   viewport flip is affine/invertible, so it cannot collapse distinct vertices.

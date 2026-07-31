@@ -16,6 +16,8 @@
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
+
+
 #include "xenia/base/math.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/spirv_shader.h"
@@ -27,6 +29,26 @@
 
 namespace xe {
 namespace gpu {
+
+// TESTRIG(halo3-fixbisect): AE injects several precision "fixes" that upstream
+// lacks, and T12 measured that they add +70 basic blocks / +56 branches to Halo
+// 3's memexport shaders. Any of them could be what collapses the geometry, so
+// each is made individually switchable at runtime for bisection.
+// All DEFAULT ON (=current shipped behaviour); set the property to 0 to disable.
+//   debug.canary.fix_rsq      RSQ via sqrt+div      (c14047bc)
+//   debug.canary.fix_sincos   Cody-Waite SIN/COS    (a0b2f29e)
+//   debug.canary.fix_wclip    degenerate-W clip     (6a4b9932)
+// NOTE: changing any of these changes generated SPIR-V, so the shader cache MUST
+// be cleared between runs or stale pipelines are reused.
+bool XeProbeFixEnabled(const char* prop_name) {
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+  char buf[PROP_VALUE_MAX] = {};
+  if (__system_property_get(prop_name, buf) > 0 && buf[0]) {
+    return !(buf[0] == '0' || !std::strcmp(buf, "false"));
+  }
+#endif
+  return true;  // default ON
+}
 
 SpirvShaderTranslator::Features::Features(bool all)
     : spirv_version(all ? spv::Spv_1_5 : spv::Spv_1_0),
@@ -1800,11 +1822,16 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
   // everywhere. Force a safe negative sentinel instead, so a W=0 vertex is
   // clipped the same way on every GPU instead of relying on IEEE-754
   // divide-by-zero semantics propagating "correctly" through the clipper.
-  spv::Id position_w_is_zero = builder_->createBinOp(
-      spv::OpFOrdEqual, type_bool_, position_w, const_float_0_);
-  guest_position_w_inv = builder_->createTriOp(
-      spv::OpSelect, type_float_, position_w_is_zero,
-      builder_->makeFloatConstant(-1.0f), guest_position_w_inv);
+  // TESTRIG(halo3-fixbisect): gated so this AE-only fix can be bisected against
+  // the Halo 3 collapse. Default ON. debug.canary.fix_wclip=0 disables it,
+  // restoring upstream behaviour (W==0 reciprocates to +Infinity).
+  if (XeProbeFixEnabled("debug.canary.fix_wclip")) {
+    spv::Id position_w_is_zero = builder_->createBinOp(
+        spv::OpFOrdEqual, type_bool_, position_w, const_float_0_);
+    guest_position_w_inv = builder_->createTriOp(
+        spv::OpSelect, type_float_, position_w_is_zero,
+        builder_->makeFloatConstant(-1.0f), guest_position_w_inv);
+  }
   position_w =
       builder_->createTriOp(spv::OpSelect, type_float_, is_w_not_reciprocal,
                             position_w, guest_position_w_inv);
