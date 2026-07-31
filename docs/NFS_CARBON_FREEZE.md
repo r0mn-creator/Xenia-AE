@@ -37,7 +37,7 @@ debug overlay prints a live counter, so every frame differs and it looks like
 motion. Crop the overlay strip (bottom ~12%) and compare only the game area.
 Four frames 5 s apart is enough.
 
-## ★ LEADING SUSPECT (2026-07-31): Xbox Live logon polling
+## ⚠️ Xbox Live polling — TESTED AND REFUTED (2026-07-31)
 User's hypothesis - *"after loading the alias the game tries to connect to Xbox
 Live"* - fits the evidence better than anything else.
 
@@ -60,12 +60,41 @@ JIT code, CPU burning, GPU re-submitting one static frame, ZERO errors - and
 crucially **zero kernel-call log lines**, which is explained if the poll lands on
 a stub that returns immediately without logging.
 
-**Confirming test (not yet run):** enable `log_high_frequency_kernel_calls` (via
-the property-gated launch-arg pattern used for `readback_memexport` /
-`dump_shaders`, since the config file must not be hand-edited) and check whether
-the guest is hammering one of these NetDll entry points during the freeze. If so,
-implementing `XNetGetConnectStatus` / `XnpLogonGetStatus` to report a definitive
-"not connected / offline" rather than "pending" should let the title proceed.
+**TEST RUN — hypothesis REFUTED.** Added a `debug.canary.log_kernel_calls`
+property-gated launch arg for `log_high_frequency_kernel_calls` and traced the
+freeze. In a 15 s window at the stall, the log contains **exactly two things**:
+`REENTER_DIAG_CP` (our own probe) and **273 `VdSwap` calls**. There is
+**ZERO `NetDll`, `Xam`, `Xnp` or `XNet` activity** - the game polls no network
+function at all. The unimplemented NetDll stubs are never reached.
+
+### ★ What the trace DOES show: it is not a hang at all
+```
+i> F800000C VdSwap(A972E31C, 701EF310, FFCA3008, ...)
+i> F800000C VdSwap(A979EFEC, 701EF310, FFCA3008, ...)   <- different buffer each call
+```
+`VdSwap` fires ~18x/second from `MainThread (F800000C)`, with a **different first
+argument every call**, i.e. the render loop is turning normally and submitting
+fresh buffers - yet the presented image is **pixel-identical** (0 changed pixels
+over 15 s, overlay cropped).
+
+⇒ **The game is ALIVE and rendering at ~18 fps. What is stalled is its
+update/simulation logic**, not the emulator and not the presenter. It re-renders
+the same scene forever because nothing in its state advances.
+
+⇒ And because it makes **no kernel calls at all** while doing so, whatever it
+waits on is **entirely guest-internal** - a flag set by another guest thread, not
+a host service that could be stubbed or implemented. That rules out the whole
+class of "implement missing kernel function" fixes.
+
+### Where that leaves it
+Three hypotheses now tested and dead: corrupt save, any save at all, Xbox Live
+polling. The remaining shape is a guest-internal wait between guest threads -
+consistent with the very first recorded diagnosis (*"a game-logic-side condition
+or flag that never gets satisfied"*), now confirmed with much stronger evidence.
+Next instrument would have to see INSIDE guest execution (JIT PC sampling of
+MainThread to find the poll loop, then identifying the memory it reads and which
+thread should write it) - the same class of problem as the Halo 3 hunt, and not
+cheap.
 
 ## Superseded suspect
 Last guest activity before going silent:

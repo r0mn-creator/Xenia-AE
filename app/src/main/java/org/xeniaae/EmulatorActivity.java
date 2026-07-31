@@ -241,6 +241,26 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         } catch (Exception e) {
             // Property unreadable - leave shader dumping off.
         }
+        // TESTRIG(kernel-call-trace): log high-frequency kernel calls when the
+        // property is set. Needed to catch a guest POLL LOOP - e.g. NFS Carbon's
+        // main-menu freeze, where the guest spins with zero ordinary log output
+        // because the poll lands on an unimplemented stub that returns without
+        // logging. Off by default; this is extremely verbose.
+        try {
+            Process kp = new ProcessBuilder("/system/bin/getprop",
+                    "debug.canary.log_kernel_calls").redirectErrorStream(true).start();
+            java.io.BufferedReader kr = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(kp.getInputStream()));
+            String kv = kr.readLine();
+            kr.close();
+            kp.waitFor();
+            if (kv != null && (kv.trim().equals("1") || kv.trim().equals("true"))) {
+                launch_args.add("--log_high_frequency_kernel_calls=true");
+                android.util.Log.i("XeniaAE", "log_high_frequency_kernel_calls ENABLED");
+            }
+        } catch (Exception e) {
+            // Property unreadable - leave the trace off.
+        }
         java.util.Collections.addAll(launch_args,
                 "--storage_root="+Application.get_app_data_dir().getAbsolutePath(),
                 "--config="+Application.get_global_config_file().getAbsolutePath(),
