@@ -261,6 +261,30 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         } catch (Exception e) {
             // Property unreadable - leave the trace off.
         }
+        // TESTRIG(apu-override): force the audio system via launch arg.
+        //
+        // ⚠️ The per-game config CANNOT do this - same timing trap as
+        // vulkan_lib_path: `apu` is consumed while the audio system is created in
+        // Emulator::Setup, but the per-game config is not read until
+        // CompleteLaunch, a phase later. Setting apu in <TITLEID>.config.toml is
+        // silently ignored (verified: the AudioTrack thread still spawned with
+        // apu='nop' in the per-game config). Launch args win over both config
+        // files, so this is the only route that applies in time.
+        try {
+            Process ap = new ProcessBuilder("/system/bin/getprop",
+                    "debug.canary.apu").redirectErrorStream(true).start();
+            java.io.BufferedReader ar = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(ap.getInputStream()));
+            String av = ar.readLine();
+            ar.close();
+            ap.waitFor();
+            if (av != null && !av.trim().isEmpty()) {
+                launch_args.add("--apu=" + av.trim());
+                android.util.Log.i("XeniaAE", "apu override: " + av.trim());
+            }
+        } catch (Exception e) {
+            // Property unreadable - use the configured audio system.
+        }
         java.util.Collections.addAll(launch_args,
                 "--storage_root="+Application.get_app_data_dir().getAbsolutePath(),
                 "--config="+Application.get_global_config_file().getAbsolutePath(),

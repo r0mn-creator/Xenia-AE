@@ -10,6 +10,7 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/testrig_debug_server.h"
 #include "xenia/base/platform.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -954,8 +955,42 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason,
     return X_STATUS_ABANDONED_WAIT_0;
   }
 
+  // TESTRIG(stuck-wait): report waits that BLOCK FOR A LONG TIME, with the
+  // object's type and the waiting guest thread's name.
+  //
+  // Why: NFS Carbon's main-menu freeze leaves the game's own audio thread
+  // ("RWAudioCore Dac") parked in exactly this call while MainThread spins in
+  // JIT making no kernel calls at all. The same EA engine has a known
+  // audio-loop hang - the community patch set ships "Skip audio loop stuck
+  // code" (Gliniak) for NFS Most Wanted (2005). To fix the cause rather than
+  // patch around it we need to know WHICH object never gets signalled.
+  //
+  // Only fires for waits exceeding the threshold, so an ordinary blocking wait
+  // (the normal case) costs one clock read and logs nothing. Gated behind the
+  // testrig property so it is inert in a normal build.
+  const bool stuck_probe = xe::testrig::internal::PropertyBool(
+      "debug.canary.stuck_wait", false);
+  const uint64_t wait_begin =
+      stuck_probe ? xe::Clock::QueryHostUptimeMillis() : 0;
+
   X_STATUS result =
       object->Wait(wait_reason, processor_mode, alertable, timeout_ptr);
+
+  if (stuck_probe) {
+    const uint64_t waited = xe::Clock::QueryHostUptimeMillis() - wait_begin;
+    if (waited >= 1000) {
+      auto* cur = XThread::GetCurrentThread();
+      XELOGI(
+          "STUCK_WAIT {} ms  thread='{}'  obj_type={}  obj_ptr=0x{:08X}  "
+          "wait_reason={} alertable={} timeout={} result=0x{:08X}",
+          waited, cur ? cur->thread_name() : "<none>",
+          static_cast<uint32_t>(object->type()),
+          static_cast<uint32_t>(reinterpret_cast<uintptr_t>(object_ptr)),
+          wait_reason, alertable, timeout_ptr ? *timeout_ptr : 0,
+          static_cast<uint32_t>(result));
+    }
+  }
+
   if (alertable) {
     if (result == X_STATUS_USER_APC) {
       xeProcessUserApcs(nullptr);
