@@ -161,6 +161,37 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         } catch (Exception ignored) {}
         return "";
     }
+    // TESTRIG(toggles): every diagnostic launch arg below is gated on a
+    // `debug.canary.*` system property so a test can be switched from the Debug
+    // screen (or `adb shell setprop`) instead of a 15-minute rebuild. Properties
+    // rather than the config file because hand-writing app config corrupts its
+    // ownership, and launch args because several of these cvars are consumed in
+    // Emulator::Setup - before any per-game config is read.
+
+    /** Reads a debug system property; "" when unset or unreadable. */
+    private static String debugProp(String key) {
+        try {
+            Process p = new ProcessBuilder("/system/bin/getprop", key)
+                    .redirectErrorStream(true).start();
+            java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream()));
+            String line = r.readLine();
+            r.close();
+            p.waitFor();
+            return line == null ? "" : line.trim();
+        } catch (Exception e) {
+            // Unreadable property means the feature stays off, which is the safe
+            // default for everything gated this way.
+            return "";
+        }
+    }
+
+    /** True only when a debug property is explicitly turned on. */
+    private static boolean debugFlagSet(String key) {
+        String v = debugProp(key);
+        return v.equals("1") || v.equals("true");
+    }
+
     final Handler delay_on_create=new Handler(new Handler.Callback(){
         @Override
         public boolean handleMessage(@NonNull Message msg) {
@@ -206,60 +237,84 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         // it can be matched against the desktop oracle's --readback_memexport
         // without a rebuild, and it stays OFF by default because the copy-back
         // is expensive.
-        try {
-            Process gp = new ProcessBuilder("/system/bin/getprop",
-                    "debug.canary.readback_memexport").redirectErrorStream(true).start();
-            java.io.BufferedReader gr = new java.io.BufferedReader(
-                    new java.io.InputStreamReader(gp.getInputStream()));
-            String gv = gr.readLine();
-            gr.close();
-            gp.waitFor();
-            if (gv != null && (gv.trim().equals("1") || gv.trim().equals("true"))) {
-                launch_args.add("--readback_memexport=true");
-                android.util.Log.i("XeniaAE", "readback_memexport ENABLED via property");
-            }
-        } catch (Exception e) {
-            // Property unreadable - leave readback off (the safe default).
+        if (debugFlagSet("debug.canary.readback_memexport")) {
+            launch_args.add("--readback_memexport=true");
+            android.util.Log.i("XeniaAE", "readback_memexport ENABLED via property");
         }
         // TESTRIG(shader-dump): dump translated SPIR-V when the property is set,
         // so it can be byte-compared against the desktop RADV oracle. Off by
         // default; passed as a launch arg rather than written into the config,
         // because hand-editing the config file corrupts its ownership.
-        try {
-            Process dp = new ProcessBuilder("/system/bin/getprop",
-                    "debug.canary.dump_shaders").redirectErrorStream(true).start();
-            java.io.BufferedReader dr = new java.io.BufferedReader(
-                    new java.io.InputStreamReader(dp.getInputStream()));
-            String dv = dr.readLine();
-            dr.close();
-            dp.waitFor();
-            if (dv != null && (dv.trim().equals("1") || dv.trim().equals("true"))) {
-                launch_args.add("--dump_shaders="
-                        + Application.get_app_data_dir().getAbsolutePath() + "/shaderdump");
-                android.util.Log.i("XeniaAE", "dump_shaders ENABLED via property");
-            }
-        } catch (Exception e) {
-            // Property unreadable - leave shader dumping off.
+        if (debugFlagSet("debug.canary.dump_shaders")) {
+            launch_args.add("--dump_shaders="
+                    + Application.get_app_data_dir().getAbsolutePath() + "/shaderdump");
+            android.util.Log.i("XeniaAE", "dump_shaders ENABLED via property");
         }
         // TESTRIG(kernel-call-trace): log high-frequency kernel calls when the
         // property is set. Needed to catch a guest POLL LOOP - e.g. NFS Carbon's
         // main-menu freeze, where the guest spins with zero ordinary log output
         // because the poll lands on an unimplemented stub that returns without
         // logging. Off by default; this is extremely verbose.
-        try {
-            Process kp = new ProcessBuilder("/system/bin/getprop",
-                    "debug.canary.log_kernel_calls").redirectErrorStream(true).start();
-            java.io.BufferedReader kr = new java.io.BufferedReader(
-                    new java.io.InputStreamReader(kp.getInputStream()));
-            String kv = kr.readLine();
-            kr.close();
-            kp.waitFor();
-            if (kv != null && (kv.trim().equals("1") || kv.trim().equals("true"))) {
-                launch_args.add("--log_high_frequency_kernel_calls=true");
-                android.util.Log.i("XeniaAE", "log_high_frequency_kernel_calls ENABLED");
+        // TESTRIG(kernel-call-trace): PrintKernelCall logs at DEBUG unless the
+        // export is tagged kImportant, and the shipped log_level is 2 (info) -
+        // so kernel calls are invisible even with log_all_kernel_calls set.
+        // This is the second half of that blind spot; both are needed to see a
+        // subsystem's traffic.
+        // TESTRIG(extra-args): arbitrary cvars, whitespace-separated, e.g.
+        //   adb shell setprop debug.canary.extra_args \
+        //     "--clear_memory_page_state=true --readback_resolve=uma"
+        //
+        // Every other toggle here needed a rebuild to add. This one does not:
+        // any cvar the emulator has becomes testable immediately, which is what
+        // made comparing against a WORKING third-party build (XenDroid) - whose
+        // config differs from ours in 14 settings - a minutes-long job instead
+        // of one rebuild per setting.
+        //
+        // Launch args beat both config files (base/cvar.h: commandline >
+        // game_config > config), so this also reaches cvars consumed during
+        // Emulator::Setup that a per-game TOML is read too late to affect.
+        // ★ headless=true is REQUIRED on Android.
+        //
+        // Xenia's non-headless path tries to display its own ImGui dialogs for
+        // things like sign-in and storage-device prompts. There is no ImGui
+        // overlay on this front-end, so such a dialog can never be shown OR
+        // dismissed - the guest asks for it, waits for a result, and waits
+        // forever. That is what froze NFS Carbon at its main menu: pressing A
+        // on CAREER made the title attempt an Xbox Live connection, and the
+        // resulting prompt never completed, so the game's main thread sat in a
+        // Sleep(0) poll loop at guest 0x824E98AC waiting on a flag nothing
+        // would ever set. With headless, the request returns a default
+        // immediately, the title gets its answer ("Cannot connect to Xbox
+        // Live!"), and career loading proceeds.
+        //
+        // Both known-working Android forks ship this: aX360e and XenDroid both
+        // have headless = true. AE had false.
+        //
+        // debug.canary.headless=0 restores the old behaviour for A/B testing.
+        if (!"0".equals(debugProp("debug.canary.headless"))) {
+            launch_args.add("--headless=true");
+        }
+        String extra_args = debugProp("debug.canary.extra_args");
+        if (!extra_args.isEmpty()) {
+            for (String arg : extra_args.trim().split("\\s+")) {
+                if (!arg.isEmpty()) {
+                    launch_args.add(arg);
+                }
             }
-        } catch (Exception e) {
-            // Property unreadable - leave the trace off.
+            android.util.Log.i("XeniaAE", "extra launch args: " + extra_args);
+        }
+        String log_level = debugProp("debug.canary.log_level");
+        if (!log_level.isEmpty()) {
+            launch_args.add("--log_level=" + log_level);
+            android.util.Log.i("XeniaAE", "log_level override: " + log_level);
+        }
+        if (debugFlagSet("debug.canary.log_all_kernel_calls")) {
+            launch_args.add("--log_all_kernel_calls=true");
+            android.util.Log.i("XeniaAE", "log_all_kernel_calls ENABLED");
+        }
+        if (debugFlagSet("debug.canary.log_kernel_calls")) {
+            launch_args.add("--log_high_frequency_kernel_calls=true");
+            android.util.Log.i("XeniaAE", "log_high_frequency_kernel_calls ENABLED");
         }
         // TESTRIG(apu-override): force the audio system via launch arg.
         //
@@ -270,20 +325,10 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         // silently ignored (verified: the AudioTrack thread still spawned with
         // apu='nop' in the per-game config). Launch args win over both config
         // files, so this is the only route that applies in time.
-        try {
-            Process ap = new ProcessBuilder("/system/bin/getprop",
-                    "debug.canary.apu").redirectErrorStream(true).start();
-            java.io.BufferedReader ar = new java.io.BufferedReader(
-                    new java.io.InputStreamReader(ap.getInputStream()));
-            String av = ar.readLine();
-            ar.close();
-            ap.waitFor();
-            if (av != null && !av.trim().isEmpty()) {
-                launch_args.add("--apu=" + av.trim());
-                android.util.Log.i("XeniaAE", "apu override: " + av.trim());
-            }
-        } catch (Exception e) {
-            // Property unreadable - use the configured audio system.
+        String apu_override = debugProp("debug.canary.apu");
+        if (!apu_override.isEmpty()) {
+            launch_args.add("--apu=" + apu_override);
+            android.util.Log.i("XeniaAE", "apu override: " + apu_override);
         }
         java.util.Collections.addAll(launch_args,
                 "--storage_root="+Application.get_app_data_dir().getAbsolutePath(),
@@ -378,7 +423,63 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         }
     }
 
+    // Auto-detect controllers while a game is running. A pad plugged in
+    // mid-session must work immediately - making the player quit to Settings to
+    // re-bind is the friction this removes - and a pad that drops out mid-race
+    // needs to be obvious, otherwise it reads as the game hanging.
+    private android.hardware.input.InputManager input_manager;
+
+    private final android.hardware.input.InputManager.InputDeviceListener
+            input_device_listener =
+            new android.hardware.input.InputManager.InputDeviceListener() {
+                @Override
+                public void onInputDeviceAdded(int deviceId) {
+                    ControllerAutoMap.Pad pad =
+                            ControllerAutoMap.autoMapNewDevices(EmulatorActivity.this);
+                    // Reload either way: an already-known pad still needs its
+                    // bindings live in keysMap for this session.
+                    load_key_map_and_vibrator();
+                    android.view.InputDevice dev =
+                            android.view.InputDevice.getDevice(deviceId);
+                    String name = dev != null ? dev.getName() : "Controller";
+                    String msg = pad != null
+                            ? name + " connected \u2014 "
+                                    + ControllerAutoMap.profileLabel(pad.profile)
+                            : name + " connected";
+                    Toast.makeText(EmulatorActivity.this, msg, Toast.LENGTH_SHORT).show();
+                }
+
+                @Override
+                public void onInputDeviceRemoved(int deviceId) {
+                    Toast.makeText(EmulatorActivity.this, "Controller disconnected",
+                            Toast.LENGTH_SHORT).show();
+                }
+
+                @Override
+                public void onInputDeviceChanged(int deviceId) {
+                    load_key_map_and_vibrator();
+                }
+            };
+
+    /** Starts controller detection; safe to call more than once. */
+    private void start_controller_detection() {
+        if (input_manager != null) {
+            return;
+        }
+        input_manager = (android.hardware.input.InputManager)
+                getSystemService(INPUT_SERVICE);
+        if (input_manager == null) {
+            return;
+        }
+        // Map anything already attached before the listener existed.
+        ControllerAutoMap.autoMapNewDevices(this);
+        load_key_map_and_vibrator();
+        input_manager.registerInputDeviceListener(input_device_listener, null);
+    }
+
     void load_key_map_and_vibrator() {
+        // Repair maps saved before the trigger/thumb keycodes were corrected.
+        ControllerAutoMap.migrateLegacyKeyMap(this);
         final SharedPreferences sPrefs = PreferenceManager.getDefaultSharedPreferences(this);
         keysMap.clear();
         for (int i = 0; i < KeyMapConfig.KEY_NAMEIDS.length; i++) {
@@ -501,6 +602,7 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
     protected void onResume()
     {
         super.onResume();
+        start_controller_detection();
         if(returning_from_game_settings_){
             returning_from_game_settings_=false;
             // Still paused from before - reopen the pause menu so the user
@@ -515,6 +617,10 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         if (overlay_bg_handler != null) overlay_bg_handler.removeCallbacks(overlay_updater);
         if (overlay_thread != null) overlay_thread.quitSafely();
         if (precache_handler != null) precache_handler.removeCallbacksAndMessages(null);
+        if (input_manager != null) {
+            input_manager.unregisterInputDeviceListener(input_device_listener);
+            input_manager = null;
+        }
         super.onDestroy();
         System.exit(0);
     }
@@ -688,6 +794,36 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
             float raxisY = event.getAxisValue(MotionEvent.AXIS_RZ);
 
             final short _0=0;
+
+            // Analog triggers. These were not handled at all, so on any pad that
+            // reports triggers as AXES rather than as BUTTON_L2/R2 keycodes -
+            // which is most of them, Xbox pads included - the triggers simply
+            // did nothing no matter how they were mapped.
+            //
+            // Two axis pairs exist in the wild: LTRIGGER/RTRIGGER and
+            // BRAKE/GAS. Pads report one or the other, so take whichever is
+            // larger rather than guessing per device.
+            {
+                float lt = Math.max(event.getAxisValue(MotionEvent.AXIS_LTRIGGER),
+                        event.getAxisValue(MotionEvent.AXIS_BRAKE));
+                float rt = Math.max(event.getAxisValue(MotionEvent.AXIS_RTRIGGER),
+                        event.getAxisValue(MotionEvent.AXIS_GAS));
+                // Small deadzone: resting triggers often float a little above 0
+                // and would otherwise hold a permanent light throttle.
+                final float TRIGGER_DEADZONE = 0.06f;
+                if (lt > TRIGGER_DEADZONE) {
+                    Emulator.get.key_event(VirtualControl.KEY_CODE_TRIGGER_L, true,
+                            (short) Math.min(255, (int) (lt * 255.0f)));
+                } else {
+                    Emulator.get.key_event(VirtualControl.KEY_CODE_TRIGGER_L, false, _0);
+                }
+                if (rt > TRIGGER_DEADZONE) {
+                    Emulator.get.key_event(VirtualControl.KEY_CODE_TRIGGER_R, true,
+                            (short) Math.min(255, (int) (rt * 255.0f)));
+                } else {
+                    Emulator.get.key_event(VirtualControl.KEY_CODE_TRIGGER_R, false, _0);
+                }
+            }
 
             //左摇杆
             {
