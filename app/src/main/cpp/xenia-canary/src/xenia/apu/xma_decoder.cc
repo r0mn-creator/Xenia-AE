@@ -16,6 +16,7 @@
 #include "xenia/apu/xma_context_old.h"
 
 #include "xenia/base/cvar.h"
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(xma)
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
@@ -61,8 +62,24 @@ DEFINE_bool(use_dedicated_xma_thread, true,
             "better results, but decrease performance a bit.",
             "APU");
 
+// Default changed from "old" to "new" on 2026-08-02.
+//
+// "old" conflates two distinct ring-buffer states - wrote nothing vs completely
+// full - because it tests `write_offset() == read_offset()`, which is true for
+// both. NFS Carbon deadlocks on exactly that: ~10 s into a race the guest's own
+// audio thread ("RWAudioCore Dac") pins a full core polling one context whose
+// state never changes again (in0_valid=0 in1_valid=0, out_read_off=12,
+// out_write_off=16, zero errors). Audio goes silent, and because the level load
+// waits on that same audio thread, the post-race load screen never completes.
+//
+// "new" handles the ambiguity explicitly (`output_rb.empty()`), and with it the
+// poll count drops from 24821 to 325, the audio thread stops spinning entirely,
+// audio survives a whole race, and the load screen completes.
+//
+// XenDroid - the third-party Android fork that plays this title - also ships
+// "new". Ours inherited "old".
 DEFINE_string(
-    xma_decoder, "old",
+    xma_decoder, "new",
     "Decoder version used to process XMA audio.\n"
     "Use: [fake, master, old, new]\n"
     " fake: \n  No audio will be decoded.\n"
@@ -254,8 +271,18 @@ int XmaDecoder::GetContextId(uint32_t guest_ptr) {
 uint32_t XmaDecoder::AllocateContext() {
   size_t index = context_bitmap_.Acquire();
   if (index == -1) {
-    // Out of contexts.
+    // TESTRIG(xma): out of contexts. A title that cannot get a context simply
+    // gets no sound for that voice, silently - so if audio fades out during
+    // play this is the first thing to rule in or out. Always logged (not
+    // gated): it is rare, and it is never normal.
+    XELOGE("TESTRIG(xma): AllocateContext FAILED - all {} contexts in use",
+           uint32_t(kContextCount));
     return 0;
+  }
+  if (XE_AE_DIAG_ENABLED("debug.canary.trace_xma_alloc")) {
+    xma_allocated_count_++;
+    XELOGI("TESTRIG(xma): alloc ctx={} (now {} allocated of {})", index,
+           xma_allocated_count_.load(), uint32_t(kContextCount));
   }
 
   XmaContext& context = *contexts_[index];
@@ -272,6 +299,11 @@ void XmaDecoder::ReleaseContext(uint32_t guest_ptr) {
   assert_true(context.is_allocated());
   context.Release();
   context_bitmap_.Release(context_id);
+  if (XE_AE_DIAG_ENABLED("debug.canary.trace_xma_alloc")) {
+    xma_allocated_count_--;
+    XELOGI("TESTRIG(xma): free  ctx={} (now {} allocated of {})", context_id,
+           xma_allocated_count_.load(), uint32_t(kContextCount));
+  }
 }
 
 bool XmaDecoder::BlockOnContext(uint32_t guest_ptr, bool poll) {

@@ -41,6 +41,28 @@ behaviour on a common path · **LOW** = diagnostics only, inert when off.
 
 ## 2026-08-02
 
+### ★ `xma_decoder` default changed `"old"` -> `"new"` — **HIGH**
+- **File:** `apu/xma_decoder.cc`
+- **Toggle:** `--xma_decoder=old` via `debug.canary.extra_args` restores it
+  (also `master`, `fake`)
+- **What:** Xenia ships four XMA implementations. Ours defaulted to `"old"`.
+- **Why:** `"old"` conflates two distinct ring-buffer states - *wrote nothing*
+  and *completely full* - because it tests `write_offset() == read_offset()`,
+  true for both. NFS Carbon deadlocks there: ~10 s into a race the guest's own
+  audio thread (`RWAudioCore Dac`) pins a full core polling one context whose
+  state never changes again (`in0_valid=0 in1_valid=0`, `out_read_off=12`,
+  `out_write_off=16`, **zero errors**). Audio goes silent, and because the level
+  load waits on that same audio thread, the post-race load screen never
+  completes. **One cause, both symptoms.**
+- **Measured:** XMA poll lines **24821 -> 325**; the audio thread drops out of
+  the top-5 CPU consumers entirely; audio survives a full race; the load screen
+  completes.
+- **Cross-game risk:** affects **every title that uses XMA audio** - i.e. nearly
+  all of them. `"new"` is the upstream-intended implementation and is what
+  XenDroid ships, but any title that happened to work under `"old"` should be
+  re-checked. **Re-test Halo 3 and Geometry Wars before release.**
+
+
 ### ★ `headless=true` is now a default launch arg — **HIGH**
 - **File:** `java/org/xeniaae/EmulatorActivity.java`
 - **Toggle:** `debug.canary.headless=0` restores the old behaviour

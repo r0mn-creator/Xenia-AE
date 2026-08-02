@@ -81,6 +81,8 @@ class XmaDecoder {
   XmaRegisterFile register_file_;
 
   static const uint32_t kContextCount = 320;
+  // TESTRIG(xma): live allocated-context count, for spotting a context leak.
+  std::atomic<int32_t> xma_allocated_count_{0};
   XmaContext* contexts_[kContextCount];
   BitMap context_bitmap_;
 

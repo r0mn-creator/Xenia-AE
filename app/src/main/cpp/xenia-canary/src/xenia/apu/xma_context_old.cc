@@ -9,6 +9,8 @@
 
 #include "xenia/apu/xma_context_old.h"
 
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(xma)
+
 #include <cstring>
 
 #include "xenia/apu/xma_decoder.h"
@@ -90,6 +92,28 @@ int XmaContextOld::Setup(uint32_t id, Memory* memory, uint32_t guest_ptr) {
   return 0;
 }
 
+// TESTRIG(xma): dumps the fields the guest polls while it waits.
+//
+// At NFS Carbon's post-race stall the guest hammers
+// XMAGetOutputBufferReadOffset / WriteOffset / XMAIsInputBuffer0Valid at
+// ~1300/sec each and never kicks again, so the decoder - which only runs when
+// kicked - stays parked. Whatever the guest is waiting for stopped advancing on
+// some earlier decode; this prints those fields either side of each decode so
+// the one that stops moving can be identified.
+static void XeTraceXmaContext(const char* when, uint32_t id,
+                              const XMA_CONTEXT_DATA& d) {
+  XELOGI(
+      "TESTRIG(xma): {} ctx={} cur_buf={} in0_valid={} in1_valid={} "
+      "in_read_off={} out_valid={} out_write_off={} out_blocks={} "
+      "subframe_dec={} err_set={} err={} perr_set={} perr={}",
+      when, id, uint32_t(d.current_buffer), uint32_t(d.input_buffer_0_valid),
+      uint32_t(d.input_buffer_1_valid), uint32_t(d.input_buffer_read_offset),
+      uint32_t(d.output_buffer_valid), uint32_t(d.output_buffer_write_offset),
+      uint32_t(d.output_buffer_block_count), uint32_t(d.subframe_decode_count),
+      uint32_t(d.error_set), uint32_t(d.error_status),
+      uint32_t(d.parser_error_set), uint32_t(d.parser_error_status));
+}
+
 bool XmaContextOld::Work() {
   if (!is_enabled() || !is_allocated()) {
     return false;
@@ -100,7 +124,29 @@ bool XmaContextOld::Work() {
 
     auto context_ptr = memory()->TranslateVirtual(guest_ptr());
     XMA_CONTEXT_DATA data(context_ptr);
+    // Decodes run constantly during play, so log 1-in-16 to keep the volume
+    // sane - but ALWAYS log a decode that reports an error, or one that fails to
+    // advance the output write offset, since those are the events of interest.
+    // The trace has to be running BEFORE the stall: once the guest stops
+    // kicking, no decode happens and there is nothing left to observe.
+    const bool trace = XE_AE_DIAG_ENABLED("debug.canary.trace_xma");
+    static std::atomic<uint32_t> xma_sample{0};
+    const bool sampled =
+        (xma_sample.fetch_add(1, std::memory_order_relaxed) & 0xF) == 0;
+    const uint32_t out_off_before = data.output_buffer_write_offset;
+    const uint32_t read_off_before = data.input_buffer_read_offset;
+
     Decode(&data);
+
+    if (trace) {
+      const bool errored = data.error_set || data.parser_error_set;
+      const bool stalled = data.output_buffer_write_offset == out_off_before &&
+                           data.input_buffer_read_offset == read_off_before;
+      if (sampled || errored || stalled) {
+        XeTraceXmaContext(errored ? "ERR " : (stalled ? "STALL" : "ok  "), id(),
+                          data);
+      }
+    }
     data.Store(context_ptr);
     return true;
   }

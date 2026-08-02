@@ -13,6 +13,8 @@
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(xma)
+#include "xenia/kernel/xthread.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/xbox.h"
 
@@ -325,6 +327,32 @@ DECLARE_XBOXKRNL_EXPORT2(XMASetOutputBufferValid, kAudio, kImplemented,
 
 dword_result_t XMAGetOutputBufferReadOffset_entry(lpvoid_t context_ptr) {
   XMA_CONTEXT_DATA context(context_ptr);
+  // TESTRIG(xma): the guest's own audio thread ("RWAudioCore Dac") pegs a full
+  // core polling this ~1300x/sec once audio dies ~10s into a race, and stays
+  // that way through the level load that never completes. The decoder is
+  // healthy (zero errors, still decoding, AAudio flowing) - so what matters is
+  // WHICH context this thread is stuck on and what it is waiting to change.
+  // Sampled, because the call rate is enormous.
+  if (XE_AE_DIAG_ENABLED("debug.canary.trace_xma_poll")) {
+    static std::atomic<uint32_t> poll_sample{0};
+    if ((poll_sample.fetch_add(1, std::memory_order_relaxed) & 0x3FF) == 0) {
+      auto* t = XThread::GetCurrentThread();
+      XELOGI(
+          "TESTRIG(xma): POLL by '{}' ctx_ptr=0x{:08X} cur_buf={} "
+          "in0_valid={} in1_valid={} in_read_off={} out_valid={} "
+          "out_read_off={} out_write_off={} out_blocks={} err_set={} err={}",
+          t ? t->thread_name() : "<none>", uint32_t(context_ptr.guest_address()),
+          uint32_t(context.current_buffer),
+          uint32_t(context.input_buffer_0_valid),
+          uint32_t(context.input_buffer_1_valid),
+          uint32_t(context.input_buffer_read_offset),
+          uint32_t(context.output_buffer_valid),
+          uint32_t(context.output_buffer_read_offset),
+          uint32_t(context.output_buffer_write_offset),
+          uint32_t(context.output_buffer_block_count),
+          uint32_t(context.error_set), uint32_t(context.error_status));
+    }
+  }
   return context.output_buffer_read_offset;
 }
 DECLARE_XBOXKRNL_EXPORT2(XMAGetOutputBufferReadOffset, kAudio, kImplemented,
