@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(xnaddr-online)
 #include "xenia/base/logging.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -494,6 +495,30 @@ dword_result_t NetDll_XNetGetTitleXnAddr_entry(dword_t caller,
   std::memset(addr_ptr->abEnet, 0xCC, 6);
 
   std::memset(addr_ptr->abOnline, 0, 20);
+
+  // TESTRIG(xnaddr-online): NFS Carbon's main thread polls this call thousands
+  // of times at its main menu and never proceeds. What it gets back is a
+  // loopback address with NO online identity at all - inaOnline 0, wPortOnline
+  // 0, abOnline 20 zero bytes - and a status of STATIC only, so the ONLINE,
+  // DNS and GATEWAY bits a title checks for are never set.
+  //
+  // debug.canary.xnaddr_online=1 reports a fully-configured, online-looking
+  // address instead. OFF by default: claiming to be online may simply move the
+  // stall to the first real Live request, which is where aX360e was reported to
+  // stall - but that would still be progress past the menu, and would confirm
+  // this poll is the blocker.
+  if (XE_AE_EXPERIMENT_ENABLED("debug.canary.xnaddr_online")) {
+    addr_ptr->inaOnline.s_addr = htonl(INADDR_LOOPBACK);
+    addr_ptr->wPortOnline = 1000;
+    // Must be non-zero for the same reason abEnet must be: titles derive an
+    // identity from these bytes and treat all-zero as "no address yet".
+    std::memset(addr_ptr->abOnline, 0xAA, 20);
+    return XnAddrStatus::XNET_GET_XNADDR_ETHERNET |
+           XnAddrStatus::XNET_GET_XNADDR_STATIC |
+           XnAddrStatus::XNET_GET_XNADDR_GATEWAY |
+           XnAddrStatus::XNET_GET_XNADDR_DNS |
+           XnAddrStatus::XNET_GET_XNADDR_ONLINE;
+  }
 
   return XnAddrStatus::XNET_GET_XNADDR_STATIC;
 }

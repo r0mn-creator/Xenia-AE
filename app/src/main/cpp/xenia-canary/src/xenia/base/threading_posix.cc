@@ -7,6 +7,9 @@
  ******************************************************************************
  */
 
+#include <set>
+
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(fifo-semaphore)
 #include "xenia/base/threading.h"
 
 #include "xenia/base/assert.h"
@@ -225,7 +228,7 @@ class PosixConditionBase {
   }
   virtual bool Signal() = 0;
 
-  WaitResult Wait(std::chrono::milliseconds timeout) {
+  virtual WaitResult Wait(std::chrono::milliseconds timeout) {
     waiter_count_.fetch_add(1, std::memory_order_relaxed);
 
     auto predicate = [this] {
@@ -267,7 +270,16 @@ class PosixConditionBase {
     waiter_count_.fetch_sub(1, std::memory_order_release);
 
     if (!predicate_met) return WaitResult::kTimeout;
-    if (destroyed) return WaitResult::kFailed;
+    // TESTRIG(ax360e-waits): aX360e's Wait could ONLY return kSuccess or
+    // kTimeout. AE added is_destroyed_ (part of the XThread use-after-free fix)
+    // which introduced a THIRD outcome, kFailed. A guest that never expects
+    // kFailed may take an error path and stop making progress, so this restores
+    // the two-outcome contract for A/B testing.
+    if (destroyed) {
+      return XE_AE_EXPERIMENT_ENABLED("debug.canary.ax360e_waits")
+                 ? WaitResult::kTimeout
+                 : WaitResult::kFailed;
+    }
     return WaitResult::kSuccess;
   }
 
@@ -387,19 +399,29 @@ class PosixConditionBase {
         return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
       }
 
-      // Brief spin-wait before sleeping — catches quick signals with no syscall.
-      for (int spin = 0; spin < 32; spin++) {
+      // TESTRIG(ax360e-waits): aX360e - the base NFS Carbon last ran past the
+      // main menu on - polled multi-object waits every 1ms with NO spin. AE
+      // added a 32-iteration spin plus a 200us sleep (5x the poll rate) as a
+      // latency optimisation. That is a real change to how often every guest
+      // multi-object wait re-checks, in the exact subsystem where NFS now
+      // livelocks. debug.canary.ax360e_waits=1 restores aX360e's cadence.
+      const bool xe_ax360e_waits =
+          XE_AE_EXPERIMENT_ENABLED("debug.canary.ax360e_waits");
+      if (!xe_ax360e_waits) {
+        for (int spin = 0; spin < 32; spin++) {
 #if XE_ARCH_ARM64 == 1
-        __asm volatile("yield" ::: "memory");
+          __asm volatile("yield" ::: "memory");
 #elif XE_ARCH_AMD64 == 1
-        _mm_pause();
+          _mm_pause();
 #endif
+        }
       }
       // Sleep for a short time before polling again. 200µs (vs 1ms) reduces
       // multi-handle wait latency 5x for the slow-signal path.
       auto remaining =
           std::chrono::duration_cast<std::chrono::microseconds>(end_time - now);
-      auto sleep_time = std::min(remaining, std::chrono::microseconds(200));
+      auto sleep_time = std::min(
+          remaining, std::chrono::microseconds(xe_ax360e_waits ? 1000 : 200));
       std::this_thread::sleep_for(sleep_time);
     }
   }
@@ -474,14 +496,98 @@ class PosixCondition<Semaphore> final : public PosixConditionBase {
     return true;
   }
 
+  // TESTRIG(fifo-semaphore): strict-FIFO guest semaphore, ported from XenDroid,
+  // which runs NFS Carbon past the point where we stall.
+  //
+  // The default implementation is a bare count plus notify_all: every waiter
+  // wakes and races, so a thread that arrives AFTER a release can take the
+  // token from one that was already parked. Windows does not behave that way -
+  // KeReleaseSemaphore hands the count to already-waiting threads inside the
+  // dispatcher lock, so a wait issued after a release can never overtake one
+  // issued before it. Guest job systems that assume one-wake-per-release-per-
+  // waiter therefore starve: a greedy worker re-parks and consumes a whole
+  // batch of tokens while its peers, already blocked, never wake.
+  //
+  // That failure mode matches NFS Carbon exactly - the render thread keeps
+  // presenting while the game's own update work never advances.
+  //
+  // Tickets restore FIFO: each waiter takes a ticket and is only satisfied when
+  // it is that ticket's turn. Timed-out waiters withdraw so they cannot wedge
+  // the queue, and signaled() reports false while any single-object waiter is
+  // queued ahead, so a multi-object wait cannot steal a parked waiter's token
+  // either.
+  //
+  // debug.canary.fifo_semaphore=1 enables it; OFF keeps current behaviour.
+  WaitResult Wait(std::chrono::milliseconds timeout) override {
+    if (!XE_AE_EXPERIMENT_ENABLED("debug.canary.fifo_semaphore")) {
+      return PosixConditionBase::Wait(timeout);
+    }
+
+    waiter_count_.fetch_add(1, std::memory_order_relaxed);
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    const uint64_t ticket = next_ticket_++;
+    auto predicate = [this, ticket] {
+      return (count_ > 0 && serve_ticket_ == ticket) ||
+             is_destroyed_.load(std::memory_order_relaxed);
+    };
+
+    bool predicate_met;
+    if (predicate()) {
+      predicate_met = true;
+    } else if (timeout == std::chrono::milliseconds::max()) {
+      cond_.wait(lock, predicate);
+      predicate_met = true;
+    } else {
+      predicate_met = cond_.wait_for(lock, timeout, predicate);
+    }
+
+    const bool destroyed = is_destroyed_.load(std::memory_order_relaxed);
+    if (predicate_met && !destroyed) {
+      count_--;
+      AdvanceServeTicketLocked();
+    } else {
+      // Leaving without consuming: withdraw so later tickets still get served.
+      if (ticket == serve_ticket_) {
+        AdvanceServeTicketLocked();
+      } else {
+        abandoned_tickets_.insert(ticket);
+      }
+    }
+    lock.unlock();
+    waiter_count_.fetch_sub(1, std::memory_order_release);
+
+    if (!predicate_met) return WaitResult::kTimeout;
+    if (destroyed) return WaitResult::kFailed;
+    return WaitResult::kSuccess;
+  }
+
  private:
-  [[nodiscard]] bool signaled() const override { return count_ > 0; }
+  // Caller must hold mutex_. Skips tickets whose waiter already gave up.
+  void AdvanceServeTicketLocked() {
+    ++serve_ticket_;
+    while (abandoned_tickets_.erase(serve_ticket_)) {
+      ++serve_ticket_;
+    }
+    cond_.notify_all();
+  }
+
+  [[nodiscard]] bool signaled() const override {
+    if (!XE_AE_EXPERIMENT_ENABLED("debug.canary.fifo_semaphore")) {
+      return count_ > 0;
+    }
+    // A multi-object wait must not jump the single-object queue.
+    return count_ > 0 && next_ticket_ == serve_ticket_;
+  }
   void post_execution() override {
     count_--;
     cond_.notify_all();
   }
   uint32_t count_;
   const uint32_t maximum_count_;
+  uint64_t next_ticket_ = 0;
+  uint64_t serve_ticket_ = 0;
+  std::set<uint64_t> abandoned_tickets_;
 };
 
 template <>
