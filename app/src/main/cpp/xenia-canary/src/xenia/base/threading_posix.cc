@@ -150,6 +150,48 @@ uint32_t current_thread_system_id() {
 }
 
 void MaybeYield() {
+  // TESTRIG(fast-yield): adaptive backoff instead of an unconditional
+  // sched_yield() syscall.
+  //
+  // Profiled on device (Odin 2, NFS Carbon): __schedule was 68% of kernel time
+  // and do_sched_yield another 7%, with the kernel taking ~22% of TOTAL CPU.
+  // That is not emulation work - it is scheduler churn. The cause is that every
+  // call here entered the kernel, and the callers are spin-waits: the guest's
+  // Sleep(0) path runs this ~6000 times a second, plus the GPU ring-buffer wait
+  // loop and two object-wait loops.
+  //
+  // A spin-wait almost always succeeds within a few iterations, and on this
+  // hardware the threads it waits on are on OTHER cores - so the yield does not
+  // help them run, it just burns a syscall and a context switch. Spinning in
+  // userspace with the ARM YIELD hint costs a few nanoseconds instead.
+  //
+  // We still yield for real once a wait has clearly failed, so a genuinely
+  // contended wait (more threads than cores, or waiting on a thread scheduled
+  // on THIS core) still makes progress rather than spinning forever.
+  //
+  // debug.canary.fast_yield=0 restores the old unconditional sched_yield().
+  if (XE_AE_FIX_ENABLED("debug.canary.fast_yield")) {
+    // Per-thread, so one hot spinner cannot push another thread into the
+    // kernel path.
+    static thread_local uint32_t consecutive_spins = 0;
+    constexpr uint32_t kSpinsBeforeRealYield = 64;
+    if (++consecutive_spins < kSpinsBeforeRealYield) {
+#if XE_ARCH_ARM64 == 1
+      // YIELD is a hint to the core that this is a spin loop; it lets SMT/the
+      // pipeline back off without leaving userspace.
+      for (int i = 0; i < 32; ++i) {
+        __asm__ __volatile__("yield" ::: "memory");
+      }
+#else
+      for (int i = 0; i < 32; ++i) {
+        __asm__ __volatile__("" ::: "memory");
+      }
+#endif
+      __sync_synchronize();
+      return;
+    }
+    consecutive_spins = 0;
+  }
   sched_yield();
   __sync_synchronize();
 }

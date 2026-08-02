@@ -64,8 +64,20 @@ uint64_t Clock::QueryHostSystemTime() {
 }
 
 uint64_t Clock::QueryHostUptimeMillis() {
-  return host_tick_count_platform() * 1000 / host_tick_frequency_platform();
+  // Route through the raw-aware accessors rather than calling the platform
+  // clock directly.
+  //
+  // Profiled on device: __kernel_clock_gettime was 14.3% of total CPU. Enabling
+  // clock_source_raw (CNTVCT_EL0 on arm64) only took it to 11.0%, because these
+  // two functions bypassed the raw path and always went to clock_gettime - and
+  // they sit in hot paths (texture_cache per submission, XThread quantum
+  // tracking), so they were most of what remained.
+  //
+  // The frequency is a hardware constant, so query it once instead of on every
+  // call; that alone removes half the work here.
+  static const uint64_t frequency = QueryHostTickFrequency();
+  return QueryHostTickCount() * 1000 / frequency;
 }
 
-uint64_t Clock::QueryHostInterruptTime() { return host_tick_count_platform(); }
+uint64_t Clock::QueryHostInterruptTime() { return QueryHostTickCount(); }
 }  // namespace xe
