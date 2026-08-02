@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/vulkan/vulkan_texture_cache.h"
 
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(regression-bisect)
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/testrig_debug_server.h"  // TESTRIG(gpu)
@@ -810,11 +811,19 @@ VkSampler VulkanTextureCache::UseSampler(SamplerParameters parameters,
   }
   sampler_create_info.magFilter =
       parameters.mag_linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+  // TESTRIG(regression-bisect): before d04910e2 both of these keyed off
+  // mag_linear, which is wrong - min and mip have their own bits. Setting
+  // debug.canary.fix_sampler=0 restores that older behaviour so a title that
+  // regressed can be tested against it without a rebuild.
+  const bool fix_sampler = XE_AE_FIX_ENABLED("debug.canary.fix_sampler");
   sampler_create_info.minFilter =
-      parameters.min_linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-  sampler_create_info.mipmapMode = parameters.mip_linear
-                                       ? VK_SAMPLER_MIPMAP_MODE_LINEAR
-                                       : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+      (fix_sampler ? parameters.min_linear : parameters.mag_linear)
+          ? VK_FILTER_LINEAR
+          : VK_FILTER_NEAREST;
+  sampler_create_info.mipmapMode =
+      (fix_sampler ? parameters.mip_linear : parameters.mag_linear)
+          ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+          : VK_SAMPLER_MIPMAP_MODE_NEAREST;
   static constexpr VkSamplerAddressMode kAddressModeMap[] = {
       // kRepeat
       VK_SAMPLER_ADDRESS_MODE_REPEAT,
@@ -2017,9 +2026,23 @@ VkImageView VulkanTextureCache::VulkanTexture::GetView(bool is_signed,
   return view;
 }
 
+// TESTRIG(halo3-fixbisect): 3D-as-2D texture views came in with the texture-cache
+// port done for Halo 3 (d04910e2), but the path is taken by EVERY title that
+// samples a stacked texture as 2D, so it is a candidate for a cross-game
+// regression. debug.canary.gpu_3d_to_2d=0 disables it without a rebuild.
+//
+// Sampled ONCE per process because this runs on the texture-binding path (once
+// per draw in the worst case), not on a cold path. The emulator runs in its own
+// :emu process and a game launch starts a fresh one, so "restart the game to
+// apply" - which is what the Debug UI tells the user - holds.
+static bool Xe3DAs2DTextureEnabled() {
+  return cvars::gpu_3d_to_2d_texture &&
+         XE_AE_FIX_ENABLED("debug.canary.gpu_3d_to_2d");
+}
+
 VkImageView VulkanTextureCache::VulkanTexture::GetOrCreate3DAs2DImageView(
     bool is_signed, uint32_t host_swizzle) {
-  if (!cvars::gpu_3d_to_2d_texture) {
+  if (!Xe3DAs2DTextureEnabled()) {
     return VK_NULL_HANDLE;
   }
 

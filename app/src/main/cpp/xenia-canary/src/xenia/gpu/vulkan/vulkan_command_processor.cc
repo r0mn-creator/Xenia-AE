@@ -14,6 +14,7 @@
 
 #include <unordered_set>
 
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(regression-bisect)
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
@@ -1665,8 +1666,17 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         render_pass_begin_info.pClearValues = nullptr;
         deferred_command_buffer_.CmdVkBeginRenderPass(
             &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
-        current_render_pass_ = swap_apply_gamma_render_pass_;
-        current_framebuffer_ = nullptr;  // Not a render target cache framebuffer
+        // TESTRIG(regression-bisect): 74a4ebfe. IssueSwap begins this pass
+        // manually, bypassing the tracked BeginRenderPass helper, so without
+        // these two lines the tracking goes stale. An earlier revert of this
+        // change rendered the menu fully black, so it is load-bearing - but it
+        // is still an AE-only change, so debug.canary.fix_swap_renderpass=0
+        // takes it back out for bisection.
+        if (XE_AE_FIX_ENABLED("debug.canary.fix_swap_renderpass")) {
+          current_render_pass_ = swap_apply_gamma_render_pass_;
+          // Not a render target cache framebuffer.
+          current_framebuffer_ = nullptr;
+        }
 
         VkViewport viewport;
         viewport.x = 0.0f;
@@ -1727,7 +1737,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         deferred_command_buffer_.CmdVkDraw(3, 1, 0, 0);
 
         deferred_command_buffer_.CmdVkEndRenderPass();
-        current_render_pass_ = VK_NULL_HANDLE;
+        if (XE_AE_FIX_ENABLED("debug.canary.fix_swap_renderpass")) {
+          current_render_pass_ = VK_NULL_HANDLE;
+        }
 
         // Insert the release barrier.
         PushImageMemoryBarrier(

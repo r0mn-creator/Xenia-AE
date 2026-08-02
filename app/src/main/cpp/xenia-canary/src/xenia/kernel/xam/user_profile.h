@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(regression-bisect)
 #include "xenia/kernel/xam/user_property.h"
 #include "xenia/kernel/xam/xam.h"
 #include "xenia/kernel/xam/xdbf/gpd_info_profile.h"
@@ -101,7 +102,22 @@ class UserProfile {
   uint32_t signin_state() const {
     return static_cast<uint32_t>(SignInState::SignedInLocally);
   };
-  uint32_t type() const { return 1; /* local only — suppress Xbox Live attempts */ }
+  // TESTRIG(regression-bisect): AE reports the profile as LOCAL-ONLY (1).
+  // aX360e - the base this project was built from - reports (1 | 2), i.e. local
+  // AND online, and it got FURTHER in NFS Carbon than we do: past the main menu,
+  // stalling later at a network stage. We stall AT the menu.
+  //
+  // Why this matters: XamUserGetXUID does `type() & type_mask`, and a title
+  // asking for the ONLINE xuid passes type_mask=2. With 1 that ands to zero, so
+  // the call returns X_E_NO_SUCH_USER and a zero xuid; with (1 | 2) it returns
+  // success and a real xuid. A title that will not leave its menu until it has
+  // an online xuid therefore waits here forever.
+  //
+  // Default keeps the shipped local-only behaviour;
+  // debug.canary.profile_local_only=0 restores aX360e's (1 | 2).
+  uint32_t type() const {
+    return XE_AE_FIX_ENABLED("debug.canary.profile_local_only") ? 1 : (1 | 2);
+  }
 
   uint32_t GetReservedFlags() const {
     return account_info_.GetReservedFlags();

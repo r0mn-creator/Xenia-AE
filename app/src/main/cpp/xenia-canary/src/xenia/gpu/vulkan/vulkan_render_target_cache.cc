@@ -14,6 +14,7 @@
 #include <cstring>
 
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(regression-bisect)
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -1780,7 +1781,13 @@ VkFormat VulkanRenderTargetCache::GetColorVulkanFormat(
                                           : VK_FORMAT_R8G8B8A8_UNORM;
     case xenos::ColorRenderTargetFormat::k_2_10_10_10:
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
-      return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+      // TESTRIG(regression-bisect): d04910e2 corrected this from the 8:8:8:8
+      // A8B8G8R8 mapping. It is the right format, but it changes the render
+      // target layout for every title that uses 10:10:10:2, so
+      // debug.canary.fix_rt_1010102=0 restores the old mapping for A/B testing.
+      return XE_AE_FIX_ENABLED("debug.canary.fix_rt_1010102")
+                 ? VK_FORMAT_A2B10G10R10_UNORM_PACK32
+                 : VK_FORMAT_A8B8G8R8_UNORM_PACK32;
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
       return VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -3862,7 +3869,10 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
     // `packed` is never populated (it's only set on the source_is_color
     // path above), so the stencil-bit kill check below silently no-ops and
     // every sample passes through unfiltered.
-    if (packed == spv::NoResult && mode.output == TransferOutput::kStencilBit) {
+    // TESTRIG(regression-bisect): debug.canary.fix_stencil_discard=0 restores
+    // the pre-6daf1479 behaviour where this check silently no-op'd.
+    if (packed == spv::NoResult && mode.output == TransferOutput::kStencilBit &&
+        XE_AE_FIX_ENABLED("debug.canary.fix_stencil_discard")) {
       packed = source_stencil[0];
     }
     switch (mode.output) {

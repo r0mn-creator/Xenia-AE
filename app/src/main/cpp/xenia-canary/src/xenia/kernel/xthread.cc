@@ -11,6 +11,8 @@
 
 #if !XE_PLATFORM_WIN32
 #include <pthread.h>
+
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(reenter-longjmp)
 #include <signal.h>
 #endif
 
@@ -599,6 +601,51 @@ void XThread::Execute() {
   // site hold no RAII guards across the boundary, so skipping unwind there
   // is safe.
   uint32_t next_address;
+  // TESTRIG(reenter-longjmp): AE switched Android fiber re-entry from C++
+  // exceptions to setjmp/longjmp to fix an uncaught FiberReentryException in
+  // Halo 3 (the JIT's __register_frame unwind info was not reliably found).
+  //
+  // The trade is real: longjmp performs NO unwinding, so any lock or RAII guard
+  // held on a frame between here and the re-entry point is never released. A
+  // guest thread re-entering while holding a kernel lock would leave it held
+  // forever - main thread spins, workers idle, no errors logged, which is NFS
+  // Carbon's exact freeze signature. aX360e - the base NFS last ran on - used
+  // the exception path.
+  //
+  // Both paths are compiled on Android so the choice is a runtime one.
+  // debug.canary.reenter_longjmp=0 restores aX360e's exception behaviour.
+#if XE_PLATFORM_AX360E
+  const bool xe_reenter_longjmp =
+      XE_AE_FIX_ENABLED("debug.canary.reenter_longjmp");
+  if (!xe_reenter_longjmp) {
+    try {
+      exit_code = static_cast<int>(kernel_state()->processor()->Execute(
+          thread_state_, address, args.data(), args.size()));
+      next_address = 0;
+    } catch (const FiberReentryException& e) {
+      sigset_t set;
+      sigemptyset(&set);
+      sigaddset(&set, SIGRTMIN);
+      pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+      next_address = e.address;
+    }
+    while (next_address != 0) {
+      try {
+        kernel_state()->processor()->ExecuteRaw(thread_state_, next_address);
+        next_address = 0;
+        if (want_exit_code) {
+          exit_code = static_cast<int>(thread_state_->context()->r[3]);
+        }
+      } catch (const FiberReentryException& e) {
+        sigset_t set;
+        sigemptyset(&set);
+        sigaddset(&set, SIGRTMIN);
+        pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+        next_address = e.address;
+      }
+    }
+  } else  // fall through to the setjmp path below
+#endif
 #if !XE_PLATFORM_WIN32 && !XE_PLATFORM_AX360E
   try {
     exit_code = static_cast<int>(kernel_state()->processor()->Execute(
@@ -676,6 +723,12 @@ void XThread::Reenter(uint32_t address) {
   // Called when the game switches fiber stacks (e.g., via
   // KeSetCurrentStackPointers in games like Forza Horizon 2 and Halo 3).
   // Must unwind through all frames between here and Execute().
+#if XE_PLATFORM_AX360E
+  // TESTRIG(reenter-longjmp): must match the strategy Execute() selected.
+  if (!XE_AE_FIX_ENABLED("debug.canary.reenter_longjmp")) {
+    throw FiberReentryException{address};
+  }
+#endif
 #if !XE_PLATFORM_WIN32 && !XE_PLATFORM_AX360E
   // Throw a C++ exception that unwinds through JIT frames (using DWARF
   // .eh_frame info) and host frames (using compiler-generated DWARF),
