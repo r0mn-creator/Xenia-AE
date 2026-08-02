@@ -8,6 +8,15 @@
  */
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+#include <cstdlib>
+#include <set>
+#include <string>
+
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+#include <sys/system_properties.h>
+#endif
+
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(spin)
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/testrig_debug_server.h"
@@ -444,6 +453,162 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
                                             lpqword_t interval_ptr,
                                             const ppc_context_t& context) {
   uint64_t interval = interval_ptr ? static_cast<uint64_t>(*interval_ptr) : 0u;
+  // TESTRIG(spin): NFS Carbon's guest MAIN thread yield-spins here ~6000x/sec
+  // (interval==0 is Sleep(0)) while every worker sits idle, and it makes NO
+  // other kernel call - so it is polling a value in guest memory and we cannot
+  // see which one. Logging the guest LR gives the return address INSIDE the
+  // game's own spin loop, which is what lets that loop be disassembled and the
+  // polled address identified. Sampled 1-in-1024; the call rate is enormous.
+  if (interval == 0 && XE_AE_DIAG_ENABLED("debug.canary.trace_spin")) {
+    static std::atomic<uint32_t> spin_sample{0};
+    if ((spin_sample.fetch_add(1, std::memory_order_relaxed) & 0x3FF) == 0) {
+      auto* cur = XThread::GetCurrentThread();
+      XELOGI(
+          "TESTRIG(spin): thread='{}' lr=0x{:08X} r3=0x{:08X} r4=0x{:08X} "
+          "r5=0x{:08X} r6=0x{:08X} r7=0x{:08X}",
+          cur ? cur->thread_name() : "<none>",
+          static_cast<uint32_t>(context->lr),
+          static_cast<uint32_t>(context->r[3]),
+          static_cast<uint32_t>(context->r[4]),
+          static_cast<uint32_t>(context->r[5]),
+          static_cast<uint32_t>(context->r[6]),
+          static_cast<uint32_t>(context->r[7]));
+      // The outer polling loop at 0x824E98AC waits for [r27 + 0x51C4] != 0.
+      // r27 is non-volatile on PPC, so it survives the two wrapper frames
+      // between that loop and here. Log the candidate flag addresses and their
+      // current values - this is the value nothing is writing.
+      for (int rn : {25, 26, 27, 28, 29, 30, 31}) {
+        uint32_t base = static_cast<uint32_t>(context->r[rn]);
+        if (base < 0x10000 || base >= 0xC0000000) continue;
+        uint32_t flag_addr = base + 0x51C4;
+        auto* fp = reinterpret_cast<uint32_t*>(
+            kernel_memory()->TranslateVirtual(flag_addr));
+        XELOGI("TESTRIG(spin): r{}=0x{:08X}  [r{}+0x51C4]=0x{:08X} @0x{:08X}",
+               rn, base, rn, xe::byte_swap(*fp), flag_addr);
+        // The record around the polled flag carries a kernel object handle at
+        // +0x8. Identify it: whatever should signal that object is what should
+        // also be setting the flag, so naming it names the stalled producer.
+        if (xe::byte_swap(*fp) == 0) {
+          uint32_t h = xe::byte_swap(fp[2]);
+          if ((h & 0xFF000000) == 0xF8000000) {
+            auto obj = kernel_state()->object_table()
+                           ->LookupObject<XObject>(h);
+            if (obj) {
+              XELOGI("TESTRIG(spin):   handle 0x{:08X} type={} name='{}'", h,
+                     static_cast<uint32_t>(obj->type()), obj->name());
+              // If it is a thread, its run state is the answer: the main thread
+              // is waiting on work this thread should have done.
+              if (obj->type() == XObject::Type::Thread) {
+                auto* t = static_cast<XThread*>(obj.get());
+                XELOGI(
+                    "TESTRIG(spin):   producer thread name='{}' running={} "
+                    "suspend_count={} exiting={}",
+                    t->thread_name(), t->is_running(), t->suspend_count(),
+                    t->guest_object<X_KTHREAD>() ? 0 : -1);
+              }
+            } else {
+              XELOGI("TESTRIG(spin):   handle 0x{:08X} -> NO OBJECT", h);
+            }
+          }
+        }
+      }
+      // Dump the guest instructions around the call site. The loop that decides
+      // whether to keep spinning is right here, so this is what identifies the
+      // memory location being polled.
+      // Walk the guest stack for return addresses. The site we land on is only
+      // the game's SleepEx wrapper; the loop that decides to keep waiting is in
+      // its caller, so the caller chain is what actually names the stall.
+      uint32_t sp = static_cast<uint32_t>(context->r[1]);
+      auto* stack = reinterpret_cast<uint32_t*>(
+          kernel_memory()->TranslateVirtual(sp));
+      std::string chain;
+      for (uint32_t i = 0; i < 64; ++i) {
+        uint32_t v = xe::byte_swap(stack[i]);
+        // Guest code lives in 0x82xxxxxx; keep anything that looks like one.
+        if (v >= 0x82000000 && v < 0x83000000) {
+          chain += fmt::format(" {:08X}", v);
+        }
+      }
+      XELOGI("TESTRIG(spin): sp=0x{:08X} caller_candidates:{}", sp, chain);
+
+      // Dump each candidate ONCE. We are hunting the outer loop: a site whose
+      // preceding instructions load a value, compare it, and branch backwards
+      // around the call to the sleep wrapper. Doing every candidate in a single
+      // run avoids one 3-minute boot per address.
+      static std::set<uint32_t> dumped;
+      for (uint32_t i = 0; i < 64; ++i) {
+        uint32_t v = xe::byte_swap(stack[i]);
+        if (v < 0x82000000 || v >= 0x83000000) continue;
+        if (!dumped.insert(v).second) continue;
+        for (uint32_t off = 0; off < 0x30; off += 0x10) {
+          uint32_t a = (v - 0x20) + off;
+          auto* q =
+              reinterpret_cast<uint32_t*>(kernel_memory()->TranslateVirtual(a));
+          XELOGI("TESTRIG(spin): cand {:08X} @{:08X}: {:08X} {:08X} {:08X} {:08X}",
+                 v, a, xe::byte_swap(q[0]), xe::byte_swap(q[1]),
+                 xe::byte_swap(q[2]), xe::byte_swap(q[3]));
+        }
+      }
+
+      // Scan guest code for every store to displacement 0x51C4 - i.e. every
+      // instruction that could set the flag the main thread is polling. If the
+      // writer exists but is never reached, that tells us where to look next;
+      // if there is no writer at all, the flag is set by the HOST (a kernel
+      // callback we are not delivering). D-form stores: stw=36, stb=38,
+      // sth=44, stwu=37. Match on opcode + displacement, ignoring registers.
+      static bool scanned = false;
+      if (!scanned && XE_AE_DIAG_ENABLED("debug.canary.scan_flag_writers")) {
+        scanned = true;
+        uint32_t found = 0;
+        for (uint32_t a = 0x82000000; a < 0x82F00000; a += 4) {
+          auto* ip = reinterpret_cast<uint32_t*>(
+              kernel_memory()->TranslateVirtual(a));
+          if (!ip) continue;
+          uint32_t insn = xe::byte_swap(*ip);
+          if ((insn & 0x0000FFFF) != 0x51C4) continue;
+          uint32_t op = insn >> 26;
+          if (op == 36 || op == 37 || op == 38 || op == 44) {
+            XELOGI("TESTRIG(spin): FLAG WRITER at {:08X}: {:08X} (op={})", a,
+                   insn, op);
+            if (++found > 40) break;
+          }
+        }
+        XELOGI("TESTRIG(spin): flag-writer scan complete, {} site(s)", found);
+      }
+
+      // Reusable: dump guest code at an arbitrary address without rebuilding.
+      //   adb shell setprop debug.canary.dump_guest_addr 82948610
+      // Lets any caller from the chain above be disassembled on the spot.
+      {
+        char addr_buf[PROP_VALUE_MAX] = {};
+        if (__system_property_get("debug.canary.dump_guest_addr", addr_buf) > 0 &&
+            addr_buf[0]) {
+          uint32_t want = uint32_t(strtoul(addr_buf, nullptr, 16));
+          if (want >= 0x82000000 && want < 0x83000000) {
+            for (uint32_t off = 0; off < 0x80; off += 0x10) {
+              uint32_t a = (want - 0x20) + off;
+              auto* q = reinterpret_cast<uint32_t*>(
+                  kernel_memory()->TranslateVirtual(a));
+              XELOGI("TESTRIG(spin): dump {:08X}: {:08X} {:08X} {:08X} {:08X}",
+                     a, xe::byte_swap(q[0]), xe::byte_swap(q[1]),
+                     xe::byte_swap(q[2]), xe::byte_swap(q[3]));
+            }
+          }
+        }
+      }
+
+      uint32_t lr = static_cast<uint32_t>(context->lr);
+      uint32_t base = lr - 0x40;
+      auto* mem = kernel_memory();
+      for (uint32_t off = 0; off < 0x60; off += 0x10) {
+        uint32_t a = base + off;
+        auto* p32 = reinterpret_cast<uint32_t*>(mem->TranslateVirtual(a));
+        XELOGI("TESTRIG(spin): code {:08X}: {:08X} {:08X} {:08X} {:08X}", a,
+               xe::byte_swap(p32[0]), xe::byte_swap(p32[1]),
+               xe::byte_swap(p32[2]), xe::byte_swap(p32[3]));
+      }
+    }
+  }
   return KeDelayExecutionThread(processor_mode, alertable,
                                 interval_ptr ? &interval : nullptr, context);
 }

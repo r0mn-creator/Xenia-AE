@@ -12,6 +12,7 @@
 #include "xenia/kernel/kernel_state.h"
 
 #include "xenia/base/byte_stream.h"
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(overlapped)
 #include "xenia/base/logging.h"
 #include "xenia/base/testrig_debug_server.h"  // TESTRIG(kernel)
 #include "xenia/emulator.h"
@@ -1131,6 +1132,8 @@ void KernelState::CompleteOverlappedDeferred(
                                result, result, 0, pre_callback, post_callback);
 }
 
+// TESTRIG(overlapped): counterpart on the immediate path, so a title that never
+// touches the deferred queue is distinguishable from one whose queue is stuck.
 void KernelState::CompleteOverlappedDeferredEx(
     std::function<void()> completion_callback, uint32_t overlapped_ptr,
     X_RESULT result, uint32_t extended_error, uint32_t length,
@@ -1177,8 +1180,23 @@ void KernelState::CompleteOverlappedDeferredEx(
     }
   }
   auto global_lock = global_critical_region_.Acquire();
+  // TESTRIG(overlapped): the guest polls an XOVERLAPPED's status and loops while
+  // it reads IO_PENDING. If a completion is enqueued here but the dispatch
+  // thread never runs it, the guest spins forever - which is exactly NFS
+  // Carbon's main-menu freeze signature (RtlNtStatusToDosError(00000103) in a
+  // tight loop, GPU healthy, zero errors). Measured there: the Kernel Dispatch
+  // thread had 0 CPU time and 8 voluntary context switches for a whole session.
+  // This says whether that is because nothing is queued, or because the wakeup
+  // is lost. debug.canary.trace_overlapped=1.
+  if (XE_AE_DIAG_ENABLED("debug.canary.trace_overlapped")) {
+    XELOGI("TESTRIG(overlapped): ENQUEUE ptr={:08X} queue_depth={}",
+           overlapped_ptr, dispatch_queue_.size() + 1);
+  }
   dispatch_queue_.push_back([this, completion_callback, overlapped_ptr,
                              pre_callback, post_callback]() {
+    if (XE_AE_DIAG_ENABLED("debug.canary.trace_overlapped")) {
+      XELOGI("TESTRIG(overlapped): RUN ptr={:08X}", overlapped_ptr);
+    }
     if (pre_callback) {
       pre_callback();
     }
