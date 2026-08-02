@@ -60,7 +60,13 @@ behaviour on a common path · **LOW** = diagnostics only, inert when off.
 - **Cross-game risk:** affects **every title that uses XMA audio** - i.e. nearly
   all of them. `"new"` is the upstream-intended implementation and is what
   XenDroid ships, but any title that happened to work under `"old"` should be
-  re-checked. **Re-test Halo 3 and Geometry Wars before release.**
+  re-checked.
+- **✅ Halo 3 re-tested 2026-08-02 — NO REGRESSION.** Boots, reaches gameplay,
+  zero errors, `XMA Decoder` actively decoding (85 ticks/6s), `MAIN_THREAD` not
+  pegged, rendering unchanged. Its pre-existing character collapse is also
+  unchanged - the change moved nothing in either direction, which is exactly what
+  a regression test wants. See `docs/games/4D5307E6 - Halo 3.md`.
+- **Still to re-test:** Geometry Wars Evolved, Experience Disc.
 
 
 ### ★ `headless=true` is now a default launch arg — **HIGH**
