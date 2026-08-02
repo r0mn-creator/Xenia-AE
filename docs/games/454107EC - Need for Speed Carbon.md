@@ -516,3 +516,44 @@ find which one stops advancing. That names the decode bug.
 2. "`VdSwap` count is 0, the GPU has stopped presenting" - **wrong**, `VdSwap` is
    `kHighFrequency` and high-frequency logging was off. The screen was animating
    the whole time. Trust pixels over the log.
+
+---
+
+# 2026-08-02 — XMA measured across a live audio cut
+
+Probe `debug.canary.trace_xma` logs `XMA_CONTEXT_DATA` around every decode
+(1-in-16 sampled, plus ALWAYS on error or on a decode that advances neither
+offset). Captured across a race up to the moment the user reported audio cutting.
+
+| finding | value |
+|---|---|
+| decoder errors (`err_set` / `parser_error_set`) | **ZERO** |
+| decodes still running after the cut | **YES** |
+| AAudio | `STARTED`, `xrun_count: 0`, `frames_written` advancing, `xenia_frames_queued: 7` |
+| decodes producing NO output | **2343 / 4451 (53%)** |
+| …starved (`in0_valid=0 in1_valid=0`) | 2081 |
+| **…had valid input, still produced nothing** | **869** |
+| contexts affected | many (34, 21, 21, 20 …), not one stuck context |
+| `out_write_off` values seen | 0, 4, 8, 12, 16, 20 (advances by 4, wraps at `out_blocks=24`) |
+
+## ⚠️ Correction to the previous entry
+The earlier claim that the audio dropout and the post-race load stall are "one
+bug, two symptoms" is **not supported**. At the post-race stall the decoder was
+parked; during a race after audio cuts it is **still decoding**. They may be
+distinct, or the stall may be a later consequence. Do not treat them as one until
+proven.
+
+Also note the pipeline is NOT broken: audio still reaches AAudio with zero
+xruns. What changes is the CONTENT - as more contexts fail to produce samples,
+the guest mixes progressively more silence, which matches audio fading to nothing
+rather than stopping abruptly.
+
+## The defect to chase
+The **869** decodes that had valid input and advanced neither
+`output_buffer_write_offset` nor `input_buffer_read_offset`. A decode handed
+valid input must consume or produce something; these did neither.
+
+Next: log inside `XmaContextOld::Decode()` for exactly that case - which early
+return is taken, and the state of `current_buffer` / packet counts / subframe
+position at entry.
+
