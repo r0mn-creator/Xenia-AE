@@ -11,7 +11,15 @@ public class KeyMapConfig {
         KeyEvent.KEYCODE_DPAD_RIGHT, 
         KeyEvent.KEYCODE_DPAD_DOWN, 
         96, 97, 99, 100, 109, 108,
-		102, 103, 104, 105, 0, 0,
+        // LShoulder, RShoulder, LThumbPress, RThumbPress, LTrigger, RTrigger.
+        //
+        // These were wrong: 104/105 are BUTTON_L2/BUTTON_R2 - the TRIGGERS -
+        // but they were bound to the thumbstick clicks, while the triggers
+        // themselves were left at 0 (unmapped). Because the runtime map is
+        // keyed by keycode, binding a trigger by hand to 104/105 then silently
+        // shadowed the thumb press. Thumbstick clicks are BUTTON_THUMBL/R
+        // (106/107).
+        102, 103, 106, 107, 104, 105,
     };
 
     public static final int[] KEY_NAMEIDS = new int[]{

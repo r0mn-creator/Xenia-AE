@@ -141,6 +141,29 @@ public class SettingsCategoryActivity extends AppCompatActivity {
     }
 
     private void buildInput() {
+        // Connected controllers first: when a pad misbehaves this is the screen
+        // the user opens, and the first question is always "is it even seen?".
+        java.util.List<ControllerAutoMap.Pad> pads = ControllerAutoMap.connectedPads();
+        if (pads.isEmpty()) {
+            addClickRow("No controller detected",
+                    "Connect a controller and it will be mapped automatically.", null);
+        } else {
+            for (ControllerAutoMap.Pad pad : pads) {
+                addClickRow(pad.name, ControllerAutoMap.profileLabel(pad.profile), null);
+            }
+        }
+        addClickRow("Re-detect controllers",
+                "Forget saved layouts and map every connected controller again. "
+                        + "Use this if a pad was mapped as the wrong type.",
+                v -> {
+                    ControllerAutoMap.forgetAll(this);
+                    ControllerAutoMap.Pad p = ControllerAutoMap.autoMapNewDevices(this);
+                    android.widget.Toast.makeText(this,
+                            p != null ? "Remapped: " + p.name : "No controller connected",
+                            android.widget.Toast.LENGTH_SHORT).show();
+                    recreate();
+                });
+
         addClickRow(getString(R.string.key_mappers), null,
                 v -> startActivity(new Intent(this, KeyMapActivity.class)));
         addClickRow(getString(R.string.virtual_pad_edit), null,

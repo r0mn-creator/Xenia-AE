@@ -136,11 +136,25 @@ namespace xe {
                             case ui::VirtualKey::kXInputPadRShoulder:
                                 buttons |= 0x0200;  // XINPUT_GAMEPAD_RIGHT_SHOULDER
                                 break;
+                            // Triggers are ANALOG on the 360 (0..255). The Java
+                            // side sends the real axis value when the pad has
+                            // analog triggers, and KEY_VALUE_UNUSED (-1) when
+                            // the press came from a digital button or the
+                            // on-screen pad - which still has to read as fully
+                            // pressed. Racing titles steer throttle and brake
+                            // directly off these, so clamping everything to
+                            // 0xFF makes them undrivable.
                             case ui::VirtualKey::kXInputPadLTrigger:
-                                left_trigger = 0xFF;
+                                left_trigger =
+                                    ks.value < 0 ? 0xFF
+                                                 : uint8_t(ks.value > 255 ? 255
+                                                                          : ks.value);
                                 break;
                             case ui::VirtualKey::kXInputPadRTrigger:
-                                right_trigger = 0xFF;
+                                right_trigger =
+                                    ks.value < 0 ? 0xFF
+                                                 : uint8_t(ks.value > 255 ? 255
+                                                                          : ks.value);
                                 break;
                             case ui::VirtualKey::kXInputPadLThumbLeft:
                                 thumb_lx =ks.value;//+= SHRT_MIN;
