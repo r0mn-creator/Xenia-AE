@@ -41,6 +41,36 @@ behaviour on a common path · **LOW** = diagnostics only, inert when off.
 
 ## 2026-08-02
 
+### Performance experiments — measured, NO gain — **LOW**
+- **Files:** `AndroidManifest.xml` (`appCategory="game"`),
+  `EmulatorActivity` (sustained performance mode),
+  `PerformanceHints.java` (ADPF hint session)
+- **Result: none of these moved the frame rate.** Recorded so they are not
+  re-tried:
+
+| lever | result |
+|---|---|
+| `appCategory="game"` + `setSustainedPerformanceMode` | no gain |
+| ADPF hint session (5 tids, 33ms target) | no gain |
+| Turnip driver on NFS Carbon | **worse**: 11.8 -> 7.9 FPS |
+| all diagnostics/probes off | no gain |
+| core affinity pinning | **not needed** - already optimal |
+
+- **Why they cannot help, measured:** during gameplay `Main XThread` ~107%,
+  `MainThread` ~100%, `GPU Commands` ~95-100% of a core each, with **0% of
+  samples on an efficiency core** and cpu7 already at its full 3187/3187 MHz.
+  There is no idle clock to unlock and no misplacement to correct.
+- **Turnip specifically:** `GPU Commands` CPU *dropped* 97% -> 56%, but FPS fell
+  to 7.9 - the thread was **waiting**, not being efficient. Turnip costs less
+  CPU per draw but executes slower on this GPU. Halo 3 still needs Turnip
+  (stock miscompiles a shader), so per-game driver selection is the right model.
+- **⚠️ Measure across several samples.** A single reading of 12.9 looked like a
+  10% win; three more gave 11.9 / 8.9 / 10.9. Scene variation on this title
+  spans 8.9-12.9, which is wider than any effect measured so far.
+- **What is left:** the bottleneck is the emulator's own code - the guest threads
+  stayed pinned at ~105% through six configurations. Next step is profiling
+  (`simpleperf`) on `Main XThread`, not more hints.
+
 ### ★ Diagnostics now default OFF (they defaulted ON) — **HIGH**
 - **Files:** `base/testrig_debug_server.h`, `gpu/vulkan/vulkan_shared_memory.cc`,
   `gpu/vulkan/vulkan_command_processor.cc`, `gpu/command_processor.cc`,

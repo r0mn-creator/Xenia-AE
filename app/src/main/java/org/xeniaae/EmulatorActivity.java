@@ -499,6 +499,55 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
                 }
             };
 
+    /**
+     * Asks Android for stable sustained clocks rather than burst-then-throttle.
+     *
+     * <p>Measured on this device: the two guest threads sit pinned at ~105% of a
+     * core each for the whole session, so this is not a bursty workload - it is
+     * a sustained one, and the default DVFS behaviour of boosting then backing
+     * off is the wrong shape for it. Sustained mode asks the governor for a
+     * clock it can hold indefinitely.
+     *
+     * <p>Particularly worth it on a handheld with ACTIVE COOLING, where the
+     * thermal ceiling is higher than the governor's default assumptions.
+     *
+     * <p>Paired with android:appCategory="game" in the manifest, which is what
+     * tells Android - and OEM performance profiles - what this app actually is.
+     */
+    private void request_sustained_performance() {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N
+                    && getWindow() != null) {
+                getWindow().setSustainedPerformanceMode(true);
+            }
+        } catch (Exception e) {
+            // Not supported on this device - harmless, just skip it.
+            android.util.Log.i("XeniaAE", "sustained performance mode unavailable: " + e);
+        }
+    }
+
+    /**
+     * Registers the emulator's hot threads with ADPF.
+     *
+     * <p>Retried on a delay because the threads it needs to name - the guest
+     * threads and the GPU command thread - do not exist yet when the activity
+     * resumes; they are created as the emulator spins up. Looking once would
+     * always find nothing.
+     */
+    private void start_performance_hints() {
+        final Handler h = new Handler(Looper.getMainLooper());
+        final int[] attempts = {0};
+        h.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                PerformanceHints.start(EmulatorActivity.this);
+                if (++attempts[0] < 10) {
+                    h.postDelayed(this, 2000);
+                }
+            }
+        }, 3000);
+    }
+
     /** Starts controller detection; safe to call more than once. */
     private void start_controller_detection() {
         if (input_manager != null) {
@@ -641,6 +690,8 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
     {
         super.onResume();
         start_controller_detection();
+        request_sustained_performance();
+        start_performance_hints();
         if(returning_from_game_settings_){
             returning_from_game_settings_=false;
             // Still paused from before - reopen the pause menu so the user
@@ -707,6 +758,7 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
             input_manager.unregisterInputDeviceListener(input_device_listener);
             input_manager = null;
         }
+        PerformanceHints.stop();
         super.onDestroy();
         System.exit(0);
     }
