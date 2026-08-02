@@ -563,7 +563,7 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         view.findViewById(R.id.row_exit).setOnClickListener(v->{
             suppress_resume_on_dismiss[0]=true;
             pause_dialog_.dismiss();
-            finish();
+            return_to_library();
         });
 
         pause_dialog_.show();
@@ -609,6 +609,30 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
             // explicitly chooses Resume rather than snapping back into gameplay.
             showPauseMenu();
         }
+    }
+
+    /**
+     * Leaves a game and returns to the library.
+     *
+     * <p>The emulator runs in its own {@code :emu} process and {@link #onDestroy}
+     * kills that process outright, because the native core cannot be torn down
+     * and re-initialised in place - a second game launched into the same process
+     * would fail. That kill is deliberate and has to stay.
+     *
+     * <p>What was missing is that nothing brought the library back first, so
+     * exiting a game killed the only visible process and dropped the user on the
+     * home screen instead of the game list. Starting MainActivity here hands the
+     * intent to the system before we exit, so it comes up in the main process
+     * whether or not that process is still alive - if Android reclaimed it while
+     * the emulator was using its memory, this relaunches it.
+     */
+    private void return_to_library() {
+        Intent intent = new Intent(this, MainActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        startActivity(intent);
+        finish();
     }
 
     @Override

@@ -41,6 +41,21 @@ behaviour on a common path · **LOW** = diagnostics only, inert when off.
 
 ## 2026-08-02
 
+### Exiting a game returns to the library instead of closing the app — **LOW**
+- **File:** `java/org/xeniaae/EmulatorActivity.java`
+- **What:** `Exit Game` now starts `MainActivity` before the emulator process
+  dies.
+- **Why:** `EmulatorActivity` runs in its own `:emu` process and `onDestroy()`
+  calls `System.exit(0)`. That kill is deliberate - the native core cannot be
+  re-initialised in place, so a second game launched into the same process would
+  fail - but nothing brought the library back first, so exiting killed the only
+  visible process and dropped the user on the home screen.
+- **Cross-game risk:** none - front-end navigation only, no engine behaviour.
+- **Also covers:** the main process being reclaimed by Android while the
+  emulator held ~1.4 GB. `NEW_TASK | CLEAR_TOP | SINGLE_TOP` relaunches it.
+- **Verified:** library -> game -> Exit Game lands back on `MainActivity`, with
+  the `:emu` process gone and the main process alive.
+
 ### ★ `xma_decoder` default changed `"old"` -> `"new"` — **HIGH**
 - **File:** `apu/xma_decoder.cc`
 - **Toggle:** `--xma_decoder=old` via `debug.canary.extra_args` restores it
