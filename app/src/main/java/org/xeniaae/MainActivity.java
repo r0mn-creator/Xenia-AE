@@ -54,6 +54,11 @@ import java.util.List;
 
 public class MainActivity extends AppCompatActivity implements GamePropertiesDialog.Listener {
 
+    /** Set by EmulatorActivity when a game's file could not be opened, so the
+     *  library is re-scanned and stale MediaStore ids are replaced. */
+    public static final String EXTRA_REFRESH_LIBRARY = "refresh_library";
+
+
     private static final int REQUEST_OPEN_GAME   = 1;
     private static final int REQUEST_PICK_ART    = 3;
     private static final int REQUEST_OPEN_FOLDER = 4;
@@ -135,6 +140,12 @@ public class MainActivity extends AppCompatActivity implements GamePropertiesDia
             storage_permission_pending = false;
             on_create();
             return;
+        }
+        if (getIntent() != null
+                && getIntent().getBooleanExtra(EXTRA_REFRESH_LIBRARY, false)) {
+            // Came back from a game whose file could not be opened.
+            getIntent().removeExtra(EXTRA_REFRESH_LIBRARY);
+            refreshGameList();
         }
         refreshAllGridFragments();
     }

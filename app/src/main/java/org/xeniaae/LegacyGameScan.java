@@ -31,7 +31,7 @@ class LegacyGameScan {
         return file_name.endsWith(".zar");
     }
 
-    private static DocumentFile get_default_xex_file(DocumentFile dir){
+    static DocumentFile get_default_xex_file(DocumentFile dir){
         DocumentFile[] files=dir.listFiles();
         if(files == null) return null;
         if(files.length == 0) return null;

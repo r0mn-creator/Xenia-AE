@@ -426,14 +426,17 @@ bool VulkanSharedMemory::UploadRanges(
         const uint32_t guest_addr = upload_range_start << page_size_log2();
         const uint32_t* dw = reinterpret_cast<const uint32_t*>(
             upload_buffer_mapping);
+        // TESTRIG(probe): scans up to 16 dwords on EVERY upload and then logs,
+        // on the thread that saturates during gameplay, so the WORK is gated,
+        // not just the log line - a disabled probe must cost nothing.
+        //
+        // ⚠️ The gate MUST NOT use `continue`. This is the body of the
+        // `while (upload_range_length)` upload loop: skipping the rest of the
+        // iteration also skips CmdVkCopyBuffer AND the loop-counter update, so
+        // guest memory never reaches the GPU and the loop never terminates.
+        // That is exactly what an earlier version of this guard did.
         uint32_t v0 = dw[0];
-        if (v0 != 0) {
-          // TESTRIG(probe): this scans up to 16 dwords on EVERY upload and then
-          // logs, on the same thread that saturates during gameplay. Gate the
-          // WORK, not just the log line - a disabled probe must cost nothing.
-          if (!XE_AE_DIAG_ENABLED("debug.canary.probe_upload")) {
-            continue;
-          }
+        if (v0 != 0 && XE_AE_DIAG_ENABLED("debug.canary.probe_upload")) {
           uint32_t checkable =
               std::min<uint32_t>(16, uint32_t(upload_buffer_size) / 4);
           bool uniform = checkable >= 4;

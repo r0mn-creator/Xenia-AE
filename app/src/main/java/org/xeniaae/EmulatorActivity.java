@@ -215,6 +215,22 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
     });
     void on_create(){
         String uri=getIntent().getStringExtra(EXTRA_GAME_URI);
+        final String game_title = getIntent().getStringExtra(EXTRA_GAME_TITLE);
+        // The library may hold a stale MediaStore URI: those are row ids, and
+        // MediaStore reassigns them on re-index (reboot, media scan, file move).
+        // The ISO is still there, the saved URI just points at nothing. Before
+        // this, the open failed inside nc_open_uri_fd, which logged and returned
+        // -1, so the emulator started against no file and sat there silently -
+        // it looked exactly like "tapping the game does nothing".
+        if (!GameUriResolver.canOpen(this, uri)) {
+            String resolved = GameUriResolver.resolve(this, uri, game_title);
+            if (GameUriResolver.canOpen(this, resolved)) {
+                uri = resolved;
+            } else {
+                show_missing_game_dialog(game_title);
+                return;
+            }
+        }
         game_uri_=uri;
         game_title_id_=getIntent().getStringExtra(EXTRA_GAME_TITLE_ID);
         org.xeniaae.emulator.Emulator.Path path=org.xeniaae.emulator.Emulator.Path.from(uri,-1);
@@ -631,6 +647,30 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
             // explicitly chooses Resume rather than snapping back into gameplay.
             showPauseMenu();
         }
+    }
+
+    /**
+     * Tells the user the game file is gone, instead of stalling on a black
+     * screen. Silent failure here previously read as "the emulator is broken".
+     */
+    private void show_missing_game_dialog(String title) {
+        new AlertDialog.Builder(this)
+                .setTitle("Can't open game")
+                .setMessage((title == null ? "This game" : title)
+                        + " couldn't be opened. Its file may have been moved,"
+                        + " renamed, or re-indexed by Android.\n\n"
+                        + "Refreshing your library usually fixes this.")
+                .setCancelable(false)
+                .setPositiveButton("Refresh library", (d, w) -> {
+                    Intent i = new Intent(this, MainActivity.class);
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                            | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    i.putExtra(MainActivity.EXTRA_REFRESH_LIBRARY, true);
+                    startActivity(i);
+                    finish();
+                })
+                .setNegativeButton("Back", (d, w) -> return_to_library())
+                .show();
     }
 
     /**
