@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is OFF everywhere by default; the one exception below is required.
+
+  Xbox 360 title icons come from image.xboxlive.com, which is keyed by title id
+  and covers effectively every title. It serves HTTP only - the HTTPS endpoint
+  does not respond - so without this exception Android silently blocks the
+  request and every game falls back to a generic placeholder.
+
+  Scoped to that single host, and the payload is a public 64x64 PNG: nothing
+  sensitive is sent, only a title id that is already printed in the game list.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">image.xboxlive.com</domain>
+    </domain-config>
+</network-security-config>

@@ -82,14 +82,25 @@ public class BoxArtManager {
                 Log.d(TAG, "XEX extraction skipped: " + e.getMessage());
             }
 
-            // 2. Libretro thumbnails — free, no API key
-            if (art == null && !sPaused.get()) {
-                art = fetchFromLibretro(game.title);
-            }
-
-            // 3. TheGamesDB — only if user set an API key in settings
+            // 2. TheGamesDB — real box art, but only if the user added an API
+            //    key in settings. Tried before the small sources so anyone who
+            //    has set a key gets proper artwork rather than a 64x64 icon.
             if (art == null && !sPaused.get()) {
                 art = fetchFromTheGamesDb(context, game.title);
+            }
+
+            // 3. Xbox Live marketplace icon, by title id. Small, but it has
+            //    something for effectively every title and needs no key, so it
+            //    is what stops the grid being a wall of placeholders.
+            if (art == null && !sPaused.get()) {
+                art = fetchFromMarketplace(game.titleId);
+            }
+
+            // 4. Libretro thumbnails. Last: the Xbox 360 set contains only 12
+            //    box arts in total (measured 2026-08-02), so it almost never
+            //    hits and is not worth a round-trip ahead of the others.
+            if (art == null && !sPaused.get()) {
+                art = fetchFromLibretro(game.title);
             }
 
             if (art != null) {
@@ -102,6 +113,33 @@ public class BoxArtManager {
                 });
             }
         });
+    }
+
+    /**
+     * Xbox Live marketplace icon, looked up by TITLE ID.
+     *
+     * <p>This is the only source that reliably has something for every game.
+     * It is keyed by title id rather than by name, so it does not care how the
+     * file was named or which region it is - the two things that make name
+     * matching miss. Measured: it returned an image for every title tested.
+     *
+     * <p>It is only 64x64, so it is a FALLBACK, not a replacement for real box
+     * art - but a correct small icon beats a generic placeholder, and the user
+     * can always set custom art per game, which takes priority over everything.
+     *
+     * <p>HTTP only: the HTTPS endpoint does not respond, which is why
+     * network_security_config.xml carries a scoped cleartext exception for this
+     * one host.
+     */
+    @Nullable
+    private static Bitmap fetchFromMarketplace(String titleId) {
+        if (titleId == null || titleId.length() != 8) {
+            return null;
+        }
+        final Bitmap result = downloadBitmap(
+                "http://image.xboxlive.com/global/t." + titleId + "/icon/0/8000");
+        if (result != null) Log.d(TAG, "Marketplace hit: " + titleId);
+        return result;
     }
 
     @Nullable
