@@ -100,8 +100,8 @@ public final class GameUriResolver {
                 }
                 // Directory entries are GOD/XBLA installs named by title;
                 // files are "<title>.iso" / ".zar".
-                if (name.equals(title)
-                        || stripExtension(name).equalsIgnoreCase(title)) {
+                if (normalize(name).equals(normalize(title))
+                        || normalize(stripExtension(name)).equals(normalize(title))) {
                     if (f.isDirectory()) {
                         DocumentFile xex = LegacyGameScan.get_default_xex_file(f);
                         return xex != null ? xex.getUri().toString() : null;
@@ -122,13 +122,24 @@ public final class GameUriResolver {
         }
         Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
         String[] projection = {MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME};
+        // Cannot express the punctuation-insensitive match in SQL, so scan the
+        // disc images and compare normalised names here.
         String selection = MediaStore.Downloads.DISPLAY_NAME + " LIKE ?";
-        String[] args = {title + ".%"};
+        String[] args = {"%.iso"};
+        final String want = normalize(title);
         try (Cursor c = ctx.getContentResolver()
                 .query(collection, projection, selection, args, null)) {
-            if (c != null && c.moveToFirst()) {
-                long id = c.getLong(c.getColumnIndexOrThrow(MediaStore.Downloads._ID));
-                return ContentUris.withAppendedId(collection, id).toString();
+            if (c != null) {
+                int idCol = c.getColumnIndexOrThrow(MediaStore.Downloads._ID);
+                int nameCol = c.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME);
+                while (c.moveToNext()) {
+                    String name = c.getString(nameCol);
+                    if (name == null) continue;
+                    if (normalize(stripExtension(name)).equals(want)) {
+                        long id = c.getLong(idCol);
+                        return ContentUris.withAppendedId(collection, id).toString();
+                    }
+                }
             }
         } catch (Exception e) {
             Log.w(TAG, "MediaStore re-resolve failed: " + e);
@@ -139,5 +150,35 @@ public final class GameUriResolver {
     private static String stripExtension(String name) {
         int dot = name.lastIndexOf('.');
         return dot > 0 ? name.substring(0, dot) : name;
+    }
+
+    /**
+     * Reduces a title or filename to something comparable.
+     *
+     * <p>The displayed title and the file on disk routinely disagree on
+     * punctuation: the library shows "Need for Speed: Carbon" (the scanner
+     * normalises to the canonical name) while the file is
+     * "Need for Speed - Carbon.iso". A literal comparison therefore fails on
+     * exactly the games that need re-resolving, which is what made the first
+     * version of this class miss.
+     *
+     * <p>So: lower-case, turn every separator into a space, drop anything that
+     * is not alphanumeric or space, and collapse runs of spaces. Both examples
+     * above reduce to "need for speed carbon".
+     */
+    private static String normalize(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length());
+        boolean lastSpace = false;
+        for (char c : s.toLowerCase().toCharArray()) {
+            if (Character.isLetterOrDigit(c)) {
+                sb.append(c);
+                lastSpace = false;
+            } else if (!lastSpace) {
+                sb.append(' ');
+                lastSpace = true;
+            }
+        }
+        return sb.toString().trim();
     }
 }
