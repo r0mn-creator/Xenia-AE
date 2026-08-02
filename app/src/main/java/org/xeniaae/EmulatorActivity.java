@@ -98,6 +98,14 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
 
     private long[] prev_cpu_ticks = null;
 
+    // TESTRIG(perf): the overlay reads /proc/self/stat, /proc/stat and tails
+    // xe.log once a second. Small, but it is real work and real file I/O during
+    // gameplay, and an FPS measurement should not include the cost of the thing
+    // displaying the FPS. debug.canary.overlay=0 disables it.
+    private boolean overlay_enabled() {
+        return !"0".equals(debugProp("debug.canary.overlay"));
+    }
+
     private final Runnable overlay_updater = new Runnable() {
         @Override
         public void run() {
@@ -294,6 +302,18 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         if (!"0".equals(debugProp("debug.canary.headless"))) {
             launch_args.add("--headless=true");
         }
+        // TESTRIG(perf): log I/O off by default.
+        //
+        // flush_log writes every batch straight to disk and log_to_stdout mirrors
+        // every line into logcat. Both are per-line costs paid at ~40 log sites
+        // in the GPU hot paths alone, on threads that saturate during gameplay.
+        // Canary AE is a test bed, so this has to be switchable rather than
+        // removed - debug.canary.logging=1 turns it back on when a trace is
+        // actually wanted.
+        if (!"1".equals(debugProp("debug.canary.logging"))) {
+            launch_args.add("--flush_log=false");
+            launch_args.add("--log_to_stdout=false");
+        }
         String extra_args = debugProp("debug.canary.extra_args");
         if (!extra_args.isEmpty()) {
             for (String arg : extra_args.trim().split("\\s+")) {
@@ -359,7 +379,9 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
                     | android.view.Gravity.START;
             status_overlay.setLayoutParams(lp);
         }
-        if (sPrefs2.getBoolean("show_status_overlay", false)) {
+        // Already opt-in via the setting; debug.canary.overlay=0 also kills it
+        // for a clean-room FPS measurement without changing the user's setting.
+        if (sPrefs2.getBoolean("show_status_overlay", false) && overlay_enabled()) {
             status_overlay.setVisibility(View.VISIBLE);
             overlay_ui_handler = new Handler(Looper.getMainLooper());
             overlay_thread = new HandlerThread("EmulatorOverlayStats");

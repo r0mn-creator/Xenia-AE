@@ -12,6 +12,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(probe)
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -326,7 +327,8 @@ void CommandProcessor::WorkerThreadMain() {
         diag_wait_iterations++;
         write_ptr_index = write_ptr_index_.load();
         auto diag_now = std::chrono::steady_clock::now();
-        if (diag_now - diag_last_log > std::chrono::milliseconds(500)) {
+        if (XE_AE_DIAG_ENABLED("debug.canary.probe_cp") &&
+            diag_now - diag_last_log > std::chrono::milliseconds(500)) {
           diag_last_log = diag_now;
           XELOGI(
               "REENTER_DIAG_CP wait-loop: read_ptr={:08X} write_ptr={:08X} "

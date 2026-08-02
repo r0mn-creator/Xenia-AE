@@ -30,14 +30,22 @@
 //
 // TOGGLING (so you can play a game with zero overhead, then flip a subsystem
 // on to look inside without reinstalling anything):
-//   adb shell setprop debug.canary.testrig.master 0   # disable EVERYTHING
-//   adb shell setprop debug.canary.testrig.gpu 0      # disable just GPU
-//   adb shell setprop debug.canary.testrig.master 1   # re-enable (default)
+//   adb shell setprop debug.canary.testrig.master 1   # enable the harness
+//   adb shell setprop debug.canary.testrig.gpu 1      # enable just GPU
+//   adb shell setprop debug.canary.testrig.master 0   # back to off (default)
 // Any subsystem name matches the string passed to Expose() (gpu, audio, jit,
-// mem, kernel, ...). Unset/anything-but-"0"-or-"false" means enabled - the
-// default (nothing set) is fully enabled, matching how this build has always
-// behaved. "debug.*" properties can be set by `adb shell setprop` on any
-// device without root - no special permissions needed.
+// mem, kernel, ...).
+//
+// ★ DEFAULT IS OFF. Nothing set means NO instrumentation runs.
+//
+// This used to default ON, which meant 18 hot-path GPU probes and 5 TCP debug
+// servers were live in every normal play session - and because "debug.*"
+// properties do not survive a reboot, turning them off was undone by the next
+// restart. Diagnostics must never be the default: a frame-rate measurement has
+// to measure emulation, not instrumentation.
+//
+// "debug.*" properties can be set by `adb shell setprop` on any device without
+// root - no special permissions needed.
 // A port being "disabled" means: (a) its live-data push loop stops calling the
 // snapshot function and instead tells a connected client it's off, and (b) any
 // hot-path instrumentation gated with HotPathEnabledCached() (see below) stops
@@ -131,6 +139,10 @@ inline bool PropertyEnabled(const std::string& prop_name,
       std::string(value) == "false") {
     return false;
   }
+  if ((value[0] == '1' && value[1] == '\0') ||
+      std::string(value) == "true") {
+    return true;
+  }
   return default_value;
 }
 
@@ -153,7 +165,7 @@ inline std::unordered_map<uint16_t, PortServer*>& registry() {
 inline void ClientLoop(int client_fd, PortServer* server) {
   while (server->running.load(std::memory_order_relaxed)) {
     std::string snapshot;
-    if (PropertyEnabled("debug.canary.testrig.master", true) &&
+    if (PropertyEnabled("debug.canary.testrig.master", false) &&
         PropertyEnabled("debug.canary.testrig." + server->subsystem_name,
                         true)) {
       snapshot = server->snapshot_fn ? server->snapshot_fn() : std::string();
@@ -247,7 +259,7 @@ inline void Expose(uint16_t port, const std::string& subsystem_name,
 // hot path, use HotPathEnabledCached() instead so toggling doesn't cost a
 // property lookup on every call.
 inline bool IsEnabled(const std::string& subsystem_name) {
-  return internal::PropertyEnabled("debug.canary.testrig.master", true) &&
+  return internal::PropertyEnabled("debug.canary.testrig.master", false) &&
          internal::PropertyEnabled(
              "debug.canary.testrig." + subsystem_name, true);
 }

@@ -41,6 +41,34 @@ behaviour on a common path · **LOW** = diagnostics only, inert when off.
 
 ## 2026-08-02
 
+### ★ Diagnostics now default OFF (they defaulted ON) — **HIGH**
+- **Files:** `base/testrig_debug_server.h`, `gpu/vulkan/vulkan_shared_memory.cc`,
+  `gpu/vulkan/vulkan_command_processor.cc`, `gpu/command_processor.cc`,
+  `java/org/xeniaae/EmulatorActivity.java`
+- **Toggles:** `testrig.master` + per-subsystem, `probe_upload`, `probe_gbuf`,
+  `probe_cp`, `logging`, `overlay` — all default **off**, all switchable on
+- **What was wrong:** the testrig harness **defaulted to ON**. Its own comment
+  said so: *"the default (nothing set) is fully enabled"*. That left **18
+  hot-path GPU probes and 5 TCP debug servers live in every normal play
+  session** — and since `debug.*` properties do not survive a reboot, turning
+  them off was undone by the next restart.
+- **Also gated (the WORK, not just the log line — a disabled probe must cost
+  nothing):**
+  - `UPLOAD_UNIFORM` scanned up to 16 dwords on **every** shared-memory upload,
+    on the thread measured at 98% of a core during gameplay
+  - `GBUF` scanned 4 x 256KB of guest RAM at swap time
+  - `REENTER_DIAG_CP` logged inside the ring-buffer wait loop
+  - `flush_log` (every batch to disk) and `log_to_stdout` (every line to logcat)
+  - the status overlay (`/proc/self/stat` + `/proc/stat` + tailing `xe.log`, 1Hz)
+- **Bug fixed on the way:** `PropertyEnabled` could only ever *disable* a
+  default-on feature - an explicit `1` did **not** turn anything on. With the
+  default flipped it now honours `1`, so every probe stays usable for testing.
+- **Cross-game risk:** none to correctness - diagnostics only. Affects
+  **performance in every title**, which is the point.
+- **Principle:** Canary AE is a test bed, so nothing is deleted; but the default
+  must be silent. A frame-rate measurement has to measure emulation, not
+  instrumentation. With all tests off, Canary AE should behave like Xenia AE.
+
 ### Exiting a game returns to the library instead of closing the app — **LOW**
 - **File:** `java/org/xeniaae/EmulatorActivity.java`
 - **What:** `Exit Game` now starts `MainActivity` before the emulator process

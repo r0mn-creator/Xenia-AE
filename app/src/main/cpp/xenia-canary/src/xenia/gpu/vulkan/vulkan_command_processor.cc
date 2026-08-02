@@ -1388,8 +1388,10 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // after resolve; if flat/near-empty, the EDRAM->shared-memory resolve itself
   // isn't landing on Adreno. One-shot.
   {
+    // TESTRIG(probe): scans 256KB of guest RAM per address. Bounded to 4 runs,
+    // but that is still a multi-megabyte scan during startup.
     static int gbuf_logged = 0;
-    if (gbuf_logged < 4) {
+    if (XE_AE_DIAG_ENABLED("debug.canary.probe_gbuf") && gbuf_logged < 4) {
       const uint32_t kGbufAddrs[] = {0x044B0000u, 0x04780000u, 0x043FC000u,
                                      0x04E20000u};
       bool any_populated = false;

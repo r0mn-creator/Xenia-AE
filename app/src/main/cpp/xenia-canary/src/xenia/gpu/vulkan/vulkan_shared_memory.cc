@@ -13,6 +13,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/ae_fix_toggle.h"  // TESTRIG(probe)
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/vulkan/deferred_command_buffer.h"
@@ -427,6 +428,12 @@ bool VulkanSharedMemory::UploadRanges(
             upload_buffer_mapping);
         uint32_t v0 = dw[0];
         if (v0 != 0) {
+          // TESTRIG(probe): this scans up to 16 dwords on EVERY upload and then
+          // logs, on the same thread that saturates during gameplay. Gate the
+          // WORK, not just the log line - a disabled probe must cost nothing.
+          if (!XE_AE_DIAG_ENABLED("debug.canary.probe_upload")) {
+            continue;
+          }
           uint32_t checkable =
               std::min<uint32_t>(16, uint32_t(upload_buffer_size) / 4);
           bool uniform = checkable >= 4;
