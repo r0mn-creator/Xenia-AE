@@ -9,6 +9,14 @@
 
 #include "xenia/base/logging.h"
 
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+// TESTRIG(live-log-level)
+#include <sys/system_properties.h>
+
+#include <atomic>
+#include <cstdlib>
+#endif
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -476,7 +484,42 @@ void logging::ToggleLogLevel() {
   cvars::log_level = swap;
 }
 
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+// TESTRIG(live-log-level): let the log level be raised WHILE a game runs.
+//
+// Deep tracing (level 3) is unusable as a launch setting: it logs every kernel
+// call, and with flush_log on, NFS Carbon could not even reach its title screen
+// - the emulator went I/O-bound and looked frozen, which is indistinguishable
+// from the bug being investigated. Being able to boot at full speed and switch
+// tracing on AT the moment of interest is the difference between a usable trace
+// and no trace.
+//
+//   adb shell setprop debug.canary.log_level_live 3   # start tracing
+//   adb shell setprop debug.canary.log_level_live 2   # stop
+//
+// ShouldLog is extremely hot, so the property is sampled once every 4096 calls
+// rather than per line. In practice that is well under a second of gameplay.
+static std::atomic<uint32_t> g_live_log_poll_counter{0};
+
+static void XeRefreshLiveLogLevel() {
+  if ((g_live_log_poll_counter.fetch_add(1, std::memory_order_relaxed) & 0xFFF) !=
+      0) {
+    return;
+  }
+  char buf[PROP_VALUE_MAX] = {};
+  if (__system_property_get("debug.canary.log_level_live", buf) > 0 && buf[0]) {
+    int value = std::atoi(buf);
+    if (value >= 0 && value <= 4) {
+      cvars::log_level = value;
+    }
+  }
+}
+#endif
+
 bool logging::ShouldLog(LogLevel log_level, uint32_t log_mask) {
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+  XeRefreshLiveLogLevel();
+#endif
   return static_cast<int32_t>(log_level) <= cvars::log_level &&
          (log_mask & cvars::log_mask) == 0;
 }

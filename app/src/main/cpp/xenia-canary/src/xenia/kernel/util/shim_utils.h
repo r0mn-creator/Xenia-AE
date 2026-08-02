@@ -573,7 +573,13 @@ struct ExportRegistrerHelper {
         // The make_tuple order is undefined per the C++ standard and
         // cause inconsitencies between msvc and clang.
         std::tuple<Ps...> params = {Ps(init)...};
-        if (TAGS & xe::cpu::ExportTag::kLog &&
+        // TESTRIG(kernel-call-trace): the kLog tag gates this, and whole
+        // subsystems do not carry it - not one of the 51 xam_net exports does.
+        // That made "no NetDll calls in the trace" look like evidence the game
+        // never touched the network, when the calls simply could not be
+        // printed. log_all_kernel_calls ignores the tag so absence of a call in
+        // the log actually means absence of the call.
+        if ((TAGS & xe::cpu::ExportTag::kLog || cvars::log_all_kernel_calls) &&
             (!(TAGS & xe::cpu::ExportTag::kHighFrequency) ||
              cvars::log_high_frequency_kernel_calls)) {
           PrintKernelCall(export_entry, params);
