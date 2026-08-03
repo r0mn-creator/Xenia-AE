@@ -66,10 +66,18 @@ public class BoxArtManager {
             return;
         }
 
-        // Disk cache hit — load instantly
+        // Disk cache hit - show it instantly, then decide whether to upgrade.
         final File cached = cachedFile(context, game);
+        final int haveTier = cachedTier(context, game);
         if (cached.exists()) {
             Glide.with(imageView).load(cached).placeholder(R.mipmap.ic_launcher).into(imageView);
+            if (haveTier >= TIER_GAMESDB) {
+                return;  // already the best available - never re-query the API
+            }
+            // Below the top tier: try to improve it in the background, but keep
+            // showing what we have so the grid never flashes a placeholder.
+            imageView.setTag(game.uri);
+            sExecutor.submit(() -> upgradeArt(context, game, imageView, haveTier));
             return;
         }
 
@@ -79,36 +87,49 @@ public class BoxArtManager {
         sExecutor.submit(() -> {
             if (sPaused.get()) return;
             Bitmap art = null;
+            int firstFetchTier = TIER_NONE;
 
-            // 1. XEX embedded thumbnail (offline, fastest)
+            // First fetch: walk the hierarchy worst-to-best and keep the best
+            // that answers, recording its tier. Later loads only reach for tiers
+            // ABOVE what is cached, so this is the only time a game can cost an
+            // API request - and a game already at the top never costs another.
+
+            // 1. XEX embedded thumbnail - instant and offline.
             try {
                 art = XexThumbnailExtractor.extract(context, Uri.parse(game.uri));
+                if (art != null) firstFetchTier = TIER_XEX;
             } catch (Exception e) {
                 Log.d(TAG, "XEX extraction skipped: " + e.getMessage());
             }
 
-            // 2. TheGamesDB — real box art, but only if the user added an API
-            //    key in settings. Tried before the small sources so anyone who
-            //    has set a key gets proper artwork rather than a 64x64 icon.
-            if (art == null && !sPaused.get()) {
-                art = fetchFromTheGamesDb(context, game.title);
+            // 2. Xbox Live marketplace icon, by title id. 64x64, but it exists
+            //    for effectively every title and needs no key.
+            if (!sPaused.get()) {
+                Bitmap mk = fetchFromMarketplace(game.titleId);
+                if (mk != null) {
+                    art = mk;
+                    firstFetchTier = TIER_MARKETPLACE;
+                }
             }
 
-            // 3. Xbox Live marketplace icon, by title id. Small, but it has
-            //    something for effectively every title and needs no key, so it
-            //    is what stops the grid being a wall of placeholders.
-            if (art == null && !sPaused.get()) {
-                art = fetchFromMarketplace(game.titleId);
+            // 3. TheGamesDB - real box art, if the user supplied a key.
+            if (!sPaused.get()) {
+                Bitmap db = fetchFromTheGamesDb(context, game.title);
+                if (db != null) {
+                    art = db;
+                    firstFetchTier = TIER_GAMESDB;
+                }
             }
 
-            // 4. Libretro thumbnails. Last: the Xbox 360 set contains only 12
-            //    box arts in total (measured 2026-08-02), so it almost never
-            //    hits and is not worth a round-trip ahead of the others.
+            // 4. Libretro. Last: the Xbox 360 set has 12 box arts in total
+            //    (measured 2026-08-02), so it almost never hits.
             if (art == null && !sPaused.get()) {
                 art = fetchFromLibretro(game.title);
+                if (art != null) firstFetchTier = TIER_MARKETPLACE;
             }
 
             if (art != null) {
+                setCachedTier(context, game, firstFetchTier);
                 saveToDiskCache(cached, art);
                 final Bitmap finalArt = art;
                 sMain.post(() -> {
@@ -357,6 +378,78 @@ public class BoxArtManager {
      *
      * @return how many cached covers were removed.
      */
+    /**
+     * Tries to replace cached art with something better.
+     *
+     * <p>Only reaches for a tier ABOVE what is already cached, so a game showing
+     * real box art never costs another API request, and one showing a 64x64 icon
+     * gets one chance to improve per library load.
+     */
+    private static void upgradeArt(Context context, MainActivity.GameEntry game,
+                                   ImageView imageView, int haveTier) {
+        if (sPaused.get()) return;
+        Bitmap better = null;
+        int newTier = haveTier;
+
+        if (haveTier < TIER_MARKETPLACE) {
+            better = fetchFromMarketplace(game.titleId);
+            if (better != null) newTier = TIER_MARKETPLACE;
+        }
+        if (!sPaused.get() && haveTier < TIER_GAMESDB) {
+            Bitmap best = fetchFromTheGamesDb(context, game.title);
+            if (best != null) {
+                better = best;
+                newTier = TIER_GAMESDB;
+            }
+        }
+        if (better == null || newTier <= haveTier) {
+            return;
+        }
+        saveToDiskCache(cachedFile(context, game), better);
+        setCachedTier(context, game, newTier);
+        final Bitmap shown = better;
+        imageView.post(() -> {
+            if (imageView.getTag() != null && imageView.getTag().equals(game.uri)) {
+                imageView.setImageBitmap(shown);
+            }
+        });
+        Log.d(TAG, "art upgraded to tier " + newTier + ": " + game.title);
+    }
+
+    /**
+     * Clears cached covers so they are fetched again.
+     *
+     * @param keepBest when true, art already at the top tier is KEPT. Pull-to-
+     *                 refresh uses this so a routine refresh does not spend the
+     *                 monthly API allowance re-downloading art we already have
+     *                 at full quality; only games still on a placeholder or a
+     *                 64x64 icon are retried.
+     */
+    static int clearCache(Context context, boolean keepBest) {
+        File dir = new File(context.getFilesDir(), "covers");
+        File[] files = dir.listFiles();
+        if (files == null) return 0;
+        if (!keepBest) {
+            context.getSharedPreferences(TIER_PREFS, Context.MODE_PRIVATE)
+                    .edit().clear().apply();
+            int n = 0;
+            for (File f : files) if (f.delete()) n++;
+            return n;
+        }
+        // Keep top-tier art: map cache files back to the games that own them.
+        java.util.HashSet<String> keep = new java.util.HashSet<>();
+        for (MainActivity.GameEntry g : MainActivity.sGames) {
+            if (cachedTier(context, g) >= TIER_GAMESDB) {
+                keep.add(cachedFile(context, g).getName());
+            }
+        }
+        int n = 0;
+        for (File f : files) {
+            if (!keep.contains(f.getName()) && f.delete()) n++;
+        }
+        return n;
+    }
+
     static int clearCache(Context context) {
         File dir = new File(context.getFilesDir(), "covers");
         File[] files = dir.listFiles();
@@ -368,6 +461,37 @@ public class BoxArtManager {
             if (f.delete()) n++;
         }
         return n;
+    }
+
+    // Art quality tiers, worst to best. Cached art records the tier it came
+    // from so a later run can UPGRADE it instead of settling for whatever was
+    // found first.
+    //
+    // XEX is instant and offline but tiny; the marketplace icon is 64x64 but
+    // exists for nearly every title; TheGamesDB is real box art but costs an API
+    // request from a monthly allowance. So: show something immediately, replace
+    // it when something better arrives, and never re-fetch a tier we already
+    // have at the top.
+    static final int TIER_NONE = 0;
+    static final int TIER_XEX = 1;
+    static final int TIER_MARKETPLACE = 2;
+    static final int TIER_GAMESDB = 3;
+
+    private static final String TIER_PREFS = "boxart_tiers";
+
+    private static int cachedTier(Context ctx, MainActivity.GameEntry game) {
+        return ctx.getSharedPreferences(TIER_PREFS, Context.MODE_PRIVATE)
+                .getInt(cacheKey(game), TIER_NONE);
+    }
+
+    private static void setCachedTier(Context ctx, MainActivity.GameEntry game, int tier) {
+        ctx.getSharedPreferences(TIER_PREFS, Context.MODE_PRIVATE)
+                .edit().putInt(cacheKey(game), tier).apply();
+    }
+
+    private static String cacheKey(MainActivity.GameEntry game) {
+        return game.titleId != null && !game.titleId.isEmpty()
+                ? game.titleId : String.valueOf(game.uri);
     }
 
     static File cachedFile(Context context, MainActivity.GameEntry game) {

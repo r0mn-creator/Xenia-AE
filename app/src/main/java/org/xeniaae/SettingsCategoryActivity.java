@@ -219,7 +219,9 @@ public class SettingsCategoryActivity extends AppCompatActivity {
                 "Clears cached covers and downloads them again. Use this after "
                         + "adding an API key, or if a game has the wrong art.",
                 v -> {
-                    int n = BoxArtManager.clearCache(this);
+                    // Explicit user action in Settings: clear EVERYTHING, including
+                    // top-tier art, so a wrong match can be corrected.
+                    int n = BoxArtManager.clearCache(this, false);
                     android.widget.Toast.makeText(this,
                             "Cleared " + n + " cached covers - reopen your library",
                             android.widget.Toast.LENGTH_LONG).show();

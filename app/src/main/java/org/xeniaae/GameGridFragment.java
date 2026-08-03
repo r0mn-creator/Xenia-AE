@@ -51,7 +51,9 @@ public class GameGridFragment extends Fragment {
         // Previously this only called notifyDataSetChanged(), i.e. it redrew the
         // same cached data - so the gesture appeared to do nothing.
         swipe.setOnRefreshListener(() -> {
-            BoxArtManager.clearCache(requireContext());
+            // keepBest: routine refreshes must not re-spend the API allowance
+            // on art we already have at full quality.
+            BoxArtManager.clearCache(requireContext(), true);
             final androidx.fragment.app.FragmentActivity host = requireActivity();
             if (host instanceof MainActivity) {
                 ((MainActivity) host).refreshGameList();
