@@ -11,13 +11,17 @@ Android 13.
 **Build:** Canary AE `v0.3.0-canary`.
 
 Legend — **Loads**: reaches the game's own menus · **Playable**: can be played
-through normally · ⚠️ = works with caveats.
+through normally · ⚠️ = partly, with caveats · ❌ = no · — = not tested.
 
 | Game | Title ID | Loads | Playable | Issues |
 |---|---|---|---|---|
 | Need for Speed: Carbon | `454107EC` | ✅ | ✅ | None known. Completes races; audio and level loading fixed in v0.3.0. |
-| Geometry Wars: Retro Evolved | *(TBC)* | ✅ | ✅ | None reported — "works like a champ". |
+| Metal Gear Rising: Revengeance | `4B4E080A` | ✅ | ✅ | None reported — appears fully playable. |
+| Geometry Wars: Retro Evolved | `584B87F0` | ✅ | ✅ | None reported — "works like a champ". Launched from the Xbox Live Arcade *Experience Disc* (`584107ED`), which itself loads fine. |
 | Halo 3 | `4D5307E6` | ✅ | ⚠️ | Runs and is controllable, but **character models collapse** into a spiky ball, and the **main-menu vista renders upside-down**. Needs a **Turnip** driver (the stock Qualcomm driver gives a flat navy menu) and currently an **Adreno 700-series** GPU. |
+| Halo 4 | `4D530919` | ⚠️ | ❌ | Boots, but **crashes before reaching the main menu**. Not yet diagnosed. |
+| Need for Speed: The Run | `4541094A` | ⚠️ | ❌ | Starts, but **crashes before gameplay begins**. Not yet diagnosed. |
+| Need for Speed: Most Wanted | `454107D9` | — | — | **Not tested yet** — present in the library but never launched. |
 
 ## Notes on the Halo 3 issues
 
@@ -43,6 +47,29 @@ geometry, used for GPU skinning. Halo 3 relies on it heavily for character
 animation; most titles skin on the CPU or in an ordinary vertex shader and never
 touch that path. That matches what has been seen so far — the other tested games
 are unaffected.
+
+## The two early crashes (Halo 4, NFS: The Run)
+
+Recorded for the record only — **neither has been investigated yet**, and no
+log was captured at the time of the crash. Both get further than "won't start":
+each reaches the point of doing real work and then dies, Halo 4 before its main
+menu and The Run before gameplay.
+
+They are grouped here because the shape is the same and they may or may not
+share a cause — nothing so far says they do. **Do not assume a single fix.**
+
+When either is picked up, the first step is a log from the crash itself:
+
+```
+adb -s <serial> logcat -c
+# launch, reproduce the crash, then:
+adb -s <serial> logcat -d > crash.log
+adb -s <serial> shell "run-as org.xeniaae.canary cat files/xeniaae/xe.log" > xe.log
+```
+
+Both titles are later and heavier than NFS Carbon, so a crash before first
+render is as likely to be an unimplemented kernel/XAM path or a shader
+translation failure as anything graphical. That is a guess, not a finding.
 
 ## Known issue affecting all titles
 
