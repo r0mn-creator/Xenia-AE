@@ -495,7 +495,18 @@ public class BoxArtManager {
     }
 
     static File cachedFile(Context context, MainActivity.GameEntry game) {
-        final String hash = sha1(game.uri);
+        // Key on the SAME identity the tier record uses, and prefer the title id
+        // because it is stable.
+        //
+        // This used to hash game.uri. That is a MediaStore URI whose numeric id
+        // Android reassigns whenever it re-indexes (a reboot, a media scan, a
+        // file move) - the same instability that made games silently refuse to
+        // launch. When the id changed, this computed a different filename, the
+        // cached cover became invisible, and the art was re-downloaded from
+        // scratch. To the user the covers simply "disappeared", and every
+        // library visit quietly spent API requests re-fetching art that was
+        // already on disk.
+        final String hash = sha1(cacheKey(game));
         return new File(context.getFilesDir(), "covers/" + hash + ".jpg");
     }
 
