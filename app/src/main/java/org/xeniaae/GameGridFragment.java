@@ -41,9 +41,27 @@ public class GameGridFragment extends Fragment {
 
         final SwipeRefreshLayout swipe = view.findViewById(R.id.swipe_refresh);
         swipe.setColorSchemeColors(ContextCompat.getColor(requireContext(), R.color.xenia_green));
+        // Pull-to-refresh means "everything", because that is what a user
+        // expects from the gesture and because the two things that go stale do
+        // so invisibly:
+        //   * the game list holds MediaStore ids, which Android reassigns on
+        //     re-index, so a game silently stops launching
+        //   * box art is cached and never re-fetched, so it can never improve
+        //     (adding an API key changed nothing until the cache was cleared)
+        // Previously this only called notifyDataSetChanged(), i.e. it redrew the
+        // same cached data - so the gesture appeared to do nothing.
         swipe.setOnRefreshListener(() -> {
+            BoxArtManager.clearCache(requireContext());
+            final androidx.fragment.app.FragmentActivity host = requireActivity();
+            if (host instanceof MainActivity) {
+                ((MainActivity) host).refreshGameList();
+            }
             mAdapter.notifyDataSetChanged();
+            updateEmpty();
             swipe.setRefreshing(false);
+            android.widget.Toast.makeText(host,
+                    "Refreshed library and box art", android.widget.Toast.LENGTH_SHORT)
+                    .show();
         });
 
         updateEmpty();
