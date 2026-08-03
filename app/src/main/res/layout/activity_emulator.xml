@@ -27,6 +27,27 @@
         android:text=""
         android:visibility="gone" />
 
+    <!-- FPS counter. Top CENTRE deliberately: the Odin's own system counter
+         sits in the upper left, and overlapping the two makes both unreadable.
+         Separate from status_overlay above, which is a heavier diagnostic with
+         its own toggle. -->
+    <TextView
+        android:id="@+id/fps_counter"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:background="#AA000000"
+        android:textColor="#FF7CFC00"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:fontFamily="monospace"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingTop="2dp"
+        android:paddingBottom="2dp"
+        android:text=""
+        android:visibility="gone" />
+
     <LinearLayout
         android:id="@+id/precache_overlay"
         android:layout_width="match_parent"

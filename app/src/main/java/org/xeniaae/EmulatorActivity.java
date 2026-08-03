@@ -98,6 +98,52 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
 
     private long[] prev_cpu_ticks = null;
 
+    // ---- FPS counter ---------------------------------------------------
+    // Deliberately its own small unit, separate from status_overlay above:
+    // different toggle, different position, and no file I/O. status_overlay
+    // tails xe.log and reads /proc, which is far too heavy for something meant
+    // to be on screen while judging performance.
+    //
+    // Toggle: debug.canary.fps (the same property that enables the native
+    // counter, so one switch turns on both the display and the log lines that
+    // scripts/fps_bench.sh aggregates).
+    private TextView fps_counter;
+    private Handler fps_handler;
+    private static final int FPS_INTERVAL_MS = 500;
+
+    private boolean fps_counter_enabled() {
+        return "1".equals(debugProp("debug.canary.fps"));
+    }
+
+    private final Runnable fps_updater = new Runnable() {
+        @Override
+        public void run() {
+            // Re-checked every tick so the counter can be switched on and off
+            // mid-game with setprop, matching the native side's behaviour.
+            if (!fps_counter_enabled()) {
+                fps_counter.setVisibility(View.GONE);
+                fps_handler.postDelayed(this, FPS_INTERVAL_MS);
+                return;
+            }
+            float fps = 0.0f;
+            try {
+                fps = Emulator.get.current_fps();
+            } catch (Throwable ignored) {
+                // Emulator not up yet, or an older native lib without the
+                // export - show nothing rather than crash the game.
+            }
+            if (fps > 0.0f) {
+                fps_counter.setText(String.format(java.util.Locale.US, "%.1f FPS", fps));
+                fps_counter.setVisibility(View.VISIBLE);
+            } else {
+                // Counter on but no window closed yet.
+                fps_counter.setText("-- FPS");
+                fps_counter.setVisibility(View.VISIBLE);
+            }
+            fps_handler.postDelayed(this, FPS_INTERVAL_MS);
+        }
+    };
+
     // TESTRIG(perf): the overlay reads /proc/self/stat, /proc/stat and tails
     // xe.log once a second. Small, but it is real work and real file I/O during
     // gameplay, and an FPS measurement should not include the cost of the thing
@@ -380,6 +426,14 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
         sf.setFocusableInTouchMode(true);
         sf.requestFocus();
         sf.setOnGenericMotionListener(this);
+
+        // FPS counter: independent of the status overlay below. Always polled
+        // (cheaply, on the UI thread - it is a single atomic read via JNI, no
+        // I/O) so that setprop debug.canary.fps 1 takes effect mid-game without
+        // restarting. The view stays GONE until the toggle is on.
+        fps_counter = (TextView) findViewById(R.id.fps_counter);
+        fps_handler = new Handler(Looper.getMainLooper());
+        fps_handler.postDelayed(fps_updater, FPS_INTERVAL_MS);
 
         status_overlay = (TextView) findViewById(R.id.status_overlay);
         final SharedPreferences sPrefs2 = PreferenceManager.getDefaultSharedPreferences(this);
@@ -751,6 +805,7 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
     @Override
     protected void onDestroy()
     {
+        if (fps_handler != null) fps_handler.removeCallbacks(fps_updater);
         if (overlay_bg_handler != null) overlay_bg_handler.removeCallbacks(overlay_updater);
         if (overlay_thread != null) overlay_thread.quitSafely();
         if (precache_handler != null) precache_handler.removeCallbacksAndMessages(null);

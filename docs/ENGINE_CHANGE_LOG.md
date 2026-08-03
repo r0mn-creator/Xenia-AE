@@ -39,6 +39,60 @@ behaviour on a common path · **LOW** = diagnostics only, inert when off.
 
 ---
 
+## 2026-08-03
+
+### ★ FPS counter + benchmark harness — **LOW** (measurement only)
+- **Files:** `base/ae_fps.h` (new, self-contained), one call in
+  `vulkan_command_processor.cc` `IssueSwap`, JNI `current_fps` in
+  `emulator.cpp` / `Emulator.java`, `fps_counter` view in
+  `activity_emulator.xml` / `EmulatorActivity.java`,
+  `scripts/fps_bench.sh` (new).
+- **Toggle:** `debug.canary.fps=1` (its own property; off by default; drives
+  both the on-screen counter and the log lines).
+- **Why this had to exist before any optimisation work:** measured scene
+  variation on NFS Carbon is **8.9–13.9 FPS, a ±25% spread**. A single reading
+  cannot distinguish a real gain from noise, and doing exactly that already
+  produced one false *"10% win"* in this project (one 12.9 FPS sample; the next
+  three were 11.9 / 8.9 / 10.9).
+- **What the harness does:** records a distribution and compares two runs with a
+  **Mann-Whitney U** test (non-parametric — FPS is not normally distributed).
+  Prints an explicit *NOT significant* verdict rather than a percentage, so a
+  noise result cannot be read as a win.
+- **Calibrated by simulation against the real spread:** a 60 s run detects a
+  **≥10% change every time**; a 5% change **less than half the time**. So a 60 s
+  run can prove a 10% win but cannot disprove a 5% one — record 180 s for
+  small effects.
+- **Why not count `VdSwap` in the log:** that needs `log_kernel_calls` +
+  `log_level=3`, which floods the log and slows down the thing being measured.
+- **Why the counter is not part of `status_overlay`:** that overlay tails
+  `xe.log` and reads `/proc` once a second. An FPS readout must not do file I/O,
+  or it perturbs the number it displays.
+- **Position:** top **centre** — the Odin's own system counter occupies the
+  upper left.
+
+### Halo 3 vista probe now gated — **LOW**
+- **File:** `vulkan_command_processor.cc`
+- **Toggle:** `debug.canary.halo3_vista_probe` (off by default)
+- **What:** `TestrigCaptureVistaRtPostTransfer()` was called **unconditionally
+  on every draw**. It early-outs cheaply, so this is **not** an FPS fix — but it
+  survived the diagnostics-off sweep and broke the rule that tests stay off
+  unless in use. Gated rather than deleted because the vista investigation is
+  paused, not finished.
+
+### Guest-thread affinity: big.LITTLE hazard documented — **LOW** (comment only)
+- **File:** `kernel/xthread.cc`
+- **What:** `SetActiveCpu` maps a **guest** hardware-thread index straight onto a
+  **host** CPU index. Harmless on desktop x86 (all cores equivalent, and the
+  360's 6 threads are 3 identical PPE cores × 2-way SMT). **Not harmless on
+  Android:** on a Snapdragon 8 Gen 2, cpu0–2 are Cortex-A510 @ 2016 MHz while
+  cpu7 is a Cortex-X3 @ 3187 MHz, so `XSetThreadProcessor(0)` would pin a thread
+  the game considered important to the *slowest* core on the chip.
+- **Not a live bug:** `ignore_thread_affinities` defaults to `true`, and NFS
+  Carbon never calls it (0 hits in the log). Comment added so nobody enables it
+  on Android without first translating through the host's real core topology.
+
+---
+
 ## 2026-08-02
 
 ### Performance experiments — measured, NO gain — **LOW**

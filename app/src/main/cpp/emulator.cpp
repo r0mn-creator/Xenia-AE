@@ -6,6 +6,8 @@
 #include <jni.h>
 #include <thread>
 
+#include "xenia/base/ae_fps.h"
+
 #define LOG_TAG "Emulator_Config"
 #define LOGE(...) {      \
     __android_log_print(ANDROID_LOG_ERROR, LOG_TAG,"%s : %d",__FILE__,__LINE__);\
@@ -495,6 +497,14 @@ static void j_quit(JNIEnv* env,jobject self){
     ae::quit();
 }
 
+// Current frame rate for the on-screen counter. Returns 0 when the counter is
+// off (debug.canary.fps) or before the first one-second window has closed.
+// Reads a relaxed atomic - no locking, no file I/O, so displaying the number
+// does not perturb the number.
+static jfloat j_current_fps(JNIEnv* env,jobject self){
+    return xe::ae::FpsCounter::Current();
+}
+
 int register_Emulator(JNIEnv* env){
     static const JNINativeMethod methods[] = {
             { "setup_game_path", "(Ljava/lang/String;)V", (void *) j_setup_game_path },
@@ -508,6 +518,7 @@ int register_Emulator(JNIEnv* env){
             { "pause", "()V", (void *) j_pause },
             { "resume", "()V", (void *) j_resume },
             { "change_surface", "(II)V", (void *) j_change_surface },
+            { "current_fps", "()F", (void *) j_current_fps },
     };
     return env->RegisterNatives(env->FindClass("org/xeniaae/emulator/Emulator"),methods, sizeof(methods)/sizeof(methods[0]));
 }

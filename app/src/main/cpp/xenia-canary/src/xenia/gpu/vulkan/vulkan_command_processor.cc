@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 #include "xenia/base/ae_fix_toggle.h"  // TESTRIG(regression-bisect)
+#include "xenia/base/ae_fps.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
@@ -1365,6 +1366,10 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
 
+  // Frame boundary. The counter owns all of its own state and toggle
+  // (debug.canary.fps); see xenia/base/ae_fps.h.
+  xe::ae::FpsCounter::OnFrame();
+
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {
     return;
@@ -2592,7 +2597,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // AFTER the repaint but BEFORE geometry, to see whether the repaint carried
   // the previous frame's content faithfully or corrupted it. Read-only /
   // non-destructive (restores RT state). See docs/HALO3_FINDINGS_CHECKLIST.md.
-  render_target_cache_->TestrigCaptureVistaRtPostTransfer();
+  //
+  // Gated: this sits in the per-draw path, so it must cost nothing when the
+  // Halo 3 investigation is not running. It was previously called
+  // unconditionally on every draw - cheap (it early-outs on the RT key) but not
+  // free, and it broke the rule that diagnostics stay off unless in use. Kept
+  // rather than deleted because that investigation is paused, not finished.
+  if (XE_AE_DIAG_ENABLED("debug.canary.halo3_vista_probe")) {
+    render_target_cache_->TestrigCaptureVistaRtPostTransfer();
+  }
 
   // Create the pipeline (for this, need the render pass from the render target
   // cache), translating the shaders - doing this now to obtain the used

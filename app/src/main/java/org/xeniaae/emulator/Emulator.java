@@ -119,4 +119,15 @@ public class Emulator {
 
     public native void change_surface(int w,int h);
 
+    /**
+     * Current frame rate, or 0 when the counter is off or no one-second window
+     * has closed yet.
+     *
+     * <p>Enabled by its own toggle, {@code debug.canary.fps} - independent of
+     * every other diagnostic. Backed by a relaxed atomic in
+     * {@code xenia/base/ae_fps.h}: no locking and no file I/O, so reading it to
+     * draw the counter does not perturb the value being drawn.
+     */
+    public native float current_fps();
+
 }

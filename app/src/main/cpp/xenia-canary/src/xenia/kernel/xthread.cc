@@ -923,6 +923,22 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
 
   if (xe::threading::logical_processor_count() >= 6) {
     if (!cvars::ignore_thread_affinities) {
+      // WARNING (Android / big.LITTLE): this maps a GUEST hardware thread index
+      // straight onto a HOST cpu index. That is harmless on desktop x86, where
+      // every core is equivalent, and it is what the 360 expects - its 6
+      // hardware threads are 3 identical PPE cores x 2-way SMT.
+      //
+      // It is NOT harmless here. On a big.LITTLE SoC the low cpu indices are
+      // the *efficiency* cores: on a Snapdragon 8 Gen 2, cpu0-2 are Cortex-A510
+      // at 2016 MHz while cpu7 is a Cortex-X3 at 3187 MHz - and the real gap is
+      // far wider than clock alone. So a game calling XSetThreadProcessor(0)
+      // would pin that thread to the slowest core on the chip, which is exactly
+      // backwards for a thread the game considered important enough to place.
+      //
+      // Safe today only because ignore_thread_affinities defaults to true. If
+      // this is ever enabled on Android it must first translate the guest index
+      // through the host's actual core topology (performance cores first)
+      // rather than using it as a raw cpu number.
       thread_->set_affinity_mask(uint64_t(1) << cpu_index);
     }
   } else {
