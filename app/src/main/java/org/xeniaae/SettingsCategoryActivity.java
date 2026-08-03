@@ -212,6 +212,18 @@ public class SettingsCategoryActivity extends AppCompatActivity {
                     } catch (Exception ignored) {
                     }
                 });
+
+        // Cached art is never re-fetched, so adding an API key (or fixing a
+        // wrong match) has no visible effect until the cache is cleared.
+        addClickRow("Refresh box art",
+                "Clears cached covers and downloads them again. Use this after "
+                        + "adding an API key, or if a game has the wrong art.",
+                v -> {
+                    int n = BoxArtManager.clearCache(this);
+                    android.widget.Toast.makeText(this,
+                            "Cleared " + n + " cached covers - reopen your library",
+                            android.widget.Toast.LENGTH_LONG).show();
+                });
     }
 
     private String currentApiKey() {
