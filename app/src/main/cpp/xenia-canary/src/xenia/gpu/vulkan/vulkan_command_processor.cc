@@ -4830,9 +4830,20 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(
     // defined by vkQueueSubmit additionally include in the first
     // synchronization scope all commands that occur earlier in submission
     // order."
+    // TESTRIG(frame-budget): this is the CPU BLOCKING on the GPU. Separating it
+    // from translation is the whole question: the CP thread measured ~100%
+    // "executing", but that figure covers both real PM4->Vulkan work and time
+    // parked here. Those need opposite fixes - cheaper draws vs fewer sync
+    // points - so attributing it wrongly would send the next days of work in
+    // the wrong direction.
+    const auto xe_fence_begin = std::chrono::steady_clock::now();
     VkResult wait_result = dfn.vkWaitForFences(
         device, uint32_t(await_submission - submission_completed_),
         submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
+    xe_gpu_wait_ns_.fetch_add(
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - xe_fence_begin).count()),
+        std::memory_order_relaxed);
     if (wait_result == VK_SUCCESS) {
       fences_awaited += await_submission - submission_completed_;
     } else {
@@ -5115,7 +5126,40 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
   return true;
 }
 
+// TESTRIG(frame-budget): reports how the GPU thread's second was actually spent.
+//
+// The base CommandProcessor already reports starved-vs-executing. That showed
+// ~100% "executing", but executing covers BOTH translating PM4 into Vulkan AND
+// sitting blocked on the GPU. This splits that apart:
+//   gpu_wait  - CPU parked in vkWaitForFences, i.e. the GPU is the limit
+//   submit    - inside vkQueueSubmit (driver-side command processing)
+//   remainder - real translation work on the CPU
+// Cheaper draws and fewer sync points are opposite fixes, so this decides which.
+void VulkanCommandProcessor::XeReportFrameBudget() {
+  if (!XE_AE_DIAG_ENABLED("debug.canary.frame_budget")) {
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now - xe_budget_last_ < std::chrono::seconds(1)) {
+    return;
+  }
+  const uint64_t elapsed_ns =
+      uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+          now - xe_budget_last_).count());
+  xe_budget_last_ = now;
+  const uint64_t waited = xe_gpu_wait_ns_.exchange(0, std::memory_order_relaxed);
+  const uint64_t submitted = xe_submit_ns_.exchange(0, std::memory_order_relaxed);
+  if (elapsed_ns == 0) return;
+  XELOGI(
+      "TESTRIG(frame-budget): GPU-thread second: blocked-on-GPU {}% ({} ms) | "
+      "vkQueueSubmit {}% ({} ms) | translating+other {}%",
+      (waited * 100) / elapsed_ns, waited / 1000000,
+      (submitted * 100) / elapsed_ns, submitted / 1000000,
+      100 - ((waited + submitted) * 100) / elapsed_ns);
+}
+
 bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+  XeReportFrameBudget();
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
@@ -5309,7 +5353,16 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
           vulkan_device->AcquireQueue(
               vulkan_device->queue_family_graphics_compute(), 0);
       submit_result =
-          dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
+          [&]() {
+            const auto b = std::chrono::steady_clock::now();
+            VkResult r = dfn.vkQueueSubmit(queue_acquisition.queue(), 1,
+                                           &submit_info, fence);
+            xe_submit_ns_.fetch_add(
+                uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - b).count()),
+                std::memory_order_relaxed);
+            return r;
+          }();
     }
     if (submit_result != VK_SUCCESS) {
       XELOGE("Failed to submit a Vulkan command buffer: VkResult={}", int(submit_result));

@@ -12,6 +12,8 @@
 
 #include <array>
 #include <climits>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -547,6 +549,26 @@ class VulkanCommandProcessor final : public CommandProcessor {
       const VkDescriptorImageInfo* texture_image_info,
       const VkDescriptorImageInfo* sampler_image_info,
       VkWriteDescriptorSet* descriptor_set_writes_out);
+
+  // TESTRIG(frame-budget): where the GPU thread's time really goes.
+
+  // Public so the base CommandProcessor can fold them into its report.
+
+  public:
+
+    void XeReportFrameBudget();
+
+
+    std::atomic<uint64_t> xe_gpu_wait_ns_{0};   // blocked on fences
+
+    std::atomic<uint64_t> xe_submit_ns_{0};     // inside vkQueueSubmit
+
+    std::chrono::steady_clock::time_point xe_budget_last_ =
+
+        std::chrono::steady_clock::now();
+
+   private:
+
 
   bool device_lost_ = false;
 

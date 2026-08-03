@@ -309,6 +309,17 @@ class CommandProcessor {
   uint32_t primary_buffer_ptr_ = 0;
   uint32_t primary_buffer_size_ = 0;
 
+  // TESTRIG(frame-budget): wall-clock split of this thread's time.
+
+  uint64_t xe_starved_ns_ = 0;
+
+  uint64_t xe_executing_ns_ = 0;
+
+  std::chrono::steady_clock::time_point xe_budget_last_report_ =
+
+      std::chrono::steady_clock::now();
+
+
   uint32_t read_ptr_index_ = 0;
   uint32_t read_ptr_update_freq_ = 0;
   uint32_t read_ptr_writeback_ptr_ = 0;

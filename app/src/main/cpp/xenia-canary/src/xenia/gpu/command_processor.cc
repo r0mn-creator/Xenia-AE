@@ -301,6 +301,13 @@ void CommandProcessor::WorkerThreadMain() {
     uint32_t write_ptr_index = write_ptr_index_.load();
     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
       SCOPE_profile_cpu_i("gpu", "xe::gpu::CommandProcessor::Stall");
+      // TESTRIG(frame-budget): time spent STARVED - the ring buffer is empty and
+      // this thread has nothing to translate because the guest has not produced
+      // commands yet. CPU profiling cannot distinguish this from real work (a
+      // spin looks busy), which is exactly the confusion we are resolving: the
+      // GPU command thread measured ~95% CPU, but if most of that is this loop
+      // then the guest is the bottleneck and optimising translation is pointless.
+      const auto xe_stall_begin = std::chrono::steady_clock::now();
       // We've run out of commands to execute.
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
@@ -340,6 +347,8 @@ void CommandProcessor::WorkerThreadMain() {
                (write_ptr_index == 0xBAADF00D ||
                 read_ptr_index_ == write_ptr_index));
       ReturnFromWait();
+      xe_starved_ns_ += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - xe_stall_begin).count());
       if (!worker_running_ || !pending_fns_.empty()) {
         continue;
       }
@@ -349,7 +358,32 @@ void CommandProcessor::WorkerThreadMain() {
     // Execute. Note that we handle wraparound transparently.
     diag_execute_calls++;
     uint32_t diag_read_ptr_before = read_ptr_index_;
+    const auto xe_exec_begin = std::chrono::steady_clock::now();
     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+    xe_executing_ns_ += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - xe_exec_begin).count());
+    // TESTRIG(frame-budget): report the split once a second. STARVED means this
+    // thread had nothing to do because the guest had not produced commands;
+    // EXECUTING means it was actually translating PM4 into Vulkan. If STARVED
+    // dominates, the guest (JIT) is the bottleneck and optimising the GPU path
+    // cannot help - which is the question CPU profiling could not answer,
+    // because a spin-wait looks identical to real work.
+    if (XE_AE_DIAG_ENABLED("debug.canary.frame_budget")) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now - xe_budget_last_report_ > std::chrono::seconds(1)) {
+        xe_budget_last_report_ = now;
+        const uint64_t total = xe_starved_ns_ + xe_executing_ns_;
+        if (total > 0) {
+          XELOGI(
+              "TESTRIG(frame-budget): CP starved {}% ({} ms) | executing {}% "
+              "({} ms)",
+              (xe_starved_ns_ * 100) / total, xe_starved_ns_ / 1000000,
+              (xe_executing_ns_ * 100) / total, xe_executing_ns_ / 1000000);
+        }
+        xe_starved_ns_ = 0;
+        xe_executing_ns_ = 0;
+      }
+    }
     {
       auto diag_now = std::chrono::steady_clock::now();
       if (diag_now - diag_last_log > std::chrono::milliseconds(500)) {
