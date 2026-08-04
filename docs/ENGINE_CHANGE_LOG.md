@@ -39,6 +39,62 @@ behaviour on a common path · **LOW** = diagnostics only, inert when off.
 
 ---
 
+## 2026-08-04
+
+### ⚠️ `vsync=false` floods the guest with vblanks — **HIGH**, open bug
+- **File:** `gpu/graphics_system.cc` (frame limiter worker, ~line 200)
+- **What:** with `vsync=false` **and** `framerate_limit=0` the limiter runs:
+  ```cpp
+  if (!cvars::vsync) {
+    MarkVblank();
+    ... xe::threading::Sleep(std::chrono::milliseconds(1));
+  }
+  ```
+  So the guest gets vblank interrupts at roughly **1000 Hz instead of 60 Hz** —
+  ~16x faster than real hardware. Vblank is how a 360 game paces itself, so this
+  changes the clock the game's own logic runs against.
+- **Confirmed on-device (user observation):** in NFS Carbon a character says
+  "press Y" but the button icon appears **noticeably late**. Game timing is
+  demonstrably wrong, not just presentation.
+- **Cross-game reach:** would affect **any** title run with vsync off. The
+  per-game config below scopes it to Carbon only, so nothing else is exposed.
+
+### VSYNC off on NFS Carbon: +24.8% FPS — **PROVISIONAL, do not bank it**
+- **Measured:** median **9.76 -> 12.18 FPS**, n=57 vs n=166, p=0.0000
+  (`scripts/fps_bench.sh compare baseline vsync_off_180`).
+- **Why provisional:** the vblank bug above can inflate this. Some of the gain
+  may be the game running on a wrong clock rather than the emulator doing more
+  real work per second. **Re-measure after the vblank fix** before treating
+  +24.8% as real.
+- **Proof vsync was genuinely clamping:** with vsync ON the distribution was
+  median 9.76 / **max 9.94** / IQR 9.61-9.78 — a 0.17 FPS spread is a clock, not
+  a game. Off, max reached 18.13.
+- **Config:** written to `config/454107EC.config.toml` as `[GPU] vsync = false`,
+  ownership `10144:1078` mode `660` (byte-identical perms to the working Halo 3
+  per-game config). Written via `su` + explicit `chown`, **not** a bare
+  `adb shell` redirect — see the config-corruption note in this file's history.
+- **⚠️ TODO:** global `vsync` is still `false` from a UI change. Flip it back to
+  `true` in Settings -> GPU so the per-game override is what actually applies.
+
+### Unexplained ~12.6 FPS ceiling — **open**
+- 180 s run: median 12.18, **max 12.62**, sd 1.54, with 95 of 166 samples piled
+  on 12 FPS. Heavy scenes drop to p10=9.40, so it is a **ceiling, not a floor**.
+- **Ruled out:** display sync — the swapchain uses **MAILBOX** (`presentation
+  mode 1`; IMMEDIATE is not offered by Adreno), which does not block on refresh.
+  Also ruled out: Xenia's frame limiter, which free-runs when vsync is off.
+- **Still open:** genuine CPU plateau vs something guest-side in Carbon.
+
+### ⚠️ Benchmark harness sensitivity was overstated — **correction**
+- Original calibration assumed sd=1.28, which was measured **against the
+  vsync-clamped distribution** — artificially tight. At the real spread
+  (sd=**2.16**) a 60 s run detects a +10% change only **70%** of the time.
+- Every optimisation candidate on the list is worth 4-7%. **60 s cannot see
+  them. Use 180 s runs** (n~166) for all future comparisons.
+- This is why the first vsync 60 s run reported only +5.4% while the 180 s run
+  reported +24.8% — the short run was not representative.
+
+---
+
 ## 2026-08-03
 
 ### ★ FPS counter + benchmark harness — **LOW** (measurement only)
