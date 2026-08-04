@@ -50,18 +50,39 @@ whether the guest's display interrupt is emulated correctly.
 
 Sketch:
 
+**Do NOT hardcode 60.** The accessor already exists — use it:
+
 ```cpp
-// Vblank is a GUEST-VISIBLE clock. It must tick at the rate the title expects
-// (60 Hz), whether or not the host is limiting frames. Tying it to cvars::vsync
-// made it fire at ~1000 Hz with vsync off, which broke in-game timing.
-const double vblank_hz = 60.0;   // TODO: honour use_50Hz_mode / video_standard
+// kernel/xboxkrnl/xboxkrnl_video.cc:52
+inline const static float GetVideoRefreshRate() {
+  return cvars::use_50Hz_mode ? 50.0f : 60.0f;
+}
+```
+
+It is driven by the existing **Settings -> Video -> use_50Hz_mode** toggle, so
+PAL titles are handled by a setting the user can already reach, and it can be
+overridden per-game via `config/<title_id>.config.toml` under `[Video]` exactly
+like Halo 3's `internal_display_resolution` already is. That is the intended
+design: automatic from the setting, per-game override when a title needs it.
+
+```cpp
+// Vblank is a GUEST-VISIBLE clock. It must tick at the rate the title expects,
+// whether or not the host is limiting frames. Tying it to cvars::vsync made it
+// fire at ~1000 Hz with vsync off, which broke in-game timing (Carbon's
+// "press Y" prompt appeared late).
+const double vblank_hz = GetVideoRefreshRate();   // 50 or 60, from the setting
 ```
 
 Pace `MarkVblank()` against that in **both** branches; keep `vsync` controlling
 only the sleep/throttle behaviour.
 
-**Watch out for:** `use_50Hz_mode` and `video_standard` in the `[Video]` config
-section — PAL titles expect 50 Hz. Do not hardcode 60 without checking those.
+**Wiring note:** `GetVideoRefreshRate()` is an `inline static` in
+`xboxkrnl_video.cc`, so it is not visible outside that translation unit as
+written. `graphics_system.cc` already calls `GetInternalDisplayResolution()`
+from the same area, so check how that one is exposed and follow the same
+pattern — either promote the accessor to the header or read
+`cvars::use_50Hz_mode` directly. Prefer the accessor so there is one source of
+truth.
 
 **Make it a toggle** (project standing rule): `debug.canary.vblank_fix`, default
 ON once verified, so it can be bisected against without a rebuild.
