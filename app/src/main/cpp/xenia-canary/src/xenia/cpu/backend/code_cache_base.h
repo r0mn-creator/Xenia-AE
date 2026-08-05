@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/ae_perf_map.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/literals.h"
@@ -226,6 +227,16 @@ class CodeCacheBase : public CodeCache {
     // Post-placement hook (e.g. VTune notification).
     self().OnCodePlaced(guest_address, function_info, code_execute_address,
                         func_info.code_size.total);
+
+    // Publish the symbol so profilers can attribute samples to JIT'd guest
+    // code. Without this the guest threads - the largest CPU consumer in the
+    // emulator at 57.3% of process time - profile as 97.3% "unknown", because
+    // JIT output lives in anonymous memory with no ELF symbols behind it.
+    // Off unless debug.canary.perf_map is set; see base/ae_perf_map.h.
+    xe::ae::PerfMap::OnFunctionCompiled(
+        guest_address, reinterpret_cast<uint64_t>(code_execute_address),
+        func_info.code_size.total,
+        function_info ? function_info->name().c_str() : nullptr);
 
     // Fix up indirection table.
     if (guest_address && indirection_table_base_) {
