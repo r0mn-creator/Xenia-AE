@@ -198,3 +198,51 @@ Still valid and unaffected by this result:
 ### Reverted
 
 `debug.canary.extra_args` cleared. No config file was ever modified.
+
+---
+
+## TESTED 2026-08-05: save/restore helper fix — SAFE but UNMEASURABLE
+
+`debug.canary.saverest_fast` (default ON). Skips stackpoint bookkeeping for
+kProlog/kEpilog/kEpilogReturn leaf helpers.
+
+| run | median | n |
+|---|---|---|
+| `vblank_fixed` (baseline) | 9.67 | 167 |
+| `saverest` | **9.69** | 171 |
+
+**+0.2%, p=0.78 — NOT significant.** Game stable, 0 asserts, no hang.
+
+**This was predicted before the run:** the helpers total 3.67% of CPU and this
+removes only part of that, which is below the harness's ~10% detection floor.
+Prediction recorded in advance and confirmed — the measurement is working
+correctly, the change is simply too small to see.
+
+**Kept** (safe, removes real work, toggleable) but it must **not** be counted as
+progress toward 30 FPS.
+
+### The strategic conclusion this forces
+
+We are now in the regime where **individual micro-optimisations are
+unmeasurable**. 9.67 -> 30 FPS is a **3.1x** gain. Everything identified so far:
+
+| candidate | ceiling | verdict |
+|---|---|---|
+| PM4 translation (whole GPU cmd thread) | 1.33x if made *infinitely fast* | insufficient alone |
+| stackpoints | — | **REFUTED** - load-bearing, hangs Carbon |
+| save/restore helpers | 3.67% | **tested, unmeasurable** |
+| `[vdso]` / `clock_gettime` | ~10% | **unexamined - best remaining** |
+| descriptors / RT+texture cache | ~5-15% | untested |
+| resolution | — | **refuted** - GPU is not the constraint |
+
+Stacking every remaining candidate optimistically gives maybe 1.4x -> ~13 FPS.
+**3x is not reachable by accumulating these.** It requires either a structural
+change (command-buffer caching / replay, JIT code-quality work) or accepting
+that this title on this hardware lands in the low-to-mid teens.
+
+**Next, in order:**
+1. **`[vdso]` ~10%** - largest single unexamined cost, and it is plumbing, not
+   emulation. Cheapest remaining shot.
+2. **Disassemble `826DEFD0` as PowerPC** - 14% of CPU and we still do not know
+   what it *does*. Could be a game hot loop (nothing to win) or a pathological
+   translation (large win). This is the highest-variance unknown.
