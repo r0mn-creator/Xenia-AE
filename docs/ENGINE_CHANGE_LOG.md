@@ -41,6 +41,33 @@ behaviour on a common path · **LOW** = diagnostics only, inert when off.
 
 ## 2026-08-05
 
+### ✅ Button-prompt delay is FRAME-RATE COUPLED — not a separate bug
+- **Test:** raised `draw_resolution_scale` 1x -> 2x, which loads the GPU while
+  leaving **vblank locked at 60 Hz** (measured 59.8-59.9 Hz throughout). Clean
+  causal isolation: only frame time changed.
+- **Result:** median **9.67 -> 6.73 FPS** (-30.4%, p=0.0000, n=167 vs 179);
+  frame time **103 ms -> 149 ms**. User: *"the button press prompt is way more
+  delayed."*
+- **Conclusion:** the delay tracks frame time, so it is **rendering latency, not
+  a timing defect**. A normal 2-3 frame pipeline delay is ~35-50 ms at 60 FPS
+  (invisible) but ~300-450 ms at 7-10 FPS (obvious). Audio plays in real time
+  regardless, so the visual trails it.
+- **Therefore: stop chasing it.** It shrinks on its own as FPS improves. It is a
+  *symptom* of the performance problem, not an independent bug.
+- Caveat on magnitude: "way more delayed" is a perceptual judgement; frame time
+  grew 1.44x. Direction is confirmed, exact scaling is not measured.
+
+### Screenshots DO work on the emulator SurfaceView — **corrects an earlier note**
+- `adb exec-out screencap -p` captured a full 1920x1080 in-game frame. An
+  earlier note claimed `screencap` could not capture the emulator's SurfaceView;
+  that is **wrong** and cost us a diagnostic tool for weeks.
+
+### ⚠️ On-screen FPS counter does not render — **open bug**
+- `debug.canary.fps=1`, the native counter works (harness collected 179 samples
+  from `XEFPS` log lines), but the top-centre `fps_counter` TextView is absent
+  from a screenshot. The `FPS 8.9` badge visible top-left is the **Odin's own**
+  system overlay, not ours. Measurement is unaffected (it reads the log).
+
 ### ★ vblank flood FIXED — and the +24.8% vsync "win" was ARTIFACT
 - **File:** `gpu/graphics_system.cc` (frame limiter)
 - **Toggle:** `debug.canary.vblank_fix` (XE_AE_FIX, default ON)
