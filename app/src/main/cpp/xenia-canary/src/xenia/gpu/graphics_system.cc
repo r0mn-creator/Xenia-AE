@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/graphics_system.h"
 
+#include "xenia/base/ae_fix_toggle.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
@@ -59,6 +60,11 @@ DEFINE_bool(
     "Store shaders persistently and load them when loading games to avoid "
     "runtime spikes and freezes when playing the game not for the first time.",
     "GPU");
+
+// Owned by kernel/xboxkrnl/xboxkrnl_video.cc, surfaced through the existing
+// Settings -> Video -> use_50Hz_mode toggle. Declared here so the frame limiter
+// can pace the guest's vblank at the rate the title actually expects.
+DECLARE_bool(use_50Hz_mode);
 
 namespace xe {
 namespace gpu {
@@ -170,9 +176,56 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
             // Sleep for 90% of the vblank duration, spin for 10%
             constexpr double duration_scalar = 0.90;
 
+            // Vblank is a GUEST-VISIBLE clock, not a host presentation detail.
+            // A real 360 raises it at the display rate (60 Hz, or 50 Hz in
+            // PAL-50), and titles pace their own logic against it.
+            //
+            // The original code only paced MarkVblank() on the cvars::vsync
+            // path. With vsync off it called MarkVblank() then Sleep(1ms), so
+            // the guest received vblanks at ~1000 Hz - about 16x real hardware.
+            // That corrupts in-game timing: NFS Carbon's "press Y" prompt
+            // appeared visibly late, and it burns guest CPU running ~16x the
+            // interrupt handlers it should.
+            //
+            // So: pace vblank at the title's real display rate ALWAYS, and let
+            // vsync/framerate_limit control host throttling only.
+            //
+            // Rate comes from the existing Settings -> Video -> use_50Hz_mode
+            // toggle, so PAL titles are handled by a setting the user can reach
+            // and can be overridden per-game under [Video].
+            const double vblank_hz = cvars::use_50Hz_mode ? 50.0 : 60.0;
+            const double vblank_interval_ms = 1000.0 / vblank_hz;
+            const bool vblank_fix =
+                XE_AE_FIX_ENABLED("debug.canary.vblank_fix");
+            if (vblank_fix) {
+              XELOGI("Frame limiter: vblank paced at {} Hz (vsync={})",
+                     vblank_hz, cvars::vsync ? "on" : "off");
+            }
+
             while (frame_limiter_worker_running_) {
               register_file()->values[XE_GPU_REG_D1MODE_V_COUNTER] +=
                   GetInternalDisplayResolution().second;
+
+              if (vblank_fix) {
+                const uint64_t current_time = Clock::QueryGuestTickCount();
+                const uint64_t tick_freq = Clock::guest_tick_frequency();
+                const double elapsed_d =
+                    static_cast<double>(current_time - last_frame_time) /
+                    (static_cast<double>(tick_freq) / 1000.0);
+                if (elapsed_d >= vblank_interval_ms) {
+                  last_frame_time = current_time;
+                  MarkVblank();
+                }
+                // Sleep most of one interval, leaving headroom so we do not
+                // overshoot the next vblank. Same 90/10 sleep-then-spin split
+                // the original vsync path used.
+                threading::NanoSleep(static_cast<uint64_t>(
+                    vblank_interval_ms * 1000000.0 * duration_scalar));
+
+                // An explicit host frame cap still applies on top; vsync no
+                // longer changes the guest's clock, only host pacing.
+                continue;
+              }
 
               if (cvars::vsync) {
                 const uint64_t current_time = Clock::QueryGuestTickCount();
