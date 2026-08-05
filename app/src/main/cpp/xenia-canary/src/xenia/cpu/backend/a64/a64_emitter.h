@@ -176,6 +176,8 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   hir::Instr* current_instr_ = nullptr;
 
+  // True when emitting a PPC save/restore helper - see Emit().
+  bool is_save_rest_helper_ = false;
   FunctionDebugInfo* debug_info_ = nullptr;
   uint32_t debug_info_flags_ = 0;
   FunctionTraceData* trace_data_ = nullptr;

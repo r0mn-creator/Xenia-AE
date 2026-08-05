@@ -94,6 +94,28 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
 
   current_guest_function_ = function->address();
 
+  // PPC out-of-line prologue/epilogue helpers (__savegprlr_N / __restgprlr_N
+  // and friends) are flagged kProlog/kEpilog/kEpilogReturn by
+  // XexModule::FindSaveRest. Measured at 3.67% of ALL process CPU in NFS
+  // Carbon (__restgprlr_29 2.00% + __savegprlr_29 1.67%), because each one is
+  // compiled and CALLED as an ordinary guest function - paying the full
+  // stackpoint push/pop plus an indirect trampoline call - to do work that is
+  // only a handful of load/stores.
+  //
+  // These helpers are LEAF functions: they touch r14-r31/LR and return. They
+  // cannot call, and cannot longjmp, so they can never be the frame a
+  // longjmp unwinds to - which is the only thing stackpoints exist to
+  // recover. Skipping the stackpoint bookkeeping for them is therefore safe
+  // in a way that disabling it globally was NOT (that hung Carbon outright).
+  //
+  // Toggle: debug.canary.saverest_fast (default ON; set 0 to bisect).
+  const auto behavior = function->behavior();
+  is_save_rest_helper_ =
+      (behavior == Function::Behavior::kProlog ||
+       behavior == Function::Behavior::kEpilog ||
+       behavior == Function::Behavior::kEpilogReturn) &&
+      XE_AE_FIX_ENABLED("debug.canary.saverest_fast");
+
   // Reset state.
   stack_size_ = StackLayout::GUEST_STACK_SIZE;
   source_map_arena_.Reset();
@@ -553,7 +575,8 @@ void A64Emitter::HandleStackpointOverflowError(ppc::PPCContext* context) {
 }
 
 void A64Emitter::PushStackpoint() {
-  if (!cvars::a64_enable_host_guest_stack_synchronization) {
+  if (!cvars::a64_enable_host_guest_stack_synchronization ||
+      is_save_rest_helper_) {
     return;
   }
   // x8 = stackpoints array, w9 = current depth
@@ -596,7 +619,8 @@ void A64Emitter::PushStackpoint() {
 }
 
 void A64Emitter::PopStackpoint() {
-  if (!cvars::a64_enable_host_guest_stack_synchronization) {
+  if (!cvars::a64_enable_host_guest_stack_synchronization ||
+      is_save_rest_helper_) {
     return;
   }
   // Decrement current_stackpoint_depth.
