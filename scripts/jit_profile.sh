@@ -18,7 +18,10 @@ set -u
 DEV=3a478943
 PKG=org.xeniaae.canary
 DUR=${1:-20}
-OUT="$(cd "$(dirname "$0")" && pwd)"
+# Working dir OUTSIDE the repo: symfs holds a ~335 MB copy of the unstripped
+# libe.so, which must never land in git (it silently broke a push once).
+OUT="${XENIA_PROFILE_OUT:-$HOME/.cache/xenia-ae-profile}"
+mkdir -p "$OUT"
 SYMS=/home/roman/Android/Xenia-AE/app/build/intermediates/cxx/Debug/2x4c5d6x/obj/arm64-v8a/libe.so
 
 P=$(adb -s $DEV shell pidof $PKG:emu | tr -d '\r')
@@ -43,9 +46,10 @@ adb -s $DEV pull /data/local/tmp/perf.data "$OUT/perf.data" >/dev/null 2>&1
 # Without it the guest threads - the largest CPU consumer at 57.3% - profile
 # as ~97% "unknown", because JIT'd code has no ELF symbols behind it.
 MAP=""
-for cand in "/data/local/tmp/perf-$P.map" "/tmp/perf-$P.map"; do
-    if adb -s $DEV shell "su -c 'test -f $cand'" 2>/dev/null; then
-        adb -s $DEV shell "su -c 'cat $cand'" > "$OUT/perf-$P.map" 2>/dev/null
+APPDIR=/sdcard/Android/data/org.xeniaae.canary/files/xeniaae
+for cand in "$APPDIR/perf-$P.map" "/data/local/tmp/perf-$P.map" "/tmp/perf-$P.map"; do
+    if adb -s $DEV shell "test -f $cand && echo y" 2>/dev/null | grep -q y; then
+        adb -s $DEV shell "cat $cand" | tr -d '\r' > "$OUT/perf-$P.map" 2>/dev/null
         [ -s "$OUT/perf-$P.map" ] && MAP="$OUT/perf-$P.map" && break
     fi
 done

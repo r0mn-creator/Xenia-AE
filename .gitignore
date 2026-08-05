@@ -157,3 +157,9 @@ app/src/main/cpp/xenia-canary/recent.toml
 
 # FPS benchmark recordings (scripts/fps_bench.sh) - local measurements
 .bench/
+
+# Profiling working files (scripts/jit_profile.sh). symfs holds a ~335 MB copy
+# of the unstripped libe.so for symbol resolution - never commit it.
+symfs/
+perf.data
+perf-*.map

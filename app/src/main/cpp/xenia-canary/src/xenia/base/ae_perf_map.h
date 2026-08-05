@@ -11,6 +11,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <unistd.h>
 #include <mutex>
 #include <string>
 
@@ -115,18 +117,43 @@ class PerfMap {
     // writable by the app, so fall back to a path the app definitely owns;
     // the report script copies it into place.
     const int pid = static_cast<int>(getpid());
-    char path[256];
+    char path[320];
+    // 1. Canonical perf location (desktop).
     snprintf(path, sizeof(path), "/tmp/perf-%d.map", pid);
     file_ = fopen(path, "w");
+    // 2. Shell-writable location (rooted devices).
     if (!file_) {
       snprintf(path, sizeof(path), "/data/local/tmp/perf-%d.map", pid);
       file_ = fopen(path, "w");
     }
+    // 3. Android reality: /tmp does not exist and /data/local/tmp is blocked
+    //    for apps by SELinux, so fall back to the app's own external files
+    //    dir - the same place xe.log lives, which we know is writable and is
+    //    readable over adb without root. The package name comes from
+    //    /proc/self/cmdline ("org.xeniaae.canary:emu" -> strip the ":emu").
+    if (!file_) {
+      char cmdline[128] = {0};
+      FILE* cf = fopen("/proc/self/cmdline", "r");
+      if (cf) {
+        size_t n = fread(cmdline, 1, sizeof(cmdline) - 1, cf);
+        fclose(cf);
+        if (n > 0) {
+          char* colon = strchr(cmdline, ':');
+          if (colon) {
+            *colon = '\0';
+          }
+          snprintf(path, sizeof(path),
+                   "/sdcard/Android/data/%s/files/xeniaae/perf-%d.map",
+                   cmdline, pid);
+          file_ = fopen(path, "w");
+        }
+      }
+    }
     if (file_) {
       XELOGI("perf map: writing JIT symbols to {}", path);
     } else {
-      XELOGW("perf map: could not open a map file (tried /tmp and "
-             "/data/local/tmp) - JIT frames will stay unsymbolized");
+      XELOGW("perf map: could not open a map file (tried /tmp, /data/local/tmp "
+             "and the app files dir) - JIT frames will stay unsymbolized");
     }
   }
 
