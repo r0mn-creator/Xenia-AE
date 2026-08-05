@@ -39,6 +39,50 @@ behaviour on a common path · **LOW** = diagnostics only, inert when off.
 
 ---
 
+## 2026-08-05
+
+### ★ vblank flood FIXED — and the +24.8% vsync "win" was ARTIFACT
+- **File:** `gpu/graphics_system.cc` (frame limiter)
+- **Toggle:** `debug.canary.vblank_fix` (XE_AE_FIX, default ON)
+- **The bug:** `MarkVblank()` was only paced on the `cvars::vsync` path. With
+  vsync off it fired then slept 1 ms, giving the guest **~1000 Hz vblank** vs a
+  real 360's 60 Hz. Rate now comes from `use_50Hz_mode` (Settings -> Video), so
+  PAL is handled and nothing is hardcoded.
+- **MEASURED RESULT (180 s runs, n~167):**
+  | vs | median | verdict |
+  |---|---|---|
+  | broken-clock run (`vsync_off_180`) | 12.18 -> **9.67** | **-20.6%**, p=0.0000 |
+  | original vsync-on baseline | 9.76 -> **9.67** | -0.9%, p=0.85, **no difference** |
+- **Conclusion:** the previously logged **+24.8% from `vsync=false` was entirely
+  an artifact of the 1 kHz clock** - the game ran its own logic faster, the
+  emulator did not do more work. **Do not treat vsync-off as a performance
+  win.** Correct timing costs nothing (-0.9%, not significant).
+- The unexplained **~12.6 FPS ceiling is also gone** (max now 13.53, min 2.36),
+  so it was very likely an artifact of the broken clock too.
+
+### ⚠️ TWO self-inflicted bugs in the first version of this fix (lessons)
+1. **Slept on every loop iteration** instead of only after firing a vblank, so
+   the interval took two sleeps to elapse: delivered **~33 Hz, not 60**. Traded
+   a 16x-too-fast clock for a 2x-too-slow one. The original vsync path slept
+   *only after firing* and spun the remaining 10% - that structure is *why* it
+   paced correctly, and restructuring it without preserving that broke it.
+2. **Logged the target, not the measurement.** The first build printed
+   `"vblank paced at 60 Hz"` - a constant, not an observation - while actually
+   delivering 33 Hz. It could not have printed anything else. Now logs
+   `vblank measured {:.1f} Hz (target {:.0f})` from real elapsed ticks;
+   confirmed **59.8-60.0 Hz** on device.
+   **Rule reinforced: an instrument that cannot report failure is not an
+   instrument.**
+
+### `vsync` CANNOT live in a per-game config — **timing**
+- Carbon's `config/454107EC.config.toml` `[GPU] vsync = false` loads fine and
+  the key is correct (`vsync` is category `GPU`), but `GraphicsSystem::Setup()`
+  creates the frame limiter during `Emulator::Setup()`, **before**
+  `LoadGameConfig()` runs. Same trap as `vulkan_lib_path`.
+- Add to the "cannot be per-game" list: `vulkan_lib_path`, `apu`, **`vsync`**.
+
+---
+
 ## 2026-08-04
 
 ### ⚠️ `vsync=false` floods the guest with vblanks — **HIGH**, open bug

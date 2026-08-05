@@ -197,9 +197,11 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
             const double vblank_interval_ms = 1000.0 / vblank_hz;
             const bool vblank_fix =
                 XE_AE_FIX_ENABLED("debug.canary.vblank_fix");
+            uint32_t vblank_count = 0;
+            uint64_t vblank_rate_mark = Clock::QueryGuestTickCount();
             if (vblank_fix) {
-              XELOGI("Frame limiter: vblank paced at {} Hz (vsync={})",
-                     vblank_hz, cvars::vsync ? "on" : "off");
+              XELOGI("Frame limiter: vblank target {} Hz (vsync={})", vblank_hz,
+                     cvars::vsync ? "on" : "off");
             }
 
             while (frame_limiter_worker_running_) {
@@ -215,15 +217,43 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                 if (elapsed_d >= vblank_interval_ms) {
                   last_frame_time = current_time;
                   MarkVblank();
-                }
-                // Sleep most of one interval, leaving headroom so we do not
-                // overshoot the next vblank. Same 90/10 sleep-then-spin split
-                // the original vsync path used.
-                threading::NanoSleep(static_cast<uint64_t>(
-                    vblank_interval_ms * 1000000.0 * duration_scalar));
 
-                // An explicit host frame cap still applies on top; vsync no
-                // longer changes the guest's clock, only host pacing.
+                  // Measure the rate we ACTUALLY achieve, not the one we
+                  // intended. The first version of this fix logged "60 Hz"
+                  // while really delivering ~33, because it slept on every
+                  // iteration instead of only after firing - so the interval
+                  // took two sleeps to elapse. Printing the target told us
+                  // nothing; this prints the truth.
+                  if (++vblank_count >= static_cast<uint32_t>(vblank_hz)) {
+                    const double window_ms =
+                        static_cast<double>(current_time - vblank_rate_mark) /
+                        (static_cast<double>(tick_freq) / 1000.0);
+                    if (window_ms > 0.0) {
+                      XELOGI("Frame limiter: vblank measured {:.1f} Hz "
+                             "(target {:.0f})",
+                             vblank_count * 1000.0 / window_ms, vblank_hz);
+                    }
+                    vblank_count = 0;
+                    vblank_rate_mark = current_time;
+                  }
+
+                  // Sleep only AFTER firing, then spin the remainder - the
+                  // same 90/10 split the original vsync path used, which is
+                  // what makes the interval land on time.
+                  //
+                  // An explicit framerate_limit SLOWER than the display rate
+                  // still throttles this thread, but it does not change
+                  // vblank_interval_ms: the guest keeps a correct display
+                  // clock either way. That separation is the point of the fix.
+                  double sleep_ms = vblank_interval_ms;
+                  if (cvars::framerate_limit > 0) {
+                    sleep_ms = std::max(
+                        sleep_ms,
+                        1000.0 / static_cast<double>(cvars::framerate_limit));
+                  }
+                  threading::NanoSleep(static_cast<uint64_t>(
+                      sleep_ms * 1000000.0 * duration_scalar));
+                }
                 continue;
               }
 
