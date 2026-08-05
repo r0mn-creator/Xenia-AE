@@ -62,11 +62,18 @@ behaviour on a common path · **LOW** = diagnostics only, inert when off.
   earlier note claimed `screencap` could not capture the emulator's SurfaceView;
   that is **wrong** and cost us a diagnostic tool for weeks.
 
-### ⚠️ On-screen FPS counter does not render — **open bug**
-- `debug.canary.fps=1`, the native counter works (harness collected 179 samples
-  from `XEFPS` log lines), but the top-centre `fps_counter` TextView is absent
-  from a screenshot. The `FPS 8.9` badge visible top-left is the **Odin's own**
-  system overlay, not ours. Measurement is unaffected (it reads the log).
+### 🔎 RETRACTED: "on-screen FPS counter does not render" was NOT a bug
+- I logged this after a screenshot showed no counter. **Wrong diagnosis.** The
+  counter works; the user confirmed it displays and then disappears.
+- **Real cause: `scripts/fps_bench.sh` turned it off.** `record` ended with
+  `setprop debug.canary.fps 0` to leave diagnostics off, so the counter vanished
+  the instant the 180 s run finished - which is exactly when the screenshot was
+  taken. The tool changed the state it was measuring.
+- **Fixed:** the script now saves every `debug.canary.*` prop it touches and
+  restores the prior value instead of forcing everything to 0.
+- **Lesson (recurring in this project):** before reporting a component broken,
+  check whether *our own instrumentation* changed its state. This is the third
+  time a measurement artifact was mistaken for a defect.
 
 ### ★ vblank flood FIXED — and the +24.8% vsync "win" was ARTIFACT
 - **File:** `gpu/graphics_system.cc` (frame limiter)

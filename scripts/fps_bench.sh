@@ -49,9 +49,17 @@ record() {
     [ -z "$pid" ] && { echo "ERROR: emulator not running - launch a game first"; exit 1; }
 
     # Everything else off: this is the "how would Xenia AE run" state.
-    for p in testrig.master gpu audio jit mem kernel frame_budget \
-             log_kernel_calls halo3_vista_probe; do
-        adb -s "$DEV" shell "setprop debug.canary.$p 0" >/dev/null 2>&1
+    # Saved first, and restored when the run ends - a benchmark must not
+    # silently change the state the user left the device in. The first version
+    # of this script forced them off and never put them back, which switched
+    # the on-screen FPS counter off mid-session and looked like a counter bug.
+    local props="testrig.master gpu audio jit mem kernel frame_budget \
+                 log_kernel_calls halo3_vista_probe fps"
+    SAVED_PROPS=""
+    for p in $props; do
+        v=$(adb -s "$DEV" shell "getprop debug.canary.$p" | tr -d '\r')
+        SAVED_PROPS="$SAVED_PROPS $p=$v"
+        [ "$p" = "fps" ] || adb -s "$DEV" shell "setprop debug.canary.$p 0" >/dev/null 2>&1
     done
 
     local before
@@ -62,7 +70,11 @@ record() {
     echo "recording '$name' for ${dur}s - drive normally, same route every run"
     for i in $(seq "$dur" -5 5); do printf "\r  %3ds remaining " "$i"; sleep 5; done
     printf "\r                    \r"
-    adb -s "$DEV" shell "setprop debug.canary.fps 0"
+    # Restore whatever the user had before, rather than forcing everything off.
+    for kv in $SAVED_PROPS; do
+        k="${kv%%=*}"; v="${kv#*=}"
+        adb -s "$DEV" shell "setprop debug.canary.$k '$v'" >/dev/null 2>&1
+    done
 
     adb -s "$DEV" shell "grep XEFPS $LOG 2>/dev/null" | tr -d '\r' \
         | tail -n +$((before + 1)) > "$OUTDIR/$name.raw"
