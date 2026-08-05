@@ -246,3 +246,70 @@ that this title on this hardware lands in the low-to-mid teens.
 2. **Disassemble `826DEFD0` as PowerPC** - 14% of CPU and we still do not know
    what it *does*. Could be a game hot loop (nothing to win) or a pathological
    translation (large win). This is the highest-variance unknown.
+
+---
+
+## FULL BODY ANALYSIS 2026-08-05 — it contains a guest SPIN-WAIT
+
+Earlier only the first ~40 of 357 instructions (the prologue) were examined,
+which is where the stackpoint code was found. The **body** tells a different
+story and **weakens the call-overhead theory**.
+
+| metric | value |
+|---|---|
+| total instructions | 357 |
+| **calls (`blr`/`bl`)** | **4** |
+| loads | 53 (14%) |
+| stores | 59 (16%) |
+| **`mov`** | **105 (29%)** |
+| `movk` | 23 |
+| `rev` (endian swap) | 16 |
+| **`yield`** | **8** |
+
+### 1. Call overhead is NOT the story here
+
+Only **4 calls in 357 instructions**. At ~15 instructions of stackpoint
+bookkeeping per call that is ~60 instructions of a 357-instruction function -
+real, but nowhere near enough to explain 14% of total CPU. **The stackpoint
+theory was wrong twice**: once refuted by the hang test, and again here on the
+numbers.
+
+### 2. 29% of the function is `mov` (36% counting `movk`)
+
+105 `mov` + 23 `movk` = 128 of 357 instructions doing nothing but shuffling
+registers and materialising constants. That is a strong smell of **poor
+register allocation / constant rematerialisation** in the a64 backend. Worth
+comparing against what the x64 backend emits for the same guest function.
+
+### 3. ⭐ Eight consecutive `yield` instructions — a guest spin-wait
+
+```asm
+mov  w17, #0x4000000
+str  w17, [x21, x0]      ; write 0x04000000 into guest memory (x21 = membase)
+yield ; x8               ; delay / spin hint
+ldr  x22, [x20, #0x30]
+```
+
+Straight-line, not a loop body - this is a **delay primitive** (the PPC
+`db16cyc`-style pause used in Xbox 360 spin-wait code), emitted right after
+writing a flag to guest memory.
+
+**This reframes the whole finding.** If `826DEFD0` is a lock acquire or a
+polling loop, then a large part of its 14% is the guest **waiting, not
+computing** - and CPU is burned either way. That is not a JIT code-quality
+problem and no amount of backend tuning fixes it.
+
+It also rhymes with this project's history: `project_xenia_ae_thread_start_lost_wakeup_fix`,
+`project_xenia_session14_cs_fix`, and the NFS level-load stall were all
+"guest spins forever waiting for something we never delivered".
+
+### Next (highest value first)
+
+1. **Determine what it polls.** Identify the guest address written
+   (`0x04000000` looks like a flag/handle value, not data) and what the loop
+   condition reads. If it is waiting on another guest thread, on an emulated
+   device register, or on a kernel object, the fix is on our side.
+2. **Confirm loop vs straight-line** by checking whether `826DEFD0` is called
+   repeatedly from a caller loop, or contains its own backward branch.
+3. **Compare the `mov` density against the x64 backend** for the same function
+   to judge whether the a64 register allocator is materially worse.
