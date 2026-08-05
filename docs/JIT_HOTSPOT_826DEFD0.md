@@ -95,3 +95,51 @@ adb shell setprop debug.canary.perf_map 1     # BEFORE launching
 Map lands beside `xe.log` at `.../files/xeniaae/perf-<pid>.map`.
 **Turn perf_map off before any FPS benchmark** - it costs a lock + flushed
 write per compiled function.
+
+---
+
+## ANSWERED 2026-08-05: the shadow stack is `stackpoints`, and it already has a cvar
+
+Offsets confirmed exactly against `A64BackendContext` (`a64_backend.h`):
+`stackpoints` = **0x98**, `current_stackpoint_depth` = **0xac**, matching
+`[x19,#0x98]` / `[x19,#0xac]` in the disassembly. `x19` = backend context,
+`x20` = guest `PPCContext`.
+
+```cpp
+DEFINE_bool(a64_enable_host_guest_stack_synchronization, true,
+    "Records entries for guest/host stack mappings at function starts "
+    "and checks for reentry at return sites. Has slight performance "
+    "impact, but fixes crashes in games that use setjmp/longjmp.", "a64");
+```
+
+Each entry is 16 bytes (`host_stack_`, `guest_stack_`, `guest_return_address_`),
+capped by `a64_max_stackpoints` (65536 — the `cmp w9, #0x10000` in the dump).
+
+**Both `PushStackpoint()` and `PopStackpoint()` early-out on the cvar**, so
+setting it false removes the entire prologue block *and* the post-call depth
+verification. **No rebuild needed to test.**
+
+### Why this is a real candidate, not just overhead
+
+It is load-bearing for titles using setjmp/longjmp. But note this project
+already replaced JIT unwinding with setjmp/longjmp in `XThread::Reenter()`
+(`project_xenia_ae_halo3_reentry_fix`) precisely because DWARF unwind was
+unreliable on bionic — so the guest-side longjmp cases and our host-side
+reentry are different problems, and NFS Carbon may not need this at all.
+
+The author calls it a "slight performance impact". Measured reality: it is
+~15 instructions on **every guest call**, in a workload where guest threads are
+57% of process CPU.
+
+### The experiment
+
+```
+# global config, [a64] section:
+a64_enable_host_guest_stack_synchronization = false
+```
+Then a **180 s** `fps_bench.sh` run vs `vblank_fixed` (9.67 median).
+
+⚠️ Read at **emit time**, so it must be set before the game compiles code -
+set it, then launch fresh.
+⚠️ **Halo 3 is the risk case** - re-test it before considering this permanent.
+⚠️ If it crashes with a longjmp-using title, that is the cvar doing its job.
