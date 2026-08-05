@@ -313,3 +313,78 @@ It also rhymes with this project's history: `project_xenia_ae_thread_start_lost_
    repeatedly from a caller loop, or contains its own backward branch.
 3. **Compare the `mov` density against the x64 backend** for the same function
    to judge whether the a64 register allocator is materially worse.
+
+---
+
+## ⭐ #1 ANSWERED: it is a guest POLLING LOOP on a status bit
+
+Decoded the body. `[x20,#0x30]` is guest **r1** (stack pointer) - confirmed
+against `PushStackpoint`, which uses `offsetof(PPCContext, r[1])`.
+
+### Structure
+
+```asm
+; --- standard PPC frame setup: stwu r1, -0x80(r1) ---
+ldr  x22, [x20,#0x30]      ; r1
+sub  x23, x22, #0x80
+rev/str                     ; link old SP at [new SP]
+str  x23, [x20,#0x30]      ; r1 = new SP
+
+ldr  x22, [x20,#0x40]      ; r3 = a pointer argument
+ldr  w22, [x21, x0]        ; deref it
+str  x22, [x20,#0x110]     ; keep the loaded pointer/handle
+
+; --- delay counter on the stack ---
+mov  w17, #0x4000000
+str  w17, [x21, SP+0x50]   ; NOTE: stored WITHOUT rev
+
+loop:                       ; <- 0x400178
+  yield x8                  ; pause primitive
+  ldr  w23, [x21, SP+0x50]
+  rev  w23, w23             ; read back byte-swapped
+  sub  x23, x23, #1         ; counter--
+  rev/str back
+  ldr  w22, [x21, SP+0x50]
+  cmp  w22, #0
+  cset ...                  ; CR bookkeeping into [x20,#0x18..0x1a]
+  cbz  w22, loop            ; loop while counter != 0
+
+; --- then poll a status byte ---
+ldr  x22, [x20,#0x110]
+add  w0, w22, #0x2a3d
+ldrb w22, [x21, x0]        ; load BYTE at (ptr + 0x2a3d)
+and  x22, x22, #4          ; test bit 2
+```
+
+### The counter is 4, not 67 million
+
+`0x04000000` is stored **without** a byte swap but read back **with** one. The
+guest is big-endian, so guest value `4` is bytes `00 00 00 04`, which as a host
+little-endian word is `0x04000000`. The compiler folded the swap into the
+constant. **The delay is 4 iterations x 8 `yield` = 32 yields**, i.e. a short
+`db16cyc`-style pause - not a long stall.
+
+### What this means
+
+`826DEFD0` is a **spin-wait**: short pause, then poll **bit 2 (0x04) of the byte
+at `+0x2a3d`** from a pointer passed in **r3**, repeat.
+
+So a large share of its **14% of total CPU is the guest polling, not computing.**
+Backend/JIT tuning cannot fix that - the CPU burns whether or not the emitted
+code is good. What matters is **how long the guest has to wait**, i.e. whether
+*we* are slow to set that bit.
+
+### Next: find who sets `+0x2a3d` bit 2
+
+1. The pointer comes from **r3** (caller-supplied) and is dereferenced first, so
+   `+0x2a3d` is an offset into a **guest structure**, not a fixed MMIO address.
+   Identify the structure by logging r3 at entry to `826DEFD0`.
+2. Determine whether that byte is written by **another guest thread** (pure
+   guest-side synchronisation, little we can do) or by **the emulator** on
+   behalf of a device / kernel object (a wakeup we may be delivering late -
+   which is exactly the class of bug this project has hit repeatedly:
+   `project_xenia_ae_thread_start_lost_wakeup_fix`, `project_xenia_session14_cs_fix`).
+3. A guest memory **write watch** on `ptr+0x2a3d` is the direct way to answer 2.
+
+If it is (2), this is the first lead in the whole performance investigation with
+genuinely unbounded upside.
