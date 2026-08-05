@@ -1,6 +1,40 @@
-# Next session: fix the vblank flood
+# vblank flood — FIX WRITTEN, AWAITING ON-DEVICE TEST
 
-**Start here.** Everything below is written to be picked up cold.
+> **STATUS 2026-08-05:** the fix is **implemented, built, and installed** on the
+> Odin 2 (`3a478943`). `debug.canary.vblank_fix` defaults **ON**. FPS counter is
+> enabled. **Nothing has been verified on device yet.**
+>
+> ## Test in this order
+>
+> **1. Timing first — needs no instrumentation.** Launch NFS Carbon, reach a
+> scene where a character says "press Y". Before the fix the icon appeared
+> visibly **late**. If it now appears promptly, the fix worked. This is the
+> actual bug; the frame rate is secondary.
+>
+> **2. Then frame rate — 180 s, not 60 s.**
+> ```
+> ./scripts/fps_bench.sh record vblank_fixed 180
+> ./scripts/fps_bench.sh compare vsync_off_180 vblank_fixed
+> ```
+>
+> **Expect to possibly lose the +24.8%.** That gain (9.76 -> 12.18) was measured
+> *with* the broken ~1000 Hz clock and was likely part artifact. A drop back
+> toward ~10 FPS **with correct timing is not a failed fix** — it is the earlier
+> number being revealed as inflated. Better to learn that now than to build a
+> month of optimisation on a false baseline.
+>
+> **3. Re-test Geometry Wars and Halo 3** — this touches every title.
+>
+> **Bisect if anything regresses:** `setprop debug.canary.vblank_fix 0`
+>
+> **Also verify:** global `vsync` is still `true` in `xenia-canary.config.toml`
+> (the emulator was *running* when that was edited, so it may have been
+> rewritten on exit). Carbon's `config/454107EC.config.toml` should still be
+> `[GPU] vsync = false`.
+
+---
+
+## Background (what the bug was, and how it was fixed)
 
 ## The bug, in one paragraph
 
