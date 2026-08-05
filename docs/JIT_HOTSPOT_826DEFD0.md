@@ -143,3 +143,58 @@ Then a **180 s** `fps_bench.sh` run vs `vblank_fixed` (9.67 median).
 set it, then launch fresh.
 ⚠️ **Halo 3 is the risk case** - re-test it before considering this permanent.
 ⚠️ If it crashes with a longjmp-using title, that is the cvar doing its job.
+
+---
+
+## TESTED 2026-08-05: disabling stackpoints HANGS NFS Carbon — **do not pursue**
+
+`--a64_enable_host_guest_stack_synchronization=false` (launch arg, verified
+applied: `extra launch args: --a64_enable_host_guest_stack_synchronization=false`).
+
+**Result: hard hang at the first load screen.** Not a crash.
+
+| observation | value |
+|---|---|
+| emulator FPS counter | **0.6 FPS** |
+| Odin system counter | 3.0 |
+| **Main XThread** | **108% of a core** - spinning |
+| **GPU Commands** | **0%** - absent from the busy list entirely |
+| errors in `xe.log` | only pre-existing missing XInput exports; **no** assert, no crash, no `Overflowed stackpoints` |
+
+The guest spins at full core while producing **no GPU work at all**. That is the
+project's known "hang with zero errors" signature - see
+`project_xenia_ae_thread_start_lost_wakeup_fix`.
+
+### What this proves
+
+The stackpoint shadow stack is **load-bearing for NFS Carbon**, not dead debug
+weight. Carbon evidently uses setjmp/longjmp (or an equivalent non-local jump),
+and without the recorded host/guest stack mappings the recovery path cannot
+restore the correct frame, so the guest never makes progress.
+
+The cvar's description is accurate; my framing of it as "overhead" was wrong.
+It is ~15 instructions per guest call **that Carbon actually needs**.
+
+### Scoreboard for this hypothesis
+
+- FPS gain: **none - the game does not run**
+- Hypothesis "the shadow stack is gateable overhead": **REFUTED for Carbon**
+- Cost to find out: one launch-arg toggle, no rebuild, ~5 minutes. This is
+  exactly what the toggle discipline is for.
+
+### What remains from the JIT hotspot finding
+
+Still valid and unaffected by this result:
+
+1. **`guest_826DEFD0` = 14.08%, `guest_826DAAF8` = 6.11% of all process CPU.**
+   The concentration is real; only the *explanation* (call bookkeeping) is now
+   in doubt. Those functions must be disassembled as **PowerPC** to learn what
+   the game is actually doing in them.
+2. **`__savegprlr_29`/`__restgprlr_29` = 3.67% combined.** Untouched by this
+   test - these are PowerPC out-of-line prologue/epilogue helpers, and whether
+   the backend inlines them is a separate question. **Now the top candidate.**
+3. **`[vdso]` 9.4-11%** (`clock_gettime`) - still completely unexamined.
+
+### Reverted
+
+`debug.canary.extra_args` cleared. No config file was ever modified.
