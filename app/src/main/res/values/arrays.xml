@@ -414,4 +414,16 @@
         <item>sRGB(CRT)</item>
         <item>BT.709(HDTV)</item>
     </string-array>
+    <!-- Internal render resolution multiplier. A real user-facing feature:
+         higher = sharper rendering on strong devices, at a GPU cost. -->
+    <string-array name="es_arr_gpu_draw_resolution_scale">
+        <item>1x (native)</item>
+        <item>2x</item>
+        <item>3x</item>
+    </string-array>
+    <string-array name="es_arr_v_gpu_draw_resolution_scale">
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+    </string-array>
 </resources>

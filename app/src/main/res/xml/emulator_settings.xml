@@ -212,6 +212,16 @@
         <org.xeniaae.preference.CheckBoxPreference app:title="@string/es_gpu_vsync"
             app:key="GPU|vsync"
             app:summary="@string/es_hint_gpu_vsync" />
+        <org.xeniaae.preference.ListPreference app:title="@string/es_gpu_draw_resolution_scale_x"
+            app:entryValues="@array/es_arr_v_gpu_draw_resolution_scale"
+            app:entries="@array/es_arr_gpu_draw_resolution_scale"
+            app:key="GPU|draw_resolution_scale_x"
+            app:summary="@string/es_hint_gpu_draw_resolution_scale_x" />
+        <org.xeniaae.preference.ListPreference app:title="@string/es_gpu_draw_resolution_scale_y"
+            app:entryValues="@array/es_arr_v_gpu_draw_resolution_scale"
+            app:entries="@array/es_arr_gpu_draw_resolution_scale"
+            app:key="GPU|draw_resolution_scale_y"
+            app:summary="@string/es_hint_gpu_draw_resolution_scale_y" />
         <org.xeniaae.preference.CheckBoxPreference app:title="@string/es_gpu_store_shaders"
             app:key="GPU|store_shaders"
             app:summary="@string/es_hint_gpu_store_shaders" />
