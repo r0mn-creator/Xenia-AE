@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/draw_util.h"
 
+#include "xenia/base/ae_fix_toggle.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -302,9 +303,48 @@ void GetHostViewportInfo(GetViewportInfoArgs* XE_RESTRICT args,
   auto pa_su_vtx_cntl = args->pa_su_vtx_cntl;
 
   // Obtain the original viewport values in a normalized way.
+  // Y-SIGN EXPERIMENTS (Halo 3 menu vista renders upside down; the 2D UI over
+  // it does not). There is no Vulkan-specific Y negation anywhere else - not a
+  // negative viewport height, not in the SPIR-V translator - so ndc_scale[1],
+  // whose sign originates here, is the ONLY thing that can flip Y.
+  //
+  // Normal 3D: D3D9's viewport transform makes the guest's PA_CL_VPORT_YSCALE
+  // negative (-h/2), giving ndc_scale[1] = -1.0, which correctly converts
+  // Xenos Y-up NDC to Vulkan Y-down. Pre-transformed 2D UI disables the
+  // viewport transform and takes the 1.0f fallback - also correct, because its
+  // coordinates are already screen-space Y-down.
+  //
+  // Hypothesis: the vista is CLIP-SPACE geometry with the viewport Y scale
+  // disabled, so it takes the bare 1.0f fallback and gets no flip at all.
+  //
+  // Two toggles, both default OFF, to discriminate. They are diagnostics, NOT
+  // fixes: this code is shared by every title, so anything kept must be
+  // re-tested on NFS Carbon and Geometry Wars.
+  //
+  //   debug.canary.ytest_fallback=1  negate ONLY the fallback (1.0f -> -1.0f).
+  //       Cannot affect draws that supply their own YSCALE, so normal 3D is
+  //       untouched. If the vista corrects, the hypothesis is confirmed.
+  //
+  //   debug.canary.ytest_invert=1    negate the guest's YSCALE as well.
+  //       Expected to invert everything that currently renders correctly. If
+  //       the vista ALSO corrects under this, it is on the normal path and the
+  //       hypothesis above is wrong. If the vista stays upside down under BOTH,
+  //       the inversion is not in the viewport math at all - look at the EDRAM
+  //       resolve -> texture round trip instead.
+  const bool ytest_fallback =
+      XE_AE_EXPERIMENT_ENABLED("debug.canary.ytest_fallback");
+  const bool ytest_invert =
+      XE_AE_EXPERIMENT_ENABLED("debug.canary.ytest_invert");
+  float y_scale_value;
+  if (pa_cl_vte_cntl.vport_y_scale_ena) {
+    y_scale_value = ytest_invert ? -args->PA_CL_VPORT_YSCALE
+                                 : args->PA_CL_VPORT_YSCALE;
+  } else {
+    y_scale_value = ytest_fallback ? -1.0f : 1.0f;
+  }
   float scale_xy[] = {
       pa_cl_vte_cntl.vport_x_scale_ena ? args->PA_CL_VPORT_XSCALE : 1.0f,
-      pa_cl_vte_cntl.vport_y_scale_ena ? args->PA_CL_VPORT_YSCALE : 1.0f,
+      y_scale_value,
   };
   float scale_z =
       pa_cl_vte_cntl.vport_z_scale_ena ? args->PA_CL_VPORT_ZSCALE : 1.0f;
