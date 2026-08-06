@@ -81,3 +81,64 @@ adb shell "grep VTXDIST .../xe.log"
 ```
 Remote launch note: `am start` on `EmulatorActivity` does **not** work - it needs
 `MainActivity` first. Tap selects a tile, then `KEYCODE_DPAD_CENTER` activates.
+
+---
+
+## ⭐ Buffer 91 vs 94: the histogram answers it
+
+Confirmed on a second independent 60 s sample (12370 lines): identical numbers,
+and **`lastnz = 15998` byte-for-byte both times**. A deterministic cutoff, not
+random store loss - random loss cannot land on the same index twice across
+~22000 samples.
+
+### The 10-bucket histogram bins the buffer by INDEX RANGE
+
+| buffer | consumer shader | histogram | reading |
+|---|---|---|---|
+| **91** | `6A1B637595275378` | `108 107 108 107 107 108 107 108 107 107` | **uniform across all 10 buckets** |
+| **94** | `9EA48FC2B26C325D` / `488D9488AB7ED7D8` | `7954 1053 0 0 0 0 0 0 0 0` | **buckets 2-9 completely empty** |
+
+Buffer 94 is 143360 entries, so each bucket spans 14336. `lastnz = 15998` falls
+in bucket 1 - and the histogram agrees exactly: bucket 0 full (7954), bucket 1
+partial (1053), buckets 2-9 **zero**. Two independent measures of the same fact.
+
+### What actually differs
+
+1. **Buffer 91 is sized to its content**: 1074 entries, 1074 written, uniformly
+   distributed. **Buffer 94 is 143360 entries with ~16000 written**, all at the
+   bottom of the range.
+2. **Consumer draw sizes differ by two orders of magnitude.** Buffer 91's
+   consumers draw 39-4968 vertices. Buffer 94's consumers draw **1-64**.
+
+### ⭐ Leading hypothesis: 8.1% is CORRECT, and there is no underfill
+
+Everything is consistent with `0x05746E80` being a **fixed worst-case
+allocation** that the main-menu scene simply does not need to fill:
+
+- the cutoff is **deterministic** (scene-determined, not flaky)
+- the written region is **dense** (72.9% - the producer is writing what it means to)
+- a **right-sized** buffer in the same frame on the same GPU fills **100%**
+
+If that holds, "Adreno underfills the memexport buffer" was never real - it was
+an artifact of comparing bytes-written against a buffer far larger than the
+scene, measured through an instrument (`readback_memexport=false`) that was
+reading guest RAM rather than the GPU buffer.
+
+**That would mean all five previous fix attempts were aimed at a non-existent
+bug**, which also explains why every one of them failed without any of them
+being obviously wrong.
+
+### The one measurement that settles it
+
+Run the **RADV desktop oracle** on the Halo 3 menu and read `nonzero/total` for
+the same buffer. RADV renders Halo 3 **correctly**.
+
+- RADV also stops near 16000 → **fill rate is a red herring**; the bug is
+  entirely in the consumer (`488D9488AB7ED7D8`) or its constants, and the
+  producer side can be dropped from the investigation.
+- RADV fills far more → underfill is real after all, and the deterministic
+  cutoff at 15998 is the thing to explain.
+
+Until that control exists, **no conclusion about "underfill" is supportable in
+either direction** - which has been true for this entire investigation and is
+why it kept stalling.
