@@ -71,3 +71,54 @@ cd /home/roman/xeniatest/oracle/build/bin/Linux/Release
                --readback_memexport=true "/home/roman/xeniatest/games/Halo 3.iso"
 grep VALSHAPE xenia.log
 ```
+
+---
+
+## ⭐ RESULT (2026-08-06): FP-mode hypothesis REFUTED; `meanabs` is the real signal
+
+Both sides, 400 samples each, same Media ID `699E0227`, Halo 3 menu,
+`readback_memexport=true`. Adreno on Turnip.
+
+| metric | RADV (**correct**) | Adreno (**broken**) | |
+|---|---|---|---|
+| **denorm** | **3080** | **2970** | **SAME** |
+| zero | 134994 | 133656 | same |
+| nonfinite | 574 | 676 | +18% |
+| finitenz | 7786 | 9028 | +16% |
+| **meanabs** | **1.213e+37** | **1.923e+36** | **6.3x LOWER** |
+
+mag buckets `[<1e-3, <1, <1e2, <1e4, <1e6, >=1e6]`
+RADV `[4604, 164, 96, 99, 122, 2666]` · Adreno `[5082, 249, 156, 163, 176, 3187]`
+
+### Denormals survive — the float-mode lead is DEAD
+
+If `FPCR.FZ` were flushing denormals, Adreno's count would collapse toward zero.
+**2970 vs 3080 is noise.** The a64/x64 asymmetry in `HALO3_FP_MODE_LEAD.md` is
+real in the source but **does not manifest on this path**. Do not pursue it for
+this bug. (Whether `AH`/`FZ16`/`RMode` matter elsewhere is untested and
+separate.)
+
+### What actually differs: mean magnitude, 6.3x lower on Adreno
+
+RADV `meanabs = 1.213e+37`, Adreno `1.923e+36`. Adreno's exported values are
+systematically **smaller**, and it has **more** nonzero values (9028 vs 7786).
+
+⚠️ **Do not over-read this.** Scene state differs between platforms (camera,
+frame, animation phase), so absolute counts are not directly comparable, and
+Adreno having more values in *every* magnitude bucket is partly just "more
+nonzero data". The **ratio** is the interesting part: same buffer, same shader,
+mean magnitude off by 6x.
+
+A collapse-to-a-point would show as magnitudes shrinking toward a common value -
+which is directionally consistent with a 6x lower mean. But it is one metric
+from one frame pair. **Confirm before building on it.**
+
+### Next
+
+1. **Control for scene state.** Capture both at a comparable menu moment, or
+   sample many frames and compare distributions rather than single medians.
+2. **If the 6x holds**, the producer is writing systematically smaller values on
+   Adreno -> look at `c78.x` and the bone matrices `c[144+aL]` (still never
+   compared) and at the producer's own math.
+3. `nonfinite` differing (574 vs 676) is worth watching but is small next to a
+   6x magnitude gap.
