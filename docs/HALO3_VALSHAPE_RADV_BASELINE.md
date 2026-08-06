@@ -122,3 +122,60 @@ from one frame pair. **Confirm before building on it.**
    compared) and at the producer's own math.
 3. `nonfinite` differing (574 vs 676) is worth watching but is small next to a
    6x magnitude gap.
+
+---
+
+## ⭐⭐ CONFIRMED: the magnitude gap is SYSTEMATIC, not scene variation
+
+The earlier caveat ("scene state differs, so counts are not comparable") is now
+**answered by the data**. Distributions over 400 samples per platform,
+empty frames excluded:
+
+| | min | median | max | internal spread |
+|---|---|---|---|---|
+| **RADV (correct)** | 1.0930e+37 | 1.2130e+37 | 1.2600e+37 | 15.3% |
+| **Adreno (broken)** | 1.7580e+36 | 1.9230e+36 | 2.1540e+36 | 22.5% |
+
+**RADV's LOWEST sample is 5.07x higher than Adreno's HIGHEST. Zero overlap
+across 799 samples.**
+
+Each platform's own spread is only 15-22%, so frame-to-frame scene variation is
+small — and cannot bridge a 5x gap. ⚠️ One RADV sample had `meanabs=0` (an empty
+frame); including it falsely produced an "overlap" verdict. Exclude empty frames
+when comparing.
+
+### What this means
+
+The producer shader `9EA48FC2B26C325D` writes values that are **systematically
+~5-6x smaller in magnitude on Adreno**, for the same buffer, same game, same
+menu. Combined with:
+
+- fill counts being comparable (**refuted** as the cause),
+- `denorm` being identical (**refuted** — not flush-to-zero),
+- `zero` count nearly identical (134994 vs 133656),
+
+...the producer is running and writing a normal *amount* of normal-*looking*
+data. The data is simply **wrong in value**, uniformly scaled down.
+
+A uniform magnitude scale factor across an entire skinning buffer points at the
+**inputs to the transform** rather than at the transform's plumbing:
+
+1. **`c78.x` and the bone matrices `c[144+aL]`** — never compared across
+   platforms, and **guest-CPU-computed**. A wrong scale in a matrix produces
+   exactly a uniform magnitude shift. **This is now the prime suspect and the
+   single highest-value remaining test.**
+2. The producer's own constant registers as uploaded on each platform.
+3. Vertex-fetch format/normalisation on the input side (a mis-scaled fetch
+   would shrink everything uniformly).
+
+Note the raw value extremes are similar (RADV -3.403e38..3.400e38, Adreno
+-3.224e38..3.323e38), so it is **not** a simple clamp — the tails reach the same
+place while the bulk sits lower. That fits a scaling/weighting difference more
+than a saturation or precision failure.
+
+### Discipline note
+
+Three hypotheses have now been killed by measurement in this investigation:
+underfill, denormal flushing, and (as a cause) fill-rate generally. The
+magnitude gap is the **first** metric that survives a disjoint-distribution
+test. Treat it as a lead worth pursuing, not as a diagnosis.
