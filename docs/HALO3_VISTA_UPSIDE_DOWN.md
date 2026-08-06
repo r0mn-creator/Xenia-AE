@@ -145,3 +145,49 @@ Log `vport_y_scale_ena`, `clip_disable`, `PA_CL_VPORT_YSCALE` and the final
 ⚠️ This fallback is shared by **every title**, so any change must be toggled
 (`debug.canary.*`) and re-tested on NFS Carbon and Geometry Wars, not just
 Halo 3.
+
+---
+
+## ⭐⭐ TEST 1 RESULT (2026-08-06) — HYPOTHESIS CONFIRMED
+
+`debug.canary.ytest_fallback=1` (negate only the `1.0f` Y-scale fallback).
+Halo 3 menu, Turnip, three stable screenshots.
+
+**The vista changed from UPSIDE-DOWN to BLANK WHITE. The 2D UI was completely
+unaffected.**
+
+### What this establishes
+
+1. **The vista is the consumer of the `1.0f` fallback.** Changing only that
+   value changed only the vista - direct causal proof, not inference.
+2. **The 2D UI supplies its own `PA_CL_VPORT_YSCALE`** and does *not* use the
+   fallback. This is the **reverse** of the original reasoning, which assumed
+   the UI took the fallback and the 3D path supplied its own scale. The
+   conclusion survives; the reasoning behind it did not.
+3. **A bare sign flip is not the fix.** Negating the scale alone mirrors about
+   the **NDC origin**, not the viewport centre, so the geometry lands
+   off-screen - which is exactly the white frame observed.
+
+### Test 2 (built, installed, NOT yet run)
+
+`debug.canary.ytest_offset=1` negates `ndc_offset[1]` alongside the scale so the
+mirror happens in place. Read with `ytest_fallback=1`.
+
+- vista appears **right-side-up** → that is the fix
+- vista appears but **still inverted** → mirroring about the wrong axis; the
+  offset needs a different correction than a plain negation
+- still **blank** → the offset is not the missing piece; something else places
+  this geometry
+
+### State on pause
+
+All experiment toggles reverted to 0 (they are `XE_AE_EXPERIMENT`, default OFF,
+so the shipped build behaves exactly as before). `readback_memexport` back to
+`false`. `xe.log` deleted - the VTXDIST probe had grown it to **3.6 GB**.
+
+⚠️ This fallback is shared by **every title**. Even a confirmed fix must be
+toggled and re-tested on **NFS Carbon** and **Geometry Wars** before becoming a
+default.
+
+Incidental: Halo 3's menu runs at **~15-18 FPS**, notably better than NFS
+Carbon's ~9.7.
