@@ -163,3 +163,7 @@ app/src/main/cpp/xenia-canary/recent.toml
 symfs/
 perf.data
 perf-*.map
+
+# Local reference documents (ARM Architecture Reference Manual is ~51 MB).
+# Never commit - a 335 MB file already got a push rejected by GitHub once.
+reference/
