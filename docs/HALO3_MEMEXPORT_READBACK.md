@@ -142,3 +142,75 @@ the same buffer. RADV renders Halo 3 **correctly**.
 Until that control exists, **no conclusion about "underfill" is supportable in
 either direction** - which has been true for this entire investigation and is
 why it kept stalling.
+
+---
+
+## ⭐⭐⭐ CONTROL MEASUREMENT (2026-08-06): THE UNDERFILL THEORY IS DEAD
+
+Desktop **RADV** oracle, Halo 3 menu, **same Media ID `699E0227`**,
+`--readback_memexport=true`, 400 probe samples. RADV **renders Halo 3
+correctly.**
+
+| platform | renders | buffer | nonzero / total | **fill** | lastnz | histogram |
+|---|---|---|---|---|---|---|
+| **RADV (desktop)** | ✅ **CORRECT** | `0x05748D80` | 8733 / 143360 | **6.1%** | 10238 | `8733 0 0 0 0 0 0 0 0 0` |
+| **Adreno (Odin 2)** | ❌ collapsed | `0x05746E80` | 11661 / 143360 | **8.1%** | 15998 | `7954 1053 0 0 0 0 0 0 0 0` |
+
+### The platform that renders CORRECTLY fills the buffer LESS
+
+**6.1% correct vs 8.1% broken.** If underfill caused the collapse, the working
+platform would fill *more*, not less. It fills **28% less** and looks right.
+
+**Fill rate is a red herring. It always was.**
+
+### What this retires
+
+- "Adreno underfills the memexport buffer" - **refuted by direct measurement**.
+- The five previous fix attempts all targeted store reliability or
+  slot-selection math to raise the fill. They were aimed at a bug that does not
+  exist, which is why every one failed without any being obviously wrong.
+- The `~6%` / `58.5%` / `8.1%` numbers quoted across this investigation were
+  never anomalies. **Partial fill is normal** - the buffer is a fixed
+  worst-case allocation the menu scene does not need to fill.
+
+### Why it took so long to see
+
+1. `readback_memexport` defaulted **false**, so VTXDIST read **guest RAM**
+   instead of the GPU buffer - the instrument was blind.
+2. The oracle was believed unable to run Halo 3. Per the oracle probe's own
+   comment, that belief came from an early unrate-limited probe emitting
+   1.8M lines / 318 MB, which "slowed the emulator to an apparent hang and was
+   misread as 'desktop Xenia can't run Halo 3'". **Another instrument
+   artifact.**
+
+Both blockers were measurement problems, not emulator problems.
+
+### Where the bug actually is
+
+The producer writes a comparable amount on both platforms. So the difference is
+**not how much** is written but **what** is written, or **how the consumer reads
+it**:
+
+1. **Compare the VALUES**, not the counts. Dump the actual bytes of
+   `0x0574xxxx` on both platforms and diff. The counts now match closely enough
+   that a value diff is meaningful.
+2. **`c78.x` and the bone matrices `c[144+aL]`** - still never compared across
+   platforms. These are **guest-CPU-computed**, which keeps the a64-JIT
+   float-mode lead alive (`HALO3_FP_MODE_LEAD.md`).
+3. **The consumer shader `488D9488AB7ED7D8`** and its `slot = floor(vtxIndex /
+   c78.x)` math.
+
+Note `lastnz` differs (10238 vs 15998) and Adreno touches histogram bucket 1
+while RADV does not - so the *extent* differs even though the *counts* are
+close. Worth explaining, but it is no longer evidence of "underfill".
+
+### Reproducing the oracle side
+
+```
+cd /home/roman/xeniatest/oracle/build/bin/Linux/Release
+./xenia_canary --storage_root=/home/roman/xeniatest/oracle_data/Xenia \
+               --readback_memexport=true "/home/roman/xeniatest/games/Halo 3.iso"
+grep VTXDIST xenia.log
+```
+ISO at `/home/roman/xeniatest/games/Halo 3.iso`. The probe is already in the
+oracle source, rate-limited to 400 samples, and fires only for `vsize==573440`.
