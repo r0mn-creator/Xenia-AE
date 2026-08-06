@@ -405,6 +405,15 @@ void GetHostViewportInfo(GetViewportInfoArgs* XE_RESTRICT args,
       ndc_offset[i] = (offset_base_xy[i] - extent_axis_unscaled_float * 0.5f +
                        offset_add_xy[i]) *
                       pixels_to_ndc_axis;
+      // Negating the scale alone mirrors about the NDC ORIGIN, not the
+      // viewport centre, which throws the geometry off-screen - observed
+      // directly: ytest_fallback=1 turned the Halo 3 vista from upside-down
+      // into blank white while leaving the UI untouched. To mirror in place
+      // the offset has to be negated with it.
+      if (i == 1 && ytest_fallback && !pa_cl_vte_cntl.vport_y_scale_ena &&
+          XE_AE_EXPERIMENT_ENABLED("debug.canary.ytest_offset")) {
+        ndc_offset[i] = -ndc_offset[i];
+      }
     }
 
     // Z.
