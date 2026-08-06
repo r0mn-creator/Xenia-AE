@@ -3264,6 +3264,36 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                           cf[1], cf[2], cf[3]);
       }
       XELOGI("{}", cbuf.buffer());
+        // BONEC probe (2026-08-06): dump the constants the producer shader
+        // actually receives, as RAW BITS. Underfill, denormal flushing and
+        // fill rate have all been refuted by measurement; the one surviving
+        // signal is that exported VALUES differ (meanabs 5.07x apart, disjoint
+        // across 799 samples). But meanabs ~1e37 is absurd for vertex data, so
+        // that metric reads packed data as float32 and cannot be interpreted
+        // physically. These constants need no interpretation.
+        //
+        // c78.x is the slot divisor (consumer: slot = floor(vtxIndex/c78.x));
+        // c144+ are the bone matrices. Both are GUEST-CPU-COMPUTED, so if they
+        // differ between x64 and a64 the cause is the JIT, not the GPU.
+        // Identical bits kill the CPU-side theory outright.
+        // Hex, not %g - formatting hides the low-bit differences we are hunting.
+        {
+          xe::StringBuffer bbuf;
+          bbuf.AppendFormat("BONEC sh={:016X} c78=",
+                            vertex_shader->ucode_data_hash());
+          for (uint32_t i = 0; i < 4; ++i) {
+            bbuf.AppendFormat("{:08X} ",
+                regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (78 << 2) + i]);
+          }
+          bbuf.Append("| c144-151=");
+          for (uint32_t c = 144; c <= 151; ++c) {
+            for (uint32_t i = 0; i < 4; ++i) {
+              bbuf.AppendFormat("{:08X} ",
+                  regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (c << 2) + i]);
+            }
+          }
+          XELOGI("{}", bbuf.buffer());
+        }
       xe::StringBuffer lbuf;
       lbuf.Append("CONSTDUMP loop:");
       for (uint32_t l = 0; l < 32; ++l) {
