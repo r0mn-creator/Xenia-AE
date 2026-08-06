@@ -73,3 +73,75 @@ describes it.
 - This is **not** the memexport/geometry-collapse bug. See
   `HALO3_MEMEXPORT_READBACK.md` - and note that investigation's central
   "underfill" premise is now in serious doubt.
+
+---
+
+## ⭐ MECHANISM (2026-08-06): the `1.0f` fallback does not apply the Vulkan Y flip
+
+Traced the whole Y path end to end. There is **no Vulkan-specific Y negation
+anywhere** - not a negative viewport height, and not in the SPIR-V translator.
+`spirv_shader_translator.cc:1899` simply does:
+
+```
+position_xyz = position_xyz * ndc_scale + ndc_offset * w
+```
+
+So **`ndc_scale[1]` is the only thing that can flip Y**, and its sign comes
+entirely from `scale_xy[1]` in `draw_util.cc:305`.
+
+### Why that works for a normal 3D draw
+
+D3D9's viewport transform is `screenY = (1 - ndcY) * h/2 + y`, so the guest's
+`PA_CL_VPORT_YSCALE` is **negative** (`-h/2`). In the clipping-enabled branch:
+
+```
+ndc_scale_axis = scale_axis * 2.0f * inv_axis_extent_rounded
+               = (-h/2) * 2 / h  =  -1.0
+```
+
+`ndc_scale[1] = -1.0` converts Xenos/D3D **Y-up** NDC to Vulkan **Y-down** NDC.
+Correct - and the viewport rect itself is unaffected because the extent is
+computed from `scale_axis_abs`.
+
+### Why it works for the 2D UI
+
+UI draws are pre-transformed and disable the viewport transform, so
+`scale_xy[1]` takes the `1.0f` fallback. Their coordinates are already in
+**screen space (Y down)**, and Vulkan's NDC is also Y-down, so a **positive**
+scale is right. Correct by coincidence of conventions.
+
+### ⭐ Where it breaks
+
+The fallback is a bare `1.0f`:
+
+```cpp
+pa_cl_vte_cntl.vport_y_scale_ena ? args->PA_CL_VPORT_YSCALE : 1.0f
+```
+
+That value is correct **only** for pre-transformed screen-space geometry. For
+geometry still in **clip space (Y-up)** that merely has the viewport Y scale
+disabled, `+1.0` applies **no flip at all** - and the result renders **upside
+down**, exactly as observed.
+
+So the predicted condition for the vista draws is:
+
+> `pa_cl_vte_cntl.vport_y_scale_ena == 0` **while** `pa_cl_clip_cntl.clip_disable == 0`
+
+i.e. clip-space geometry with the viewport Y scale disabled. The fallback needs
+to be **-1.0f** (or the flip applied separately) on that path, while staying
+`+1.0f` for the pre-transformed 2D path.
+
+### Test before changing anything
+
+Log `vport_y_scale_ena`, `clip_disable`, `PA_CL_VPORT_YSCALE` and the final
+`ndc_scale[1]` for a vista draw and a UI draw.
+
+- vista shows `y_scale_ena=0, clip_disable=0` → **hypothesis confirmed**, and
+  the fix is a conditional fallback sign.
+- vista shows `y_scale_ena=1` with negative YSCALE → hypothesis **wrong**; the
+  viewport math is fine and the inversion is in the EDRAM resolve -> texture
+  round trip instead.
+
+⚠️ This fallback is shared by **every title**, so any change must be toggled
+(`debug.canary.*`) and re-tested on NFS Carbon and Geometry Wars, not just
+Halo 3.
