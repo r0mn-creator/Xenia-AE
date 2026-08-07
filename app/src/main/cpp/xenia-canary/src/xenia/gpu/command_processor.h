@@ -33,6 +33,10 @@ class ByteStream;
 
 namespace gpu {
 
+// See command_processor.cc - bone-matrix constant write counter, read by the
+// draw-time BONEC probe to measure write/draw interleaving.
+extern std::atomic<uint32_t> g_bone_write_count;
+
 enum class GPUSetting { ClearMemoryPageState, ReadbackMemexport };
 
 enum class ReadbackResolveMode {

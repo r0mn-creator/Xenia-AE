@@ -3279,7 +3279,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // Hex, not %g - formatting hides the low-bit differences we are hunting.
         {
           xe::StringBuffer bbuf;
-          bbuf.AppendFormat("BONEC sh={:016X} c78=",
+          bbuf.AppendFormat("BONEC bw={} sh={:016X} c78=",
+                            g_bone_write_count.load(),
                             vertex_shader->ucode_data_hash());
           for (uint32_t i = 0; i < 4; ++i) {
             bbuf.AppendFormat("{:08X} ",

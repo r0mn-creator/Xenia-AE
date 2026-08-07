@@ -191,3 +191,63 @@ default.
 
 Incidental: Halo 3's menu runs at **~15-18 FPS**, notably better than NFS
 Carbon's ~9.7.
+
+---
+
+## ⭐ SOURCE-LEVEL DIVERGENCE FOUND (2026-08-07) — AE's resolve shaders are REDUCED
+
+Unlike everything else in this investigation, this is a **static source diff**.
+It cannot be a sampling error, a scene-state difference, or a misplaced probe.
+
+`src/xenia/gpu/shaders/resolve.xesli` — the shared include every resolve shader
+pulls in — differs from upstream by **857 lines**:
+
+| | oracle (**renders correctly**) | AE (**broken**) |
+|---|---|---|
+| lines | **989** | **818** (171 fewer) |
+
+**In the oracle but NOT in AE:**
+`decode_pwl_gamma`, `dest_number_is_unorm`, `dest_num_format`,
+`dest_row_pitch_macro_tiles`
+
+**In AE instead:**
+`dest_row_pitch_aligned`, `dest_slice_pitch_aligned`, `bpp_log`,
+`pixel_stride_ints`
+
+So AE is **missing operations upstream performs** (PWL gamma decode, destination
+format classification) and uses a **different destination addressing model**
+(plain alignment vs macro-tiles). That is not an equivalent-result rewrite - it
+changes both the values written and where they land.
+
+`resolve_full_32bpp.cs.xesl` itself is **byte-identical**; the divergence is
+entirely in the shared include, which is why all 12 compiled resolve shaders
+show 5-15k differing bytecode lines. `apply_gamma_pwl.xesli` and
+`apply_gamma_table.xesli` also differ.
+
+This is the EDRAM resolve path - where `RENDER_PIPELINE_AUDIT.md` places the
+vista, and the shader family the flat-navy bug lived in.
+
+### Swap test ATTEMPTED and REVERTED — the shader set is coupled
+
+⚠️ **The Android build compiles shaders from source** (`compile_shader_spirv.py`
++ `glslangValidator`); the checked-in bytecode under `shaders/bytecode/` is
+**regenerated**, so editing bytecode alone does nothing.
+
+Copying the oracle's `resolve.xesli` alone failed to compile
+(`resolve_clear_32bpp.cs.xesl` depends on AE's version). Copying **all 34**
+resolve sources also failed - `glslangValidator` exits non-zero with **no
+diagnostic at all**, which looks like a crash rather than a syntax error.
+
+**Tree reverted with `git checkout`; build verified SUCCESSFUL afterwards.**
+
+### Next
+
+1. **Read the 857-line diff and classify it.** Is AE's version an older
+   upstream snapshot, or a deliberate Adreno-targeted reduction? Git history on
+   that file should say.
+2. If it is drift, port upstream's version **with its C++ side** -
+   `vulkan_render_target_cache.cc` sets the push constants these shaders read,
+   and the two must match. That is the likely reason a shader-only swap crashed
+   the compiler.
+3. `decode_pwl_gamma` being absent is independently suspicious given
+   `apply_gamma_pwl.xesli` also differs.

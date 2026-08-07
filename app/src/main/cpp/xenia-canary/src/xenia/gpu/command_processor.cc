@@ -71,6 +71,13 @@ DEFINE_bool(
 namespace xe {
 namespace gpu {
 
+// Bone-matrix constant write counter, read by the draw-time BONEC probe to
+// measure write/draw INTERLEAVING. Writes arrive equally on both platforms
+// (434k vs 438k) yet draws see 165 vs 11 distinct states, so the question is
+// whether writes and draws alternate or whether writes batch up and draws only
+// ever observe the final state.
+std::atomic<uint32_t> g_bone_write_count{0};
+
 // This should be written completely differently with support for different
 // types.
 void SaveGPUSetting(GPUSetting setting, uint64_t value) {
@@ -728,9 +735,8 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   if (XE_AE_DIAG_ENABLED("debug.canary.cwrite")) {
     if (index >= XE_GPU_REG_SHADER_CONSTANT_000_X + (144u << 2) &&
         index <= XE_GPU_REG_SHADER_CONSTANT_000_X + (151u << 2) + 3u) {
-      static std::atomic<uint32_t> n{0};
       static std::atomic<uint32_t> distinct_hash{0};
-      uint32_t c = n.fetch_add(1) + 1;
+      uint32_t c = xe::gpu::g_bone_write_count.fetch_add(1) + 1;
       distinct_hash.fetch_xor(value + index * 2654435761u);
       if ((c & 4095u) == 0) {
         XELOGI("CWRITE bone-range writes={} rollinghash=0x{:08X}", c,
