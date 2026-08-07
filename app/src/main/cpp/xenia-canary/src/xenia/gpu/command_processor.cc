@@ -719,6 +719,25 @@ void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index,
   }
 }
 void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  // CWRITE probe (2026-08-06): count writes landing in the bone-matrix
+  // constant range. BONEC showed the REGISTER FILE holds only ~11 distinct
+  // bone-matrix sets on Adreno vs 165 on RADV at matched sample count - so
+  // the updates never arrive, which is upstream of the whole GPU backend.
+  // This distinguishes "the guest never issued them" from "we dropped them".
+  // Counts only; one log line per 4096 writes. Off unless the property is set.
+  if (XE_AE_DIAG_ENABLED("debug.canary.cwrite")) {
+    if (index >= XE_GPU_REG_SHADER_CONSTANT_000_X + (144u << 2) &&
+        index <= XE_GPU_REG_SHADER_CONSTANT_000_X + (151u << 2) + 3u) {
+      static std::atomic<uint32_t> n{0};
+      static std::atomic<uint32_t> distinct_hash{0};
+      uint32_t c = n.fetch_add(1) + 1;
+      distinct_hash.fetch_xor(value + index * 2654435761u);
+      if ((c & 4095u) == 0) {
+        XELOGI("CWRITE bone-range writes={} rollinghash=0x{:08X}", c,
+               distinct_hash.load());
+      }
+    }
+  }
   // chrispy: rearrange check order, place set after checks
 
   if (XE_LIKELY(index < RegisterFile::kRegisterCount)) {

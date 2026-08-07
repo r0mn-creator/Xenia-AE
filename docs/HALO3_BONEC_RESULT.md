@@ -73,3 +73,57 @@ The question becomes **why the constants stop varying**:
 - ⚠️ `meanabs` 5.07x gap — real and disjoint, but reads packed data as float32
   so it cannot be interpreted physically; likely a *symptom* of the low variety
   rather than an independent cause
+
+---
+
+## ⭐⭐⭐ CWRITE (2026-08-06): the writes ARRIVE. The problem is WHEN draws see them.
+
+Identical `CWRITE` probe on both platforms, counting every write landing in the
+bone-matrix constant range (`c144`-`c151`) inside `CommandProcessor::WriteRegister`.
+
+| | bone-range writes | distinct sets seen at DRAW time (BONEC) |
+|---|---|---|
+| **RADV (correct)** | **434,176** | **165** (in 365 samples) |
+| **Adreno (broken)** | **438,272** | **11** (in 5878 samples; 10 in the first 365) |
+
+### The writes are not being dropped
+
+Counts match within **1%**. The guest issues the same constant updates on both
+platforms and they all reach the register file. Combined with BONEC showing the
+values are **bit-identical** where they overlap:
+
+- ❌ the guest is not issuing fewer updates
+- ❌ we are not dropping or coalescing register writes
+- ❌ the values are not miscomputed
+
+### So the variety is lost between the write and the draw
+
+Same writes in, same values, but at **draw time** Adreno's register file shows
+~11 distinct bone-matrix states where RADV shows 165. The only thing left that
+can explain both facts is **ordering**: on Adreno many draws are issued against
+the *same* constant state, while on RADV each draw sees a freshly updated one.
+
+That is a **write/draw interleaving problem** - draws being batched or deferred
+relative to the constant updates that are supposed to precede them. It is
+upstream of the entire GPU backend, which is exactly why it reproduces on all
+three Adreno drivers and why every GPU-side fix failed.
+
+And it is precisely the shape of the symptom: thousands of vertices skinned
+against a handful of stale matrices collapses a mesh into a spike.
+
+⚠️ **One control still missing.** The oracle's BONEC is rate-limited to 400
+samples while Android's is not, so the two "samples" columns are not directly
+comparable. What *is* comparable and does survive: Adreno's first **365**
+samples yield **10** distinct sets versus RADV's **165** from the same count,
+and Adreno never exceeds 11 no matter how long it runs.
+
+### Next: find what defers the draws
+
+1. **Count draws per constant update on both sides** - the direct measurement of
+   the interleaving hypothesis.
+2. Look at how the PM4 stream batches draws vs `SET_CONSTANT` packets, and
+   whether AE defers or reorders draw submission (the frame-budget work showed
+   the CP thread runs 99% executing, so it is not stalling).
+3. Check `current_constant_buffers_up_to_date_` and the float-constant dirty
+   masks in `vulkan_command_processor.cc` - if a constant upload is skipped
+   because the mask says "clean", draws would legitimately see stale data.
