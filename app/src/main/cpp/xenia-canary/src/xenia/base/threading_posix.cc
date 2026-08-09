@@ -177,10 +177,29 @@ void MaybeYield() {
     constexpr uint32_t kSpinsBeforeRealYield = 64;
     if (++consecutive_spins < kSpinsBeforeRealYield) {
 #if XE_ARCH_ARM64 == 1
-      // YIELD is a hint to the core that this is a spin loop; it lets SMT/the
-      // pipeline back off without leaving userspace.
-      for (int i = 0; i < 32; ++i) {
-        __asm__ __volatile__("yield" ::: "memory");
+      // Back off inside a spin loop without leaving userspace.
+      //
+      // This used to be 32x YIELD. Per the ARM Architecture Reference Manual,
+      // "The YIELD instruction is a NOP hint instruction" and "has no effect in
+      // a single-threaded system" - it only acts on hardware that can swap
+      // threads on the hint (SMT). Consumer ARM is SMP without SMT, so those 32
+      // YIELDs were 32 no-ops and this was a full-speed busy spin with no
+      // backoff at all. (Consistent with the measurement that made kernel CPU
+      // fall 22.5% -> 3.6% here while FPS did not move.)
+      //
+      // ISB flushes the pipeline - a real stall, and the substitute RPCS3
+      // adopted for the same problem. It is much heavier than YIELD, so use
+      // FEWER of them: 8 ISBs, not 32.
+      //
+      // Toggle: debug.canary.isb_delay (default ON, 0 restores YIELD).
+      if (XE_AE_FIX_ENABLED("debug.canary.isb_delay")) {
+        for (int i = 0; i < 8; ++i) {
+          __asm__ __volatile__("isb" ::: "memory");
+        }
+      } else {
+        for (int i = 0; i < 32; ++i) {
+          __asm__ __volatile__("yield" ::: "memory");
+        }
       }
 #else
       for (int i = 0; i < 32; ++i) {
@@ -452,7 +471,12 @@ class PosixConditionBase {
       if (!xe_ax360e_waits) {
         for (int spin = 0; spin < 32; spin++) {
 #if XE_ARCH_ARM64 == 1
-          __asm volatile("yield" ::: "memory");
+          // See the note above: YIELD is architecturally a NOP without SMT.
+          if (XE_AE_FIX_ENABLED("debug.canary.isb_delay")) {
+            __asm volatile("isb" ::: "memory");
+          } else {
+            __asm volatile("yield" ::: "memory");
+          }
 #elif XE_ARCH_AMD64 == 1
           _mm_pause();
 #endif

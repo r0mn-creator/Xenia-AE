@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "xenia/base/ae_fix_toggle.h"
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 
 #include "xenia/base/clock.h"
@@ -54,7 +55,36 @@ static bool IsPossibleMMIOInstruction(A64Emitter& e, const hir::Instr* i) {
 // ============================================================================
 struct DELAY_EXECUTION
     : Sequence<DELAY_EXECUTION, I<OPCODE_DELAY_EXECUTION, VoidOp>> {
-  static void Emit(A64Emitter& e, const EmitArgType& i) { e.yield(); }
+  static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // The guest's "pause in a spin loop" instruction.
+    //
+    // This used to emit YIELD. Per the ARM Architecture Reference Manual:
+    //   "The YIELD instruction is a NOP hint instruction."
+    //   "The YIELD instruction has no effect in a single-threaded system."
+    // It only does anything on hardware that can actually swap threads on the
+    // hint - i.e. SMT. Consumer ARM is SMP without SMT, so on this device YIELD
+    // is literally a no-op and the guest's throttle does nothing.
+    //
+    // That matters here: guest_826DEFD0 is a polling loop and 14% of ALL
+    // process CPU, and its pause primitive is eight consecutive YIELDs - eight
+    // no-ops. The loop spins at full rate.
+    //
+    // ISB flushes the pipeline ("a context synchronization event", per the
+    // manual), which is a real stall and the replacement RPCS3 adopted for the
+    // same problem. It is not a power-saving instruction and ARM notes it costs
+    // a little more energy than a proper wait - but it is the closest thing to
+    // x86's PAUSE that works without SMT.
+    //
+    // WFE would be better still (a genuine wait on an event) but needs an SEV
+    // from the waker, which the guest does not provide.
+    //
+    // Toggle: debug.canary.isb_delay (default ON, set 0 to restore YIELD).
+    if (XE_AE_FIX_ENABLED("debug.canary.isb_delay")) {
+      e.isb(SY);
+    } else {
+      e.yield();
+    }
+  }
 };
 EMITTER_OPCODE_TABLE(OPCODE_DELAY_EXECUTION, DELAY_EXECUTION);
 

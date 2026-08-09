@@ -39,6 +39,53 @@ behaviour on a common path · **LOW** = diagnostics only, inert when off.
 
 ---
 
+## 2026-08-09
+
+### ❌ `yield` -> `ISB` in DELAY_EXECUTION — **21.5% REGRESSION, reverted**
+- **Files:** `cpu/backend/a64/a64_seq_memory.cc` (OPCODE_DELAY_EXECUTION),
+  `base/threading_posix.cc` (two host spin sites)
+- **Toggle:** `debug.canary.isb_delay` — **now default should be OFF/reverted**
+- **Measured:** NFS Carbon, 180 s runs. **9.67 -> 7.59 FPS, -21.5%, p=0.0000.**
+
+**The premise was right and the conclusion was wrong.** The ARM manual does say
+*"The YIELD instruction is a NOP hint instruction"* with *"no effect in a
+single-threaded system"* - verified directly in `reference/arm_arm.txt`. And
+`guest_826DEFD0` (14% of all process CPU) really is a polling loop whose pause
+primitive is eight consecutive no-ops.
+
+But **a no-op is the correct thing there.** `OPCODE_DELAY_EXECUTION` is emitted
+*inside translated guest code*, so it executes every time that guest instruction
+runs - eight times per loop iteration, millions of times a second. Replacing
+eight free no-ops with eight **full pipeline flushes** (ISB is the most
+expensive barrier ARM has) cost far more than the "broken" throttle ever saved.
+
+**The distribution is the tell:**
+
+| | median | min | max | spread |
+|---|---|---|---|---|
+| baseline | 9.67 | 2.36 | 13.53 | wide, scene-dependent |
+| ISB | 7.59 | 7.38 | 8.04 | **0.66 - pinned flat** |
+
+A 0.66 FPS band is not a slow emulator, it is a **rate limiter**: every frame
+costs the same because a fixed stall dominates. That signature is worth
+recognising - it means "something constant is gating you", not "the work got
+heavier".
+
+**Rules this encodes:**
+1. **Do not put barriers in JIT-emitted guest code on a hot path.** Cost is
+   multiplied by execution frequency, not by source-line count.
+2. **"Architecturally a no-op" does not mean "useless".** In a hot inner spin,
+   free is exactly what you want.
+3. RPCS3's large win from the same swap came from a **timer miscalibration**
+   (waiting 150 us instead of 1 us) - a completely different and much larger
+   error. Copying their fix without their bug was the mistake.
+
+⚠️ The two `threading_posix.cc` host-spin sites were changed in the same commit
+and are a **different case** - they run far less often and ISB may still be
+correct there. **Untested separately.** If revisited, change one site at a time.
+
+---
+
 ## 2026-08-05
 
 ### ✅ Button-prompt delay is FRAME-RATE COUPLED — not a separate bug
