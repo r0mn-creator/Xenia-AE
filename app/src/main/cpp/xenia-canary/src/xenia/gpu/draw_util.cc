@@ -470,6 +470,19 @@ void GetHostViewportInfo(GetViewportInfoArgs* XE_RESTRICT args,
         ndc_scale_axis = 1.0f;
         ndc_offset_axis = 0.0f;
       }
+      // Mirror in place on the CLIPPING-ENABLED path too.
+      //
+      // The equivalent code was originally added only to the clip_disable
+      // branch above - but the vista is clip-space geometry with the viewport
+      // Y scale DISABLED, i.e. clip_disable == 0, so it never ran and "Test 2"
+      // silently repeated Test 1's result.
+      //
+      // Negating the scale alone mirrors about the NDC origin; the offset has
+      // to be negated with it to mirror about the viewport centre instead.
+      if (i == 1 && ytest_fallback && !pa_cl_vte_cntl.vport_y_scale_ena &&
+          XE_AE_EXPERIMENT_ENABLED("debug.canary.ytest_offset")) {
+        ndc_offset_axis = -ndc_offset_axis;
+      }
       ndc_scale[i] = ndc_scale_axis;
       ndc_offset[i] = ndc_offset_axis;
     }

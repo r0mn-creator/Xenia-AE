@@ -251,3 +251,62 @@ diagnostic at all**, which looks like a crash rather than a syntax error.
    the compiler.
 3. `decode_pwl_gamma` being absent is independently suspicious given
    `apply_gamma_pwl.xesli` also differs.
+
+---
+
+## TEST 2 (corrected) 2026-08-09 — mirror does NOT fix it; hypothesis in doubt
+
+### First attempt was a no-op — my error
+
+The offset mirror was added only to the `if (pa_cl_clip_cntl.clip_disable)`
+branch. But the predicted condition for the vista is `vport_y_scale_ena == 0`
+**with `clip_disable == 0`** - the *clipping-enabled* branch. So the code never
+ran, and the result was reported as "outcome 3: offset is not the missing piece"
+when in fact nothing had been tested. Corrected by adding the mirror to the
+clipping-enabled path as well.
+
+### With the mirror actually running
+
+| test | vista |
+|---|---|
+| control (all toggles off) | renders, **upside down** |
+| `ytest_fallback=1` | **blank white** |
+| `ytest_fallback=1 + ytest_offset=1` (correct branch) | **still blank white** |
+
+Negating scale *and* offset — a mirror about the viewport centre — does not
+bring the geometry back. So the simple "the fallback needs to be -1.0" model is
+**wrong**.
+
+### What still holds, and what does not
+
+**Holds:** the vista *does* consume the `1.0f` Y-scale fallback. Changing only
+that value changes only the vista, and never the 2D UI. That is causal and was
+reproduced three times.
+
+**Does not hold:** that the inversion is *caused* by the missing flip there.
+
+### Leading explanation now
+
+The vista is a **deferred scene** - rendered offscreen, resolved through EDRAM,
+then sampled as a texture (see `RENDER_PIPELINE_AUDIT.md`). That suggests:
+
+- `ndc_scale[1]` affects the **offscreen geometry pass**. Negating it throws
+  that geometry out of the offscreen target, so the resulting texture is empty -
+  hence blank, at any offset.
+- The **inversion** may happen later, in the **resolve or composite**, where the
+  texture is sampled with the wrong Y orientation.
+
+If so, the viewport math is a red herring for the *orientation* and the target
+is the RT->EDRAM->texture path instead. That path is also where AE's
+`resolve.xesli` is **171 lines shorter than upstream's**, missing
+`decode_pwl_gamma`, `dest_number_is_unorm` and `dest_row_pitch_macro_tiles` -
+see the resolve-divergence section above.
+
+### Next
+
+1. Confirm the vista is genuinely render-to-texture (log the RT bind + resolve
+   for the vista draws) rather than drawn direct.
+2. If so, check the **sampling** orientation in the composite, not the viewport.
+3. The `resolve.xesli` divergence becomes the prime suspect again - and unlike
+   the viewport theory it is a *known* difference from a working implementation,
+   not an inferred one.
