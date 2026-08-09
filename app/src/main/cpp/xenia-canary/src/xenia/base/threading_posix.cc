@@ -191,8 +191,12 @@ void MaybeYield() {
       // adopted for the same problem. It is much heavier than YIELD, so use
       // FEWER of them: 8 ISBs, not 32.
       //
-      // Toggle: debug.canary.isb_delay (default ON, 0 restores YIELD).
-      if (XE_AE_FIX_ENABLED("debug.canary.isb_delay")) {
+      // Toggle: debug.canary.isb_delay - now XE_AE_EXPERIMENT, default OFF.
+// The guest-code use of ISB was a measured 21.5% regression and has been
+// reverted outright. These HOST spin sites are a different case (they run
+// far less often) but were never tested separately, so they are off until
+// someone measures them one at a time.
+      if (XE_AE_EXPERIMENT_ENABLED("debug.canary.isb_delay")) {
         for (int i = 0; i < 8; ++i) {
           __asm__ __volatile__("isb" ::: "memory");
         }
@@ -472,7 +476,7 @@ class PosixConditionBase {
         for (int spin = 0; spin < 32; spin++) {
 #if XE_ARCH_ARM64 == 1
           // See the note above: YIELD is architecturally a NOP without SMT.
-          if (XE_AE_FIX_ENABLED("debug.canary.isb_delay")) {
+          if (XE_AE_EXPERIMENT_ENABLED("debug.canary.isb_delay")) {
             __asm volatile("isb" ::: "memory");
           } else {
             __asm volatile("yield" ::: "memory");

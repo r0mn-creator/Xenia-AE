@@ -78,12 +78,19 @@ struct DELAY_EXECUTION
     // WFE would be better still (a genuine wait on an event) but needs an SEV
     // from the waker, which the guest does not provide.
     //
-    // Toggle: debug.canary.isb_delay (default ON, set 0 to restore YIELD).
-    if (XE_AE_FIX_ENABLED("debug.canary.isb_delay")) {
-      e.isb(SY);
-    } else {
-      e.yield();
-    }
+    // MEASURED 2026-08-09: emitting ISB here is a 21.5% REGRESSION
+    // (NFS Carbon, 180s, 9.67 -> 7.59 FPS, p=0.0000). Reverted to YIELD.
+    //
+    // Why the "fix" was wrong: this opcode is emitted INSIDE translated guest
+    // code, so it runs every time that guest instruction executes - eight times
+    // per iteration of guest_826DEFD0's polling loop, millions of times a
+    // second. ISB is the most expensive barrier ARM has; eight free no-ops
+    // became eight full pipeline flushes.
+    //
+    // YIELD being architecturally a no-op (per the ARM manual) is NOT a defect
+    // here. In a hot inner spin, free is exactly what is wanted. Do not
+    // "fix" this again - see docs/ENGINE_CHANGE_LOG.md 2026-08-09.
+    e.yield();
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_DELAY_EXECUTION, DELAY_EXECUTION);
