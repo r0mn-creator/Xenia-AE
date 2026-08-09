@@ -310,3 +310,58 @@ see the resolve-divergence section above.
 3. The `resolve.xesli` divergence becomes the prime suspect again - and unlike
    the viewport theory it is a *known* difference from a working implementation,
    not an inferred one.
+
+---
+
+## Resolve addressing is EQUIVALENT — third hypothesis eliminated (2026-08-09)
+
+The `resolve.xesli` divergence (989 vs 818 lines) looked like the cause, since
+AE uses `dest_row_pitch_aligned` where upstream uses
+`dest_row_pitch_macro_tiles`. **It is a refactor, not a functional difference.**
+
+| | AE | oracle |
+|---|---|---|
+| stored pitch | `(info & 0x3FF) << 5` (pixels) | `info & 0x3FF` (macro-tiles) |
+| used as | `int(pitch_aligned >> 5u)` | `int(pitch_macro_tiles)` |
+
+AE shifts **left 5 on store, right 5 on use** — a round trip to the same value.
+
+Address maths also match:
+- AE 2D: `(p.x >> 5) + (p.y >> 5) * pitch`
+- Oracle 2D: `(p.x >> WIDTH_LOG2) + (p.y >> HEIGHT_2D_LOG2) * pitch`, and both
+  constants are **5**.
+- AE 3D uses `p.y >> 4` / `height >> 4`, matching `HEIGHT_3D_LOG2 = 4`.
+
+So row order is identical on both platforms and **cannot** be producing a
+vertical flip. The functions AE genuinely lacks (`decode_pwl_gamma`,
+`dest_number_is_unorm`, `dest_num_format`) are **gamma and format** handling —
+they would change colour, not orientation.
+
+## Eliminated so far
+
+1. ❌ Viewport `1.0f` Y-scale fallback — mirroring scale+offset leaves it blank
+2. ❌ Resolve destination row addressing — arithmetically equivalent
+3. ❌ Missing resolve functions — gamma/format, not orientation
+
+## Confirmed
+
+- The vista **is** render-to-texture: RT tile **1216** resolves to
+  `0x044B0000`, then is sampled.
+- It **does** consume the `1.0f` Y fallback — changing it changes only the
+  vista, never the UI (reproduced 3x).
+- ⚠️ Screenshot size is a cheap oracle: **~1.4 MB = vista rendering,
+  ~195 KB = blank**. No need to eyeball it.
+
+## The next step should be EVIDENCE, not another hypothesis
+
+Three inferred causes have now failed. Stop inferring and localise it:
+
+**Dump the resolved surface at `0x044B0000` and check whether it is already
+upside down in memory.**
+
+- **Flipped in memory** → the fault is at or before the resolve write.
+- **Correct in memory** → the resolve is fine and the flip is in how the
+  texture is *sampled* during composite.
+
+That single observation halves the search space, and unlike the last three
+attempts it does not depend on a theory being right.
