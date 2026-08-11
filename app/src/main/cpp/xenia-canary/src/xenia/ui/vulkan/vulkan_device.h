@@ -149,6 +149,13 @@ class VulkanDevice {
     // VK_EXT_non_seamless_cube_map (#423)
 
     bool nonSeamlessCubeMap = false;
+
+    // VK_EXT_external_memory_host (#179)
+
+    // Required alignment for a host pointer imported as device memory. Guest
+    // RAM must be imported on this boundary. 0 when the extension is not
+    // enabled. See docs/HALO3_BALL_XENDROID_FIX.md.
+    VkDeviceSize minImportedHostPointerAlignment = 0;
   };
 
   // Properties of the core API and enabled extensions, and enabled features.
@@ -174,6 +181,9 @@ class VulkanDevice {
     bool ext_EXT_memory_budget = false;                 // #238
     // Has optional features not implied by this being true.
     bool ext_1_3_KHR_maintenance4 = false;  // #414
+    // Import guest RAM as device memory, so a second shared-memory buffer can
+    // alias it for memexport draws. See docs/HALO3_BALL_XENDROID_FIX.md.
+    bool ext_EXT_external_memory_host = false;  // #179
   };
 
   const Extensions& extensions() const { return extensions_; }

@@ -15,8 +15,20 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+
+DEFINE_bool(
+    vfetch_bounds_clamp, false,
+    "Clamp vertex fetches to the fetch buffer size: words at or past the end "
+    "read as 0, matching the Xenos's hardware bounds clamping.\n"
+    "Some titles rely on it - e.g. an over-allocated quad-list particle draw "
+    "whose inactive vertices fetch 0 and collapse to a degenerate (zero-area) "
+    "primitive instead of expanding to garbage.\n"
+    "Ported from XenDroid. Default off until validated on the test set; see "
+    "docs/HALO3_BALL_XENDROID_FIX.md.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -43,9 +55,15 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
   uint32_t fetch_constant_word_0_index = instr.operands[1].storage_index << 1;
 
   spv::Id address;
+  // Exclusive end of the fetch buffer in dwords, for Xenos bounds clamping.
+  // Only meaningful when cvars::vfetch_bounds_clamp is on.
+  spv::Id fetch_end = spv::NoResult;
   if (instr.is_mini_fetch) {
-    // `base + index * stride` loaded by vfetch_full.
+    // `base + index * stride` and the end bound loaded by vfetch_full.
     address = builder_->createLoad(var_main_vfetch_address_, spv::NoPrecision);
+    if (cvars::vfetch_bounds_clamp) {
+      fetch_end = builder_->createLoad(var_main_vfetch_bound_, spv::NoPrecision);
+    }
   } else {
     // Get the base address in dwords from the bits 2:31 of the first fetch
     // constant word.
@@ -71,6 +89,34 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
         builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
                               fetch_constant_word_0,
                               builder_->makeUintConstant(2)));
+    if (cvars::vfetch_bounds_clamp) {
+      // `address` is the base right now. The exclusive end is base + size, with
+      // the size in words held in bits 2:25 of the second fetch constant word.
+      // Stored so a subsequent vfetch_mini reusing this fetch constant can load
+      // it back.
+      uint32_t bound_word_1_index = fetch_constant_word_0_index + 1;
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(const_int_0_);
+      id_vector_temp_.push_back(
+          builder_->makeIntConstant(int(bound_word_1_index >> 2)));
+      id_vector_temp_.push_back(
+          builder_->makeIntConstant(int(bound_word_1_index & 3)));
+      spv::Id bound_fetch_constant_word_1 = builder_->createLoad(
+          builder_->createAccessChain(spv::StorageClassUniform,
+                                      uniform_fetch_constants_, id_vector_temp_),
+          spv::NoPrecision);
+      fetch_end = builder_->createBinOp(
+          spv::OpIAdd, type_int_, address,
+          builder_->createUnaryOp(
+              spv::OpBitcast, type_int_,
+              builder_->createBinOp(
+                  spv::OpBitwiseAnd, type_uint_,
+                  builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
+                                        bound_fetch_constant_word_1,
+                                        builder_->makeUintConstant(2)),
+                  builder_->makeUintConstant((uint32_t(1) << 24) - 1))));
+      builder_->createStore(fetch_end, var_main_vfetch_bound_);
+    }
     if (instr.attributes.stride) {
       // Convert the index to an integer by flooring or by rounding to the
       // nearest (as floor(index + 0.5) because rounding to the nearest even
@@ -148,12 +194,20 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
                                 builder_->makeIntConstant(int(word_offset)));
     }
     word_composite_indices[word_index] = word_count;
-    // FIXME(Triang3l): Bound checking is not done here, but haven't encountered
-    // any games relying on out-of-bounds access. On Adreno 200 on Android (LG
-    // P705), however, words (not full elements) out of glBufferData bounds
-    // contain 0.
-    word_composite_constituents[word_count++] =
-        LoadUint32FromSharedMemory(word_address);
+    // Words at or past the end of the fetch buffer read as 0, matching the
+    // Xenos's bounds clamping. Games rely on it - e.g. an over-allocated
+    // quad-list particle draw whose inactive vertices fetch 0 and collapse to a
+    // degenerate (zero-area) primitive instead of expanding to garbage.
+    // Ported from XenDroid; gated by vfetch_bounds_clamp so it can be A/B'd.
+    spv::Id loaded_word = LoadUint32FromSharedMemory(word_address);
+    if (cvars::vfetch_bounds_clamp && fetch_end != spv::NoResult) {
+      spv::Id word_in_bounds = builder_->createBinOp(
+          spv::OpULessThan, type_bool_, word_address, fetch_end);
+      loaded_word = builder_->createTriOp(spv::OpSelect, type_uint_,
+                                          word_in_bounds, loaded_word,
+                                          const_uint_0_);
+    }
+    word_composite_constituents[word_count++] = loaded_word;
   }
   spv::Id words;
   if (word_count > 1) {

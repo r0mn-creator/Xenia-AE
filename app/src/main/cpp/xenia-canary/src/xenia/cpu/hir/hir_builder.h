@@ -209,6 +209,9 @@ class HIRBuilder {
                     CacheControlType type);
   void MemoryBarrier();
   void DelayExecution();
+  // One bounded host wait standing in for a whole collapsed guest spin-backoff
+  // loop. `units` is the collapsed trip count, carried in src1.offset.
+  Instr* SpinBackoff(uint32_t units);
   void SetRoundingMode(Value* value);
   Value* Max(Value* value1, Value* value2);
   Value* VectorMax(Value* value1, Value* value2, TypeName part_type,

@@ -290,6 +290,10 @@ enum Opcode {
                      // ppc "single" fpu instruction result rounding behavior )
   OPCODE_SET_NJM,
   OPCODE_DELAY_EXECUTION,  // for db16cyc
+  // A whole guest spin-backoff loop collapsed into one bounded host wait.
+  // src1.offset carries the collapsed trip count ("units") so the backend can
+  // scale the wait. Emitted by SpinLoopBackoffPass; see a64_seq_memory.cc.
+  OPCODE_SPIN_BACKOFF,
   OPCODE_RESERVED_LOAD,
   OPCODE_RESERVED_STORE,
 

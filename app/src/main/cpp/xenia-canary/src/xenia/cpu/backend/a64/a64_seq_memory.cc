@@ -10,9 +10,12 @@
 #include "xenia/base/ae_fix_toggle.h"
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 
+#include <chrono>
+
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/memory.h"
+#include "xenia/base/threading.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 #include "xenia/cpu/backend/a64/a64_op.h"
@@ -25,6 +28,15 @@
 
 DECLARE_bool(emit_mmio_aware_stores_for_recorded_exception_addresses);
 DECLARE_bool(emit_inline_mmio_checks);
+
+DEFINE_bool(a64_park_spin_backoff, true,
+            "For collapsed guest spin-backoff loops, spin cheaply for the first "
+            "few iterations then park the thread with a short real sleep "
+            "(adaptive) instead of a fixed isb sled - reclaims CPU on long "
+            "guest spin-waits while short waits (resolved during the cheap "
+            "spin) stay latency-unaffected.\n"
+            "Only has any effect when collapse_ctr_spin_loops is on.",
+            "CPU");
 
 namespace xe {
 namespace cpu {
@@ -94,6 +106,73 @@ struct DELAY_EXECUTION
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_DELAY_EXECUTION, DELAY_EXECUTION);
+
+// Adaptive park helper for OPCODE_SPIN_BACKOFF, called once per outer poll
+// iteration of a collapsed guest spin-wait. A young wait spins cheap (a few
+// isb); once it proves long it sleeps briefly so the core stops burning
+// cycles. A gap since the previous call starts a fresh episode, so an
+// unrelated later wait spins cheap again. The sleep timeout guarantees forward
+// progress, so no wake plumbing is needed.
+//
+// Ported from XenDroid, minus its cooperative-guest-scheduler paths - Xenia-AE
+// has no guest scheduler, so there is no fiber that host-parking could stall
+// and no preempt_requested flag to gate on.
+static void SpinBackoffParkThunk(void* /*ppc_context*/) {
+  static constexpr uint32_t kSpinIters = 24;
+  static constexpr int64_t kParkNs = 30000;   // 30us bounded park
+  static constexpr int64_t kGapNs = 200000;   // >200us idle -> new episode
+  thread_local uint32_t consec = 0;
+  thread_local int64_t last_ns = 0;
+  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+  if (now_ns - last_ns > kGapNs) {
+    consec = 0;
+  }
+  last_ns = now_ns;
+  if (++consec < kSpinIters) {
+    for (uint32_t n = 0; n < 8; ++n) {
+      __asm__ __volatile__("isb sy" ::: "memory");
+    }
+    return;
+  }
+  xe::threading::NanoSleep(kParkNs);
+}
+
+// ============================================================================
+// OPCODE_SPIN_BACKOFF
+// ============================================================================
+// Bounded host-side wait emitted in place of a proven constant-trip-count guest
+// spin-backoff loop. src1.offset is the iteration count, already clamped by the
+// pass that emits this op.
+//
+// The fallback loop is held entirely in w16, an emitter-scratch register (the
+// register allocator only hands out x22-x28). It uses sub+cbnz rather than
+// subs+b.ne so NZCV is never written - no host state a surrounding sequence
+// could observe is disturbed, and there is no guest context or memory traffic.
+struct SPIN_BACKOFF
+    : Sequence<SPIN_BACKOFF, I<OPCODE_SPIN_BACKOFF, VoidOp, OffsetOp>> {
+  static void Emit(A64Emitter& e, const EmitArgType& i) {
+    const uint32_t count = static_cast<uint32_t>(i.src1.value);
+    if (!count) {
+      return;
+    }
+    if (cvars::a64_park_spin_backoff) {
+      // Adaptive spin-then-park: cheap for short waits, a real short sleep for
+      // long ones. CallNativeSafe preserves guest context across the
+      // (possibly sleeping) helper.
+      e.CallNativeSafe(reinterpret_cast<void*>(&SpinBackoffParkThunk));
+      return;
+    }
+    auto& loop = e.NewCachedLabel();
+    e.mov(e.w16, count);
+    e.L(loop);
+    e.isb(Xbyak_aarch64::SY);
+    e.sub(e.w16, e.w16, 1);
+    e.cbnz(e.w16, loop);
+  }
+};
+EMITTER_OPCODE_TABLE(OPCODE_SPIN_BACKOFF, SPIN_BACKOFF);
 
 // ============================================================================
 // OPCODE_MEMORY_BARRIER

@@ -185,6 +185,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
           EXT_shader_demote_to_helper_invocation, 1, 3)
       // #423.
       XE_UI_VULKAN_LOCAL_EXTENSION(EXT_non_seamless_cube_map)
+      // #179. Import guest RAM as device memory so a second shared-memory
+      // buffer can alias it. Memexport-touching draws are routed to that
+      // buffer so their output is coherent with the CPU and cannot be
+      // clobbered by a guest-RAM re-upload - the Halo 3 "ball" fix.
+      // See docs/HALO3_BALL_XENDROID_FIX.md.
+      XE_UI_VULKAN_STRUCT_EXTENSION(EXT_external_memory_host)
     }
     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
       // #237.
@@ -290,6 +296,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NON_SEAMLESS_CUBE_MAP_FEATURES_EXT>
       features_EXT_non_seamless_cube_map;
 
+  // VK_EXT_external_memory_host (#179) properties - host pointer import
+  // alignment.
+  VkPhysicalDeviceExternalMemoryHostPropertiesEXT
+      properties_EXT_external_memory_host = {
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+
   if (get_physical_device_properties2_supported) {
     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
       features_1_2.Link(supported_features_2, device_create_info);
@@ -321,6 +333,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (ext_EXT_non_seamless_cube_map) {
       features_EXT_non_seamless_cube_map.Link(supported_features_2,
                                               device_create_info);
+    }
+    // #179. Needed to know the alignment guest RAM must be imported on.
+    if (device->extensions_.ext_EXT_external_memory_host) {
+      properties_EXT_external_memory_host.pNext = properties_2.pNext;
+      properties_2.pNext = &properties_EXT_external_memory_host;
     }
     ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
     ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
@@ -688,6 +705,16 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_FEATURE_2(features_EXT_non_seamless_cube_map,
                              nonSeamlessCubeMap)
     }
+  }
+
+  // #179. Guest RAM must be imported on this alignment for the memexport host
+  // buffer. Logged so a device that advertises the extension but reports an
+  // unusable alignment is visible rather than silently failing later.
+  if (device->extensions_.ext_EXT_external_memory_host) {
+    device->properties_.minImportedHostPointerAlignment =
+        properties_EXT_external_memory_host.minImportedHostPointerAlignment;
+    XELOGI("* minImportedHostPointerAlignment: {}",
+           device->properties_.minImportedHostPointerAlignment);
   }
 
 #undef XE_UI_VULKAN_LIMIT

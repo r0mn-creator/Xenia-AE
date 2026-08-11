@@ -954,6 +954,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // `base + index * stride` in dwords from the last vfetch_full as it may be
   // needed by vfetch_mini - int.
   spv::Id var_main_vfetch_address_;
+  // End of the vertex fetch buffer in dwords, from fetch constant word 1, as it
+  // may be needed by vfetch_mini - int. Words at or past it read as 0, matching
+  // the Xenos's bounds clamping. Gated by cvars::vfetch_bounds_clamp; see
+  // docs/HALO3_BALL_XENDROID_FIX.md.
+  spv::Id var_main_vfetch_bound_;
   // float.
   spv::Id var_main_tfetch_lod_;
   // float3.

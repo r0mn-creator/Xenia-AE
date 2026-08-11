@@ -79,6 +79,17 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
   if (validate) sap->AddPass(std::make_unique<passes::ValidationPass>());
   compiler_->AddPass(std::move(sap));
 
+  // Collapse constant-trip-count CTR spin-backoff loops (mtctr N + hint-nop
+  // sled + bdnz) into a single bounded host wait. This is the XDK spin-wait
+  // primitive and the shape of guest_826DEFD0, our largest single CPU cost.
+  //
+  // Ordering matters: it must run AFTER constant propagation (the
+  // predecessor's CTR store has to carry a literal constant to be provable)
+  // and while the CFG edges built by ControlFlowAnalysisPass are still valid.
+  // Ported from XenDroid; gated off by default via collapse_ctr_spin_loops.
+  compiler_->AddPass(std::make_unique<passes::SpinLoopBackoffPass>());
+  if (validate) compiler_->AddPass(std::make_unique<passes::ValidationPass>());
+
   if (backend->machine_info()->supports_extended_load_store) {
     // Backend supports the advanced LOAD/STORE instructions.
     // These will save us a lot of HIR opcodes.
