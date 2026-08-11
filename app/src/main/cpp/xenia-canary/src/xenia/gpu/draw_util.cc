@@ -606,6 +606,47 @@ void GetHostViewportInfo(GetViewportInfoArgs* XE_RESTRICT args,
     viewport_info_out.ndc_scale[i] = ndc_scale[i];
     viewport_info_out.ndc_offset[i] = ndc_offset[i];
   }
+
+  // TESTRIG(gpu): NDC-Y diagnostic for the upside-down Halo 3 vista.
+  //
+  // The translated SPIR-V and this function's math are both proven IDENTICAL to
+  // XenDroid, which renders the vista correctly on the same device and driver
+  // (docs/HALO3_VISTA_UPSIDE_DOWN.md). So the flip must come from the INPUTS.
+  // The shader computes  pos.xyz * ndc_scale + ndc_offset * w , which makes
+  // ndc_scale[1] the only term that can invert Y.
+  //
+  // Expectation: normal 3D draws carry a negative guest YSCALE (-h/2) and end
+  // up with ndc_scale[1] == -1.0. If the vista instead shows +1.0 with
+  // vport_y_scale_ena == 0, it is taking the bare 1.0f fallback and never gets
+  // flipped - the standing hypothesis.
+  //
+  // Deduplicated on the whole configuration, so this prints a handful of lines
+  // per scene rather than one per draw.
+  if (XE_AE_DIAG_ENABLED("debug.canary.ndcy")) {
+    static std::atomic<uint64_t> ndcy_logged_keys[16];
+    uint32_t ys_bits = 0, s1_bits = 0;
+    std::memcpy(&ys_bits, &args->PA_CL_VPORT_YSCALE, sizeof(ys_bits));
+    std::memcpy(&s1_bits, &ndc_scale[1], sizeof(s1_bits));
+    uint64_t key = (uint64_t(pa_cl_vte_cntl.vport_y_scale_ena) << 63) ^
+                   (uint64_t(args->origin_bottom_left) << 62) ^
+                   (uint64_t(s1_bits) << 30) ^ uint64_t(ys_bits);
+    if (!key) key = 1;
+    bool seen = false;
+    for (auto& slot : ndcy_logged_keys) {
+      uint64_t v = slot.load(std::memory_order_relaxed);
+      if (v == key) { seen = true; break; }
+      if (!v && slot.compare_exchange_strong(v, key)) break;
+    }
+    if (!seen) {
+      XELOGI(
+          "NDCY vport_y_scale_ena={} PA_CL_VPORT_YSCALE={} "
+          "origin_bottom_left={} -> ndc_scale[1]={} ndc_offset[1]={} "
+          "extent_y={}",
+          uint32_t(pa_cl_vte_cntl.vport_y_scale_ena),
+          args->PA_CL_VPORT_YSCALE, uint32_t(args->origin_bottom_left),
+          ndc_scale[1], ndc_offset[1], viewport_info_out.xy_extent[1]);
+    }
+  }
 }
 template <bool clamp_to_surface_pitch>
 static inline void GetScissorTmpl(const RegisterFile& XE_RESTRICT regs,

@@ -720,3 +720,56 @@ Log, for the vista draw specifically: `pa_cl_vte_cntl.vport_y_scale_ena`,
 rect-list GS · viewport Y-scale toggles · resolve dest addressing ·
 `vulkan_resolve_to_texture` · `vulkan_shared_memory_host_visible` ·
 `readback_resolve=full` · `vfetch_bounds_clamp` · `fix_wclip` · `fix_rsq`
+
+## ⭐⭐ MEASURED 2026-08-11 — the two NDC-Y regimes (hypothesis CONFIRMED)
+
+Added a deduplicated diagnostic at the end of `GetHostViewportInfo`
+(`debug.canary.ndcy`, default OFF) logging the guest registers and the resulting
+`ndc_scale[1]`. Halo 3 main menu:
+
+| `vport_y_scale_ena` | `PA_CL_VPORT_YSCALE` | `ndc_scale[1]` | `extent_y` |
+|---|---|---|---|
+| **1** | -320 | **-1** | 640 |
+| 1 | -320 | -1.333 | 480 |
+| 1 | -320 | -2 | 320 |
+| 1 | -320 | -4 | 160 |
+| 1 | -160 / -80 / -20 / -5 / -0.5 | **-1** | 320 / 160 / 40 / 10 / 1 |
+| **0** | -320 / -180 / -156 / -128 | **+0.00024414062** | **8192** |
+
+**Two regimes, and only one gets flipped:**
+
+- `vport_y_scale_ena = 1` -> `ndc_scale[1]` is **negative**. This is the flip
+  that converts Xenos Y-up NDC to Vulkan Y-down. Correct.
+- `vport_y_scale_ena = 0` -> `ndc_scale[1]` is **positive** (2/8192 with the
+  full 8192 extent). **No flip at all.**
+
+So any 3D geometry submitted with the viewport transform disabled renders
+Y-inverted relative to everything else - exactly the vista's symptom, with the
+2D UI (also `ena=0`, but already screen-space Y-down) unaffected.
+
+⚠️ **Note the fallback is NOT 1.0**, as the old comment assumed - it is
+`2.0 / extent` = 0.000244 at extent 8192. Any fix must account for that; simply
+negating a presumed 1.0 is wrong, which is likely why the earlier
+`ytest_fallback` experiment misbehaved rather than fixing it.
+
+### Why a blanket negation is the wrong fix
+
+The 2D UI also takes `ena=0` and renders correctly today. Negating
+`ndc_scale[1]` for all `ena=0` draws would flip the UI as well. The earlier
+`ytest_fallback` experiment did roughly that and did not produce a correct
+result.
+
+### The remaining question
+
+Both regimes exist in our build AND in XenDroid (same code, proven identical).
+So either:
+
+1. The **vista draw lands in a different regime** in their build (i.e. the guest
+   is fed different register state upstream, or the draw is routed differently),
+   or
+2. Both emulators produce the same `ndc_scale[1]` for the vista, and their
+   correct result comes from **where the vista is composited**, not from NDC.
+
+**Next:** correlate. Log the NDCY line together with a draw identifier
+(shader hash / RT base) so we know *which* regime the vista draw itself is in,
+rather than knowing only that both regimes exist.
