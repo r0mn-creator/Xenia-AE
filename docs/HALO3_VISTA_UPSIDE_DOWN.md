@@ -909,3 +909,47 @@ SPIR-V emission).
 ⚠️ Still correlation until toggled: these draws differ AND the vista is wrong.
 Confirm causally - three "confirmed" hypotheses have already been refuted here,
 one of them within two turns tonight.
+
+## ⭐⭐⭐ ROOT GAP IDENTIFIED: upstream's own unfinished TODO, which XenDroid completed
+
+`vulkan_pipeline_cache.cc:970-980` in our tree:
+
+```cpp
+// TODO(Triang3l): Once all needed inputs and outputs are added, uncomment the
+// real counts here.
+key.interpolator_count =
+    xe::bit_count(vertex_shader_modification.vertex.interpolator_mask);
+key.user_clip_plane_count =
+    /* vertex_shader_modification.vertex.user_clip_plane_count */ 0;
+key.user_clip_plane_cull =
+    /* vertex_shader_modification.vertex.user_clip_plane_cull */ 0;
+key.has_vertex_kill_and =
+    /* vertex_shader_modification.vertex.vertex_kill_and */ 0;
+```
+
+**Upstream Xenia's Vulkan backend hardcodes user clip planes (and vertex kill)
+to zero with an explicit TODO.** It is unfinished, not broken by us - the D3D12
+path has had the feature all along. **XenDroid completed it**, which is why the
+same guest shader is translated with `user_clip_plane_count = 1` there and `0`
+here, and why their Halo 3 composite is correct.
+
+This is the cleanest explanation yet for the whole class of Halo 3 geometry
+problems: the guest asks for clipping/culling that our Vulkan backend silently
+drops.
+
+### Port status
+
+- [x] `spirv_shader_translator.h` - `user_clip_plane_count : 3` and
+      `user_clip_plane_cull : 1` added to the vertex `Modification`. Builds
+      clean; the bits read 0 everywhere so behaviour is unchanged so far.
+- [ ] Compute both from `PA_CL_CLIP_CNTL` (`ucp_ena`, `clip_disable`,
+      `ucp_cull_only_ena`) where the vertex modification is built
+      (`vulkan_pipeline_cache.cc` ~line 276).
+- [ ] Emit `gl_ClipDistance` in `spirv_shader_translator.cc`
+      (`output_per_vertex_clip_distance_member_index_`) - the largest piece.
+- [ ] Un-stub the geometry-shader key above.
+- [ ] Enable the `shaderClipDistance` device feature.
+- [ ] Cvar gate, default OFF, then A/B the vista at the menu.
+
+⚠️ `vertex_kill_and` is stubbed on the same lines and is a *separate* feature -
+port clip planes first and keep them independent so each can be A/B'd.

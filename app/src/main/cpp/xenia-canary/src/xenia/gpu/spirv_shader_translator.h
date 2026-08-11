@@ -63,6 +63,15 @@ class SpirvShaderTranslator : public ShaderTranslator {
       // Pipeline stage and input configuration.
       Shader::HostVertexShaderType host_vertex_shader_type
           : Shader::kHostVertexShaderTypeBitCount;
+      // User clip plane count, number of clip planes enabled (0-6), from
+      // PA_CL_CLIP_CNTL::ucp_ena. Our Vulkan path historically ignored guest
+      // user clip planes entirely - the D3D12/DXBC translator has always had
+      // them (dxbc_shader_translator.h:151). Ported from XenDroid; gated by
+      // cvars::vulkan_user_clip_planes. See docs/HALO3_VISTA_UPSIDE_DOWN.md.
+      uint32_t user_clip_plane_count : 3;
+      // If user_clip_plane_count is non-zero, whether they should be cull
+      // distances instead of clip distances (ucp_cull_only_ena).
+      uint32_t user_clip_plane_cull : 1;
     } vertex;
     struct PixelShaderModification {
       // uint32_t 0.
