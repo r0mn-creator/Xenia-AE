@@ -999,3 +999,36 @@ would be assembled by the wrong pipeline stage entirely.
 **NEXT (highest value):** find where `host_vertex_shader_type` is chosen
 (`GetHostVertexShaderTypeIfValid` / the primitive processor) and compare against
 XenDroid for these two shaders. That is now the single best lead for the vista.
+
+## ⚠️ The 0x12000000 decode needs verifying before it is acted on
+
+Follow-up checks tightened the picture but also raised a contradiction:
+
+- Both emulators dump the **same shaders with the same low bits**
+  (`C049A8C9E556F129` at `...0000` and `...0001`, `C2543FD5CD52420B` at
+  `...0000`). Theirs consistently carries `0x12000000` on top; ours carries
+  nothing. So these are the **same draws**, not different variants.
+- **But `primitive_processor.cc`'s `host_vertex_shader_type` selection is
+  byte-identical between the two trees** (normalised diff: zero differences on
+  every host_vertex_shader_type / tessellation / domain line).
+
+Identical selection code cannot produce different `host_vertex_shader_type`
+values from the same guest state. So one of these is true:
+
+1. **The bit decode is wrong.** Bits 25-27 were read as
+   `host_vertex_shader_type` using *their* struct layout. If their vertex
+   `Modification` has any extra or differently-sized field before it (their
+   struct does carry more members overall - `tessellation_mode`,
+   `vertex_kill_and`, ...), every position shifts and `0x12000000` means
+   something else entirely.
+2. The inputs differ upstream (guest register state feeding the selection).
+
+**Verify before acting:** decode `0x12000000` against *their* actual
+`Modification` bitfield field-by-field (count the bits in their
+`spirv_shader_translator.h` declaration order), rather than assuming our layout
+maps onto theirs. Our own dumps now carry modification values too, so the same
+decode can be sanity-checked against a known-type shader on our side.
+
+This is exactly the failure mode that has produced several wrong "confirmed"
+calls in this document - a plausible reading of a number, acted on before the
+encoding was checked.
