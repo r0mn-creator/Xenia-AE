@@ -773,3 +773,44 @@ So either:
 **Next:** correlate. Log the NDCY line together with a draw identifier
 (shader hash / RT base) so we know *which* regime the vista draw itself is in,
 rather than knowing only that both regimes exist.
+
+## ⚠️ REFUTED, one step later — the vista draws ARE flipped
+
+Correlated the NDC-Y regime with the draw that produced it
+(`debug.canary.ndcy_draw`, dedup on shader hash + sign). Halo 3 main menu:
+
+- **39 of 42 draws: `flipped=1`, `ndc_scale_y = -1`** - including
+  **`9EA48FC2B26C325D`** (the Halo 3 terrain/skinning shader) and
+  **`488D9488AB7ED7D8`** (the memexport consumer), both at `extent_y=640`.
+- **3 draws only: `flipped=0`**, `ndc_scale_y = +0.000244`, `extent_y=8192`:
+  `0A6D1DD7767FDF27`, `C049A8C9E556F129`, `C2543FD5CD52420B` - the classic
+  signature of pre-transformed screen-space 2D (the UI), which is correct as-is.
+
+**So the vista's geometry IS receiving the Y flip at the vertex stage.** It is
+NOT taking the unflipped fallback.
+
+This **refutes** the "vista is clip-space geometry that never gets flipped"
+hypothesis recorded one section above - a hypothesis that had been in
+`draw_util.cc` for weeks and that the regime measurement appeared to confirm.
+Knowing that two regimes *exist* was not the same as knowing which one the vista
+is in; only the per-draw correlation could settle it, and it settled it the
+other way.
+
+### What this leaves
+
+Vertex-stage Y is now **eliminated** as the vista's cause, on top of the shader
+math and viewport math already proven identical to XenDroid. The inversion must
+therefore be **downstream of the vertex stage**:
+
+- how the vista's render target is **resolved**, or
+- how the resolved texture is **sampled/composited** into the final image, or
+- the orientation of the RT-as-texture handoff.
+
+That is consistent with the very first observation in this document - the 3D
+vista is inverted while the 2D UI drawn over it is not - and it points back at
+the composite path rather than the geometry path.
+
+**Next:** identify the draw that composites the vista (it will sample the
+resolved surface) and compare its texture coordinate handling against
+XenDroid's translated shader for the same hash. The SPIR-V dump tooling and the
+106-shader common set are already in place for exactly this.

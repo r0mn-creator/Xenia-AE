@@ -2753,6 +2753,34 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   gviargs.SetupRegisterValues(regs);
 
   draw_util::GetHostViewportInfo(&gviargs, viewport_info);
+
+  // TESTRIG(gpu): correlate the NDC-Y regime with the DRAW that produced it.
+  //
+  // debug.canary.ndcy already proves two regimes exist (vport_y_scale_ena=1 ->
+  // ndc_scale[1] negative, flip applied; =0 -> positive, no flip). That alone
+  // does not say which regime the Halo 3 VISTA draw is in. Tagging each
+  // distinct (shader, ndc_scale[1] sign) pair answers it directly.
+  //
+  // Deduplicated per shader hash + sign, so this is a handful of lines.
+  if (XE_AE_DIAG_ENABLED("debug.canary.ndcy_draw")) {
+    static std::atomic<uint64_t> ndcy_draw_keys[64];
+    uint64_t vs_hash = vertex_shader ? vertex_shader->ucode_data_hash() : 0;
+    bool y_flipped = viewport_info.ndc_scale[1] < 0.0f;
+    uint64_t key = (vs_hash << 1) | uint64_t(y_flipped);
+    if (!key) key = 1;
+    bool seen = false;
+    for (auto& slot : ndcy_draw_keys) {
+      uint64_t v = slot.load(std::memory_order_relaxed);
+      if (v == key) { seen = true; break; }
+      if (!v && slot.compare_exchange_strong(v, key)) break;
+    }
+    if (!seen) {
+      XELOGI("NDCYDRAW vs={:016X} ndc_scale_y={} flipped={} extent_y={}",
+             vs_hash, viewport_info.ndc_scale[1], y_flipped ? 1 : 0,
+             viewport_info.xy_extent[1]);
+    }
+  }
+
   // Update dynamic graphics pipeline state.
   UpdateDynamicState(viewport_info, primitive_polygonal,
                      normalized_depth_control, draw_resolution_scale_x,
