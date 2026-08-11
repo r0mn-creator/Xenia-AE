@@ -545,3 +545,50 @@ dimension, on every single vertex shader.
 (`FED9E00DE375B2D4`, +1624 bytes) to read exactly what those 3 checks guard,
 then find the emitting code in their `spirv_shader_translator*` and port it.
 The tooling is now in place, so this is mechanical.
+
+## 10b. The "range checks" are RSQ PRECISION EMULATION — and it is not the vista
+
+Read the actual instructions the `UGreaterThanEqual`/`LogicalAnd` guard. They are
+**not** bounds checks:
+
+```
+%1229 = InverseSqrt(FAbs(x))          ; host rsq
+%1230 = Bitcast to uint
+%1232 = %1230 & 0xFFFFFFFC            ; clear low 2 mantissa bits
+%1233 = %1230 & 0x3
+%1234 = %1233 >= 2                    ; round-to-nearest decision
+%1235 = %1232 + 4                     ; round up
+%1242 = (orig exponent != 255)        ; not already inf/nan
+%1243 = (new  exponent == 255)        ; would overflow to inf
+%1244 = LogicalAnd                    ; overflow guard
+```
+
+XenDroid **quantizes the host's InverseSqrt DOWN to Xenos precision**
+(2 mantissa bits cleared, round-to-nearest, overflow-guarded).
+
+**We do the opposite.** Our `fix_rsq` (`c14047bc`, default ON) computes
+`Sqrt` then divides - i.e. we made RSQ *more* accurate than the hardware, they
+made it *match* the hardware's lower accuracy. That is a genuine and interesting
+philosophical divergence, and it is the mechanism our own notes described
+("an index that should land on exactly N comes out as N-epsilon").
+
+**TESTED at the menu: `fix_rsq=0` does NOT fix the vista** (still inverted,
+15 FPS). Combined with `fix_wclip=0` (also negative), both of our precision
+"fixes" are cleared as the vista cause.
+
+### Vista hypotheses eliminated to date
+
+driver/Turnip · resolve row addressing · rect-list GS · `GetHostViewportInfo`
+Y-scale (`ytest_*`) · resolve dest addressing · `vulkan_resolve_to_texture` ·
+`vulkan_shared_memory_host_visible` · `readback_resolve=full` ·
+`vfetch_bounds_clamp` · `fix_wclip` · `fix_rsq`
+
+### Still open, and now the best leads
+
+1. **The remaining per-shader delta.** RSQ quantization explains only part of the
+   +1624..+9936 bytes. Diff a *vertex-position-writing* shader instruction by
+   instruction rather than by opcode histogram.
+2. **The ~12 extra SystemConstants members**, incl. `ndc_scale` / `ndc_offset` -
+   these are exactly the NDC terms that control orientation, and they appear in
+   THEIR struct listing. Compare how each side populates and consumes them.
+3. `SPV_KHR_float_controls` (theirs only).

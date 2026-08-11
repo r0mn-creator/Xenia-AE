@@ -648,3 +648,75 @@ file (`cannot redefine existing string 'vulkan_lib_path'`) and the emulator
 silently fell back to defaults. Always edit the existing key. Also: their config
 is mode 660 owned by their uid, so a plain `adb shell grep` returns *permission
 denied*, which reads like "key not present" - use `su`.
+
+---
+
+# ⭐ 2026-08-11 — SHADER MATH IS IDENTICAL. The flip is in the INPUTS.
+
+Compared our translated SPIR-V against XenDroid's for the same guest shaders
+(dump both, join by ucode hash, `spirv-dis`, diff). See
+`HALO3_BALL_XENDROID_FIX.md` §10 for the method.
+
+## The final position computation is instruction-for-instruction IDENTICAL
+
+**Ours:**
+```
+%1331 = OpCompositeConstruct %v3float %1325 %1330
+%1333 = OpAccessChain ... %xe_uniform_system_constants %int_4   ; ndc_scale
+%1335 = OpFMul %v3float %1331 %1334
+%1336 = OpAccessChain ... %xe_uniform_system_constants %int_6   ; ndc_offset
+%1338 = OpVectorTimesScalar %v3float %1337 %1319
+%1339 = OpFAdd %v3float %1335 %1338
+%1340 = OpCompositeConstruct %v4float %1339 %1319
+        OpStore  (gl_Position)
+```
+
+**Theirs:** the same ops in the same order; only the member indices differ
+(`int_5`/`int_7` vs our `int_4`/`int_6`), because their SystemConstants struct
+has an extra `vertex_index_count` ahead of them.
+
+So both compute `pos.xyz * ndc_scale + ndc_offset * w`. **The shader is not the
+bug.**
+
+## `GetHostViewportInfo` is also logically identical
+
+Diffed ours vs theirs. The only differences in the ndc_scale/ndc_offset paths
+are our own `ytest_*` diagnostic toggles, which are **default OFF** and collapse
+to exactly their expression:
+`pa_cl_vte_cntl.vport_y_scale_ena ? args->PA_CL_VPORT_YSCALE : 1.0f`.
+(Ours is 439 lines vs their 378, but the excess is comments + the disabled
+experiments.)
+
+## Therefore the divergence is in the INPUTS, not the math
+
+If both the shader and the viewport math are the same, and theirs renders the
+vista correctly on the same device and driver, then what differs is **the values
+fed in** - the guest register state for that draw (`PA_CL_VTE_CNTL`,
+`PA_CL_VPORT_YSCALE`), or which draw/surface the vista is composited through.
+
+A previous session's note in `draw_util.cc` already framed the hypothesis:
+
+> "Normal 3D: D3D9's viewport transform makes the guest's PA_CL_VPORT_YSCALE
+> negative (-h/2), giving ndc_scale[1] = -1.0 ... Hypothesis: the vista is
+> CLIP-SPACE geometry with the viewport Y scale disabled, so it takes the bare
+> 1.0f fallback and gets no flip at all."
+
+That hypothesis is now much stronger, because the shader and the math are
+eliminated.
+
+## NEXT STEP (concrete)
+
+Log, for the vista draw specifically: `pa_cl_vte_cntl.vport_y_scale_ena`,
+`PA_CL_VPORT_YSCALE`, and the resulting **`ndc_scale[1]`**.
+
+- If `ndc_scale[1] == +1.0` for the vista -> confirmed: it takes the fallback and
+  never gets flipped. The fix is then about *why* that draw has the viewport
+  transform disabled, or what XenDroid feeds differently upstream.
+- If `ndc_scale[1] == -1.0` -> the flip is applied and the fault is downstream
+  (composite/sampling), which contradicts the shader evidence and would need
+  re-thinking.
+
+⚠️ Eliminated for the vista so far (11): driver/Turnip · resolve row addressing ·
+rect-list GS · viewport Y-scale toggles · resolve dest addressing ·
+`vulkan_resolve_to_texture` · `vulkan_shared_memory_host_visible` ·
+`readback_resolve=full` · `vfetch_bounds_clamp` · `fix_wclip` · `fix_rsq`
