@@ -444,3 +444,104 @@ and it is upstream of the viewport as required.
 
 **We now have a working reference to diff that against.** Target the constant
 load / relative addressing path in `spirv_shader_translator.cc`.
+
+---
+
+# 10. ⭐ SHADER-LEVEL DIFF (2026-08-11) — first concrete code divergence
+
+## Method (repeatable — this is the tool to use from now on)
+
+1. `dump_shaders = "<dir>"` in **both** emulators' configs.
+2. ⚠️ **Delete `cache/pipelines_<TITLEID>.bin` first** — a 30 MB pipeline cache
+   short-circuits translation and you get ZERO dumps. This blocked the first
+   attempt entirely.
+3. Widened our dump from the 2 memexport hashes to all shaders
+   (`vulkan_pipeline_cache.cc`); the **vista's shaders are reachable at the MAIN
+   MENU**, so no level load is needed.
+4. Join by **ucode hash** — it hashes the GUEST shader, so it is identical
+   across emulators. Ours writes `<dir>/spv/*.spv.bin.*`, theirs
+   `<dir>/*.vulkan.bin.*`.
+5. `spirv-dis` both, diff.
+
+Yield: ours 106 hashes, theirs 111, **106 in common**.
+
+## Finding: we add a W==0 guard they do not have
+
+Same shader `0548824901A185BD`, **same modification bits** `_0000000000000003`,
+different SPIR-V: **11812 vs 12552 bytes, 618 vs 643 instructions**.
+
+**Ours:**
+```
+%376 = OpFDiv %float %float_1 %372          ; 1/w
+%377 = OpFOrdEqual %bool %372 %float_0      ; w == 0 ?
+%379 = OpSelect %float %377 %float_n1 %376  ; if w==0 -> -1.0, else 1/w
+%380 = OpSelect %float %375 %372 %379
+```
+
+**Theirs:**
+```
+%377 = OpFDiv %float %float_1 %373          ; 1/w
+%378 = OpSelect %float %376 %373 %377       ; no zero guard
+```
+
+This is **our own committed "degenerate-W-clip" fix (`6a4b9932`)**, toggle
+`debug.canary.fix_wclip` (default ON). A vertex with `w == 0` that should go to
+infinity (and be clipped) instead receives a **finite** coordinate and lands at
+a specific place — a plausible mechanism for vertices converging.
+
+**TESTED: `fix_wclip=0` does NOT fix the vista** (still inverted, menu, 15 FPS).
+Not yet tested against the **ball**, which is where a per-vertex position guard
+would actually show. ⚠️ Note the vista/ball "linkage" is correlation (XenDroid
+has both right, we have both wrong), not a proven single mechanism — this test
+shows they can move independently.
+
+## Other differences in the same shader
+
+- **`OpExtension "SPV_KHR_float_controls"`** — theirs uses it, ours does not.
+  Controls denorm / rounding-mode / signed-zero-inf-nan preservation. Relevant
+  to precision-sensitive vertex math; we have `spirv_disable_rounding_mode_rte`
+  missing from our cvar set too.
+- `OpMemberName`/`OpMemberDecorate` +12/+13 and `TypeArray` +2 — their
+  SystemConstants struct carries more members (consistent with the user clip
+  planes we lack).
+
+## Next
+
+1. Test `fix_wclip=0` **in gameplay** against the ball.
+2. If negative, diff the remaining 105 common shaders systematically — the
+   method above now makes that mechanical rather than speculative.
+
+## 10a. ALL 41 matched shaders differ — a systematic gap, not a one-off
+
+Pulled every dumped shader from both emulators and matched on
+(ucode hash + modification bits + stage): **41 exact matches, 41 of 41 differ**,
+and **theirs is always LARGER** (+1624 to +9936 bytes).
+
+Largest delta: **`488D9488AB7ED7D8`** (+9936) — the Halo 3 memexport **consumer**
+shader identified in our own investigation.
+
+Per-shader opcode delta (representative, `FED9E00DE375B2D4`):
+
+| opcode | ours | theirs | |
+|---|---|---|---|
+| `MemberDecorate` / `MemberName` | 36 / 34 | 49 / 46 | +13 / +12 |
+| `BitwiseAnd` | 27 | 39 | +12 |
+| `ShiftRightLogical` | 20 | 26 | +6 |
+| `Bitcast` | 13 | 19 | +6 |
+| **`UGreaterThanEqual`** | **0** | **3** | **+3** |
+| **`LogicalAnd`** | **0** | **3** | **+3** |
+| `INotEqual` | 3 | 6 | +3 |
+
+`UGreaterThanEqual` + `LogicalAnd` going **0 -> 3** is the signature of **range
+checks we do not emit at all**, and the extra struct members + bit-unpacking are
+the constants those checks read. This is consistent across every shader, so it
+is one systematic feature we lack, not per-shader noise.
+
+**This is now the concrete lead for the vista** (and plausibly the ball): the
+guest shaders are being translated differently in a bounds/validity-check
+dimension, on every single vertex shader.
+
+**Next:** dump the full instruction-level diff of one small shader
+(`FED9E00DE375B2D4`, +1624 bytes) to read exactly what those 3 checks guard,
+then find the emitting code in their `spirv_shader_translator*` and port it.
+The tooling is now in place, so this is mechanical.

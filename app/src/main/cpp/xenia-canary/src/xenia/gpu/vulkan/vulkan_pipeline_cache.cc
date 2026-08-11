@@ -530,11 +530,17 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(
   //
   // Writes to <dump dir>/spv/. Only the two Halo 3 memexport shaders, so this is
   // inherently bounded.
+  // 2026-08-10: widened from the two Halo 3 memexport hashes to ALL shaders.
+  // XenDroid renders both the Halo 3 vista and the models correctly on the SAME
+  // device and driver, so there is now a reference to diff translated SPIR-V
+  // against - and the vista's shaders are reachable at the MAIN MENU, with no
+  // level load needed. Set dump_shaders on both emulators and join by ucode
+  // hash: the hash is of the GUEST shader, so it is identical across emulators.
+  //
+  // Bounded in practice - the menu compiles a small, fixed shader set. Filter
+  // back to specific hashes if a heavy scene makes this too noisy.
   if (!cvars::dump_shaders.empty()) {
-    uint64_t h = shader.ucode_data_hash();
-    if (h == 0x488D9488AB7ED7D8ull || h == 0x9EA48FC2B26C325Dull) {
-      translation.Dump(std::filesystem::path(cvars::dump_shaders) / "spv", "spv");
-    }
+    translation.Dump(std::filesystem::path(cvars::dump_shaders) / "spv", "spv");
   }
 
 
