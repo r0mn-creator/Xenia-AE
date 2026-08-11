@@ -864,3 +864,48 @@ how the composite is set up - which is precisely what these bits control.
 ⚠️ Keep in mind this is a **correlation** so far: these shaders differ AND the
 vista is wrong. Confirm causally (toggle) before declaring it fixed - three
 "confirmed" hypotheses have already been refuted in this document.
+
+## ⭐⭐⭐ CONFIRMED GAP: we ignore guest user clip planes on Vulkan
+
+Traced where the `0x12000000` modification comes from. XenDroid
+(`guest_spirv_shader_cache.cc:68-74`):
+
+```cpp
+auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+uint32_t user_clip_planes =
+    pa_cl_clip_cntl.clip_disable ? 0 : pa_cl_clip_cntl.ucp_ena;
+modification.vertex.user_clip_plane_count = xe::bit_count(user_clip_planes);
+modification.vertex.user_clip_plane_cull =
+    uint32_t(user_clip_planes && pa_cl_clip_cntl.ucp_cull_only_ena);
+```
+
+**We never consult `ucp_ena` anywhere in the Vulkan pipeline cache.** The guest
+enables a user clip plane for the composite draws and our Vulkan backend
+silently ignores it - geometry that the guest expects to be clipped is not
+clipped.
+
+### We already have the feature - just not on Vulkan
+
+`dxbc_shader_translator.h:151` has `uint32_t user_clip_plane_count : 3;` and the
+clip/cull accounting at :190-193. So **upstream Xenia implements user clip
+planes for D3D12**, XenDroid implemented them for **Vulkan**, and our Vulkan
+path never received them. This is a port, not an invention, and there are two
+reference implementations (our own DXBC one for the semantics, theirs for the
+SPIR-V emission).
+
+### Implementation checklist
+
+1. `spirv_shader_translator.h` - add `user_clip_plane_count : 3` and
+   `user_clip_plane_cull : 1` to the vertex `Modification` struct (mirror the
+   DXBC layout).
+2. `vulkan_pipeline_cache.cc` - compute both from `PA_CL_CLIP_CNTL` exactly as
+   above when building the vertex modification.
+3. `spirv_shader_translator.cc` - declare and write `gl_ClipDistance`
+   (`output_per_vertex_clip_distance_member_index_`, 0 refs ours / 6 theirs) and
+   emit the per-plane distance; handle the cull-distance variant.
+4. `vulkan_device.cc` - ensure the `shaderClipDistance` feature is enabled.
+5. Gate behind a cvar, default OFF, and A/B the vista at the **menu**.
+
+⚠️ Still correlation until toggled: these draws differ AND the vista is wrong.
+Confirm causally - three "confirmed" hypotheses have already been refuted here,
+one of them within two turns tonight.
