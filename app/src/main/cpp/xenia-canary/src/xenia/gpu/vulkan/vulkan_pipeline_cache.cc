@@ -31,7 +31,18 @@
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
 #include "xenia/gpu/vulkan/vulkan_shader.h"
 #include "xenia/gpu/xenos.h"
+#include "xenia/base/cvar.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
+
+DEFINE_bool(
+    vulkan_user_clip_planes, false,
+    "Honour the guest's user clip planes (PA_CL_CLIP_CNTL::ucp_ena) on the "
+    "Vulkan backend by emitting gl_ClipDistance.\n"
+    "Upstream's Vulkan path stubs the clip plane count to 0 behind a TODO, so "
+    "guest geometry that asks to be clipped is not - the D3D12 path has always "
+    "had this. Ported from XenDroid.\n"
+    "Default off until validated; see docs/HALO3_VISTA_UPSIDE_DOWN.md.",
+    "Vulkan");
 
 namespace xe {
 namespace gpu {
@@ -283,6 +294,22 @@ VulkanPipelineCache::GetCurrentVertexShaderModification(
         uint32_t((shader.writes_point_size_edge_flag_kill_vertex() & 0b001) &&
                  regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type ==
                      xenos::PrimitiveType::kPointList);
+  }
+
+  // User clip planes. Our Vulkan backend has never consulted PA_CL_CLIP_CNTL -
+  // upstream stubs the counts to 0 behind a TODO further down this file, while
+  // the D3D12/DXBC path has always had the feature. Guest geometry that asks to
+  // be clipped therefore was not, which is the leading explanation for the
+  // Halo 3 composite problems. Ported from XenDroid.
+  // With the cvar off the fields stay 0 and behaviour is byte-identical.
+  // See docs/HALO3_VISTA_UPSIDE_DOWN.md.
+  if (cvars::vulkan_user_clip_planes) {
+    auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+    uint32_t user_clip_planes =
+        pa_cl_clip_cntl.clip_disable ? 0 : pa_cl_clip_cntl.ucp_ena;
+    modification.vertex.user_clip_plane_count = xe::bit_count(user_clip_planes);
+    modification.vertex.user_clip_plane_cull =
+        uint32_t(user_clip_planes && pa_cl_clip_cntl.ucp_cull_only_ena);
   }
 
   return modification;
