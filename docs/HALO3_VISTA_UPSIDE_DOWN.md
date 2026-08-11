@@ -814,3 +814,53 @@ the composite path rather than the geometry path.
 resolved surface) and compare its texture coordinate handling against
 XenDroid's translated shader for the same hash. The SPIR-V dump tooling and the
 106-shader common set are already in place for exactly this.
+
+## ⭐⭐ 2026-08-11 — the composite shaders are translated with DIFFERENT modification bits
+
+The 3 unflipped, screen-space (`extent_y=8192`) draws are the composite/UI
+candidates. Comparing the dumped filenames, which carry the shader modification:
+
+| shader | ours | theirs |
+|---|---|---|
+| `0A6D1DD7767FDF27` | `0000000000000000` | `0000000000000000` |
+| **`C049A8C9E556F129`** | `0000000000000000` | **`0000000012000000`** |
+| **`C2543FD5CD52420B`** | `0000000000000000` | **`0000000012000000`** |
+
+Decoding their vertex `Modification` bitfield
+(`spirv_shader_translator.h`): bits 0-15 `interpolator_mask`, 16
+`output_point_parameters`, 17-24 `dynamic_addressable_register_count`,
+**25-27 `host_vertex_shader_type`**, **28-30 `user_clip_plane_count`**,
+31 `user_clip_plane_cull`.
+
+`0x12000000` = bit 25 + bit 28:
+
+- **`host_vertex_shader_type = 1`** (`kDomainStart` / `kLineDomainCPIndexed` -
+  i.e. NOT plain `kVertex`)
+- **`user_clip_plane_count = 1`**
+
+**We emit `0` for both.** We have no `user_clip_plane_count` field in our
+Modification struct at all (0 references vs 8 in theirs, measured earlier).
+
+### Why this matters for the vista
+
+These are exactly the draws that composite the scene, and they are the ones we
+translate differently. Two same-hash guest shaders are being turned into
+materially different host shaders - a different pipeline stage/input
+configuration and one enabled user clip plane on their side, neither on ours.
+
+This is a far better fit than anything eliminated so far: the geometry path is
+proven identical and proven flipped, so the remaining difference has to be in
+how the composite is set up - which is precisely what these bits control.
+
+### Next
+
+1. Find where XenDroid computes `user_clip_plane_count` and
+   `host_vertex_shader_type` for these draws (`GetVertexShaderModification` or
+   equivalent) and compare against ours.
+2. Port `user_clip_plane_count` / `user_clip_plane_cull` into our Modification
+   struct plus the `gl_ClipDistance` output support (both confirmed absent).
+3. Re-test the vista at the menu - the fast loop.
+
+⚠️ Keep in mind this is a **correlation** so far: these shaders differ AND the
+vista is wrong. Confirm causally (toggle) before declaring it fixed - three
+"confirmed" hypotheses have already been refuted in this document.
