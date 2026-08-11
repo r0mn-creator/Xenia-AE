@@ -953,3 +953,49 @@ drops.
 
 ⚠️ `vertex_kill_and` is stubbed on the same lines and is a *separate* feature -
 port clip planes first and keep them independent so each can be A/B'd.
+
+## Clip-plane port COMPLETE - and the test is INCONCLUSIVE, not negative
+
+Full port landed (Modification fields, PA_CL_CLIP_CNTL computation,
+`user_clip_planes` SystemConstants member with `kVersion` 6->7, gl_ClipDistance
+/gl_CullDistance declaration + per-plane `dot(clip_space_position, plane)`
+writes before the NDC transform, geometry-shader key un-stubbed;
+`shaderClipDistance` was already enabled).
+
+Enabled `vulkan_user_clip_planes = true` on Halo 3: **menu renders, 0 errors,
+15 FPS, vista STILL INVERTED.**
+
+**But the feature never engaged.** Dumping our shaders with the cvar on, **every
+modification value has bits 28-30 clear** - `user_clip_plane_count == 0` for all
+99 non-trivial shaders. Halo 3 does not set `ucp_ena` on these draws in our
+build, so nothing was clipped and the test says nothing about whether clip
+planes would fix the vista.
+
+⚠️ Do not record this as "clip planes don't fix the vista". It is untested.
+
+## ⭐ The much bigger signal in the same data: DOMAIN vs VERTEX shader
+
+XenDroid's modification for the two composite shaders was **`0x12000000`**:
+
+- bit 28 -> `user_clip_plane_count = 1`
+- **bit 25 -> `host_vertex_shader_type = 1`**
+
+`host_vertex_shader_type = 1` is **`kDomainStart` / `kLineDomainCPIndexed`** -
+a **tessellation domain shader**. Ours translates the same guest shaders as
+plain **`kVertex`** (type 0).
+
+**So XenDroid runs these composite draws through the tessellation/domain-shader
+path and we run them as ordinary vertex shaders.** That is a different pipeline
+stage, not a flag - and it is a far larger divergence than clip planes. It also
+explains why enabling clip planes changed nothing: the draws never reach the
+configuration where they matter.
+
+This connects to known unfinished work here: our tessellation phases 1-5 were
+implemented but **Phase 6 (on-device visual verification) was never completed**
+([[project-xenia-ae-tessellation-gap]]). If our host_vertex_shader_type
+selection falls back to kVertex where it should pick a domain type, the vista
+would be assembled by the wrong pipeline stage entirely.
+
+**NEXT (highest value):** find where `host_vertex_shader_type` is chosen
+(`GetHostVertexShaderTypeIfValid` / the primitive processor) and compare against
+XenDroid for these two shaders. That is now the single best lead for the vista.

@@ -37,7 +37,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
     // TODO(Triang3l): Change to 0xYYYYMMDD once it's out of the rapid
     // prototyping stage (easier to do small granular updates with an
     // incremental counter).
-    static constexpr uint32_t kVersion = 6;
+    static constexpr uint32_t kVersion = 7;
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -264,6 +264,12 @@ class SpirvShaderTranslator : public ShaderTranslator {
 
     // The constant blend factor for the respective modes.
     float edram_blend_constant[4];
+
+    // User clip plane equations from PA_CL_UCP_*, in clip space. Only the
+    // first user_clip_plane_count are meaningful. Appended at the END of the
+    // struct so every pre-existing member keeps its offset.
+    // See docs/HALO3_VISTA_UPSIDE_DOWN.md.
+    float user_clip_planes[6][4];
   };
 
   enum ConstantBuffer : uint32_t {
@@ -880,6 +886,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
     kSystemConstantEdramRTKeepMask,
     kSystemConstantEdramRTClamp,
     kSystemConstantEdramBlendConstant,
+    kSystemConstantUserClipPlanes,
   };
   spv::Id uniform_system_constants_;
   spv::Id uniform_float_constants_;

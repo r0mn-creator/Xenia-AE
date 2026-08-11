@@ -1945,6 +1945,54 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
     }
   }
 
+  // User clip planes. Computed on the CLIP-SPACE position, before the NDC
+  // scale/offset below is applied - the guest's plane equations are in clip
+  // space. Ported from XenDroid. Inert unless cvars::vulkan_user_clip_planes
+  // made user_clip_plane_count non-zero. See docs/HALO3_VISTA_UPSIDE_DOWN.md.
+  {
+    Modification vertex_modification = GetSpirvShaderModification();
+    uint32_t ucp_count = vertex_modification.vertex.user_clip_plane_count;
+    if (ucp_count) {
+      spv::Id clip_space_position;
+      {
+        std::unique_ptr<spv::Instruction> composite_construct_op =
+            std::make_unique<spv::Instruction>(builder_->getUniqueId(),
+                                               type_float4_,
+                                               spv::OpCompositeConstruct);
+        composite_construct_op->addIdOperand(position_xyz);
+        composite_construct_op->addIdOperand(position_w);
+        clip_space_position = composite_construct_op->getResultId();
+        builder_->getBuildPoint()->addInstruction(
+            std::move(composite_construct_op));
+      }
+      unsigned int clip_cull_member_index =
+          vertex_modification.vertex.user_clip_plane_cull
+              ? output_per_vertex_cull_distance_member_index_
+              : output_per_vertex_clip_distance_member_index_;
+      for (uint32_t i = 0; i < ucp_count; ++i) {
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(
+            builder_->makeIntConstant(kSystemConstantUserClipPlanes));
+        id_vector_temp_.push_back(builder_->makeIntConstant(int(i)));
+        spv::Id clip_plane = builder_->createLoad(
+            builder_->createAccessChain(spv::StorageClassUniform,
+                                        uniform_system_constants_,
+                                        id_vector_temp_),
+            spv::NoPrecision);
+        spv::Id distance = builder_->createBinOp(
+            spv::OpDot, type_float_, clip_space_position, clip_plane);
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(
+            builder_->makeIntConstant(int(clip_cull_member_index)));
+        id_vector_temp_.push_back(builder_->makeIntConstant(int(i)));
+        builder_->createStore(
+            distance, builder_->createAccessChain(spv::StorageClassOutput,
+                                                  output_per_vertex_,
+                                                  id_vector_temp_));
+      }
+    }
+  }
+
   // Apply the NDC scale and offset for guest to host viewport transformation.
   id_vector_temp_.clear();
   id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantNdcScale));

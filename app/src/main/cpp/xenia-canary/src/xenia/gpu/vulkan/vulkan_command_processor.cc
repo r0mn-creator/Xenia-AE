@@ -41,6 +41,8 @@
 
 DECLARE_bool(clear_memory_page_state);
 
+DECLARE_bool(vulkan_user_clip_planes);
+
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -5969,6 +5971,35 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
     dirty |= system_constants_.ndc_offset[i] != viewport_info.ndc_offset[i];
     system_constants_.ndc_scale[i] = viewport_info.ndc_scale[i];
     system_constants_.ndc_offset[i] = viewport_info.ndc_offset[i];
+  }
+
+  // User clip planes, for vertex and domain shaders. Ported from XenDroid;
+  // gated so that with the cvar off nothing is written and the constant buffer
+  // contents are unchanged. See docs/HALO3_VISTA_UPSIDE_DOWN.md.
+  if (cvars::vulkan_user_clip_planes) {
+    auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+    if (!pa_cl_clip_cntl.clip_disable && pa_cl_clip_cntl.ucp_ena) {
+      uint32_t user_clip_planes_remaining = pa_cl_clip_cntl.ucp_ena;
+      uint32_t user_clip_plane_index;
+      uint32_t written = 0;
+      while (xe::bit_scan_forward(user_clip_planes_remaining,
+                                  &user_clip_plane_index)) {
+        user_clip_planes_remaining =
+            xe::clear_lowest_bit(user_clip_planes_remaining);
+        if (user_clip_plane_index >= 6) {
+          continue;
+        }
+        // The shader indexes the planes densely (0..count-1) in enable order,
+        // so pack them rather than indexing by the register slot.
+        float* write_ptr = system_constants_.user_clip_planes[written++];
+        const void* user_clip_plane_regs =
+            &regs[XE_GPU_REG_PA_CL_UCP_0_X + user_clip_plane_index * 4];
+        if (std::memcmp(write_ptr, user_clip_plane_regs, 4 * sizeof(float))) {
+          dirty = true;
+          std::memcpy(write_ptr, user_clip_plane_regs, 4 * sizeof(float));
+        }
+      }
+    }
   }
 
   // Point size.

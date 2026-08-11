@@ -999,10 +999,14 @@ bool VulkanPipelineCache::GetGeometryShaderKey(
   // real counts here.
   key.interpolator_count =
       xe::bit_count(vertex_shader_modification.vertex.interpolator_mask);
+  // Un-stubbed 2026-08-11: these were hardcoded to 0 behind upstream's TODO,
+  // which is why guest user clip planes were silently dropped on Vulkan.
+  // vertex_kill_and below stays stubbed - it is a separate feature, kept
+  // independent so each can be A/B'd. See docs/HALO3_VISTA_UPSIDE_DOWN.md.
   key.user_clip_plane_count =
-      /* vertex_shader_modification.vertex.user_clip_plane_count */ 0;
+      vertex_shader_modification.vertex.user_clip_plane_count;
   key.user_clip_plane_cull =
-      /* vertex_shader_modification.vertex.user_clip_plane_cull */ 0;
+      vertex_shader_modification.vertex.user_clip_plane_cull;
   key.has_vertex_kill_and =
       /* vertex_shader_modification.vertex.vertex_kill_and */ 0;
   key.has_point_size =
