@@ -1032,3 +1032,99 @@ decode can be sanity-checked against a known-type shader on our side.
 This is exactly the failure mode that has produced several wrong "confirmed"
 calls in this document - a plausible reading of a number, acted on before the
 encoding was checked.
+
+---
+
+# ⭐⭐⭐ 2026-08-11 XDTESTER: first hard divergence found — the 0x04D20000 resolve
+
+Built **XDtester** (XenDroid from source, `xendroid.compose.xdtester.debug`,
+instrumented, installed alongside the stock build) and ran the SAME probes in
+both emulators. Baseline verified faithful first: Halo 3 vista renders correctly
+on Turnip R8, 17.9 FPS, 0 errors.
+
+## Result 1 — the NDC path is ELIMINATED
+
+`NDCYDRAW` in both builds, same scene:
+
+| | XenDroid | Canary AE |
+|---|---|---|
+| flipped (`ndc_scale_y=-1`) | 41 | 39 |
+| unflipped (`+0.000244`, extent 8192) | **3** | **3** |
+| the unflipped shaders | `0A6D1DD7767FDF27`, `C049A8C9E556F129`, `C2543FD5CD52420B` | **identical three** |
+
+Same shaders, same regimes, same values. Their vista is right and ours is wrong
+while both feed **identical `ndc_scale[1]` into identical shader code**.
+
+This also **kills the `0x12000000` decode** flagged as unverified above: if their
+composite draws had a different `host_vertex_shader_type`, it would appear here.
+It does not. That decode was wrong.
+
+## Result 2 — the resolve lists differ in exactly ONE entry
+
+`VISTA ENUM` in both, Halo 3 menu. Every resolve matches except:
+
+| | Canary AE | XenDroid |
+|---|---|---|
+| base `0x04D20000`, fmt=22, **depth=1** | **336x336**, len=700416, order **n=25** | **512x512**, len=1048576, order **n=4** |
+
+Same address, same format, **different geometry**, and a completely different
+position in the frame - theirs resolves it 4th, ours 25th (i.e. last).
+
+512x512 is a power of two (shadow map / cubemap face shape); 336x336 is not.
+`336 = 42*8` and `512 = 64*8`, so this comes from
+`coordinate_info.width_div_8` / `height_div_8` differing - the resolve
+RECTANGLE is being computed differently, not just the destination.
+
+**This is the first hard, measured divergence in the vista path**, and it is a
+depth resolve - consistent with a deferred scene being composited wrongly.
+
+## Next
+
+1. Instrument `GetResolveInfo` in both builds to log the source registers
+   (`RB_COPY_DEST_PITCH`, the resolve rectangle, `rb_copy_control`) for the
+   `0x04D20000` resolve and find why the rectangle differs.
+2. Check ordering: does theirs resolve it before the vista composite and ours
+   after? A depth surface resolved too late would be sampled stale.
+
+⚠️ Correlation until proven: same-address/different-size is a strong signal but
+the causal link to the inversion is not yet shown.
+
+## Analysis of the 0x04D20000 divergence — two real code differences, one caveat
+
+Diffed `GetResolveInfo` (`draw_util.cc`) ours vs XenDroid:
+
+**1. Degenerate-rectangle handling differs.**
+```
+ours:    assert_true(x0 <= x1 && y0 <= y1);   ... return false;   // DROPS the resolve
+theirs:  info_out.coordinate_info.width_div_8 = 0;
+         info_out.height_div_8 = 0;           ... return true;    // keeps it, zero-sized
+```
+We **drop** a resolve whose rectangle is degenerate; they **keep** it with a zero
+size. A dropped resolve means a surface never gets written at all.
+
+**2. Aligned vs raw destination pitch.**
+```
+ours:    texture_util::GetTiledOffset2D(..., rb_copy_dest_pitch.copy_dest_pitch, ...)   // RAW
+theirs:  xe::align(copy_dest_pitch, kStoragePitchHeightAlignmentBlocks) -> aligned      // ALIGNED
+```
+They align the pitch/height before computing tiled offsets; we pass the raw
+register value. That changes the destination ADDRESS arithmetic.
+
+They also track `copy_dest_x0` / `copy_dest_y0` (the rect origin) as explicit
+fields, which we do not have at all.
+
+### ⚠️ Caveat on the 336x336 vs 512x512 reading
+
+The `VISTA ENUM` probe **dedups on base address and logs only the FIRST resolve
+to each**. If Halo 3 resolves `0x04D20000` several times with different
+rectangles, then ours logging 336x336 at n=25 and theirs 512x512 at n=4 may be
+the SAME set of resolves observed in a DIFFERENT ORDER - not different geometry.
+
+**Do not act on "the rectangle is computed differently" until that is
+distinguished.** Change the probe to log EVERY resolve to `0x04D20000` (not just
+the first) in both builds and compare the full sequences. That is a one-line
+change to the dedup condition and settles it.
+
+The ordering difference (n=4 vs n=25) is real either way and is worth
+understanding on its own: a depth surface resolved last rather than early could
+be sampled stale by the composite.
