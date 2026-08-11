@@ -1451,6 +1451,39 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
   std::vector<spv::Id> struct_per_vertex_members;
   struct_per_vertex_members.reserve(kOutputPerVertexMemberCount);
   struct_per_vertex_members.push_back(type_float4_);
+
+  // User clip planes (gl_ClipDistance / gl_CullDistance). Upstream's Vulkan
+  // backend never emitted these - the counts are stubbed to 0 behind a TODO in
+  // vulkan_pipeline_cache.cc - so guest geometry that asks to be clipped was
+  // not. The D3D12/DXBC translator has always had the feature. Ported from
+  // XenDroid; the modification fields are only non-zero when
+  // cvars::vulkan_user_clip_planes is on, so this is inert by default.
+  // See docs/HALO3_VISTA_UPSIDE_DOWN.md.
+  Modification per_vertex_modification = GetSpirvShaderModification();
+  uint32_t user_clip_plane_count =
+      per_vertex_modification.vertex.user_clip_plane_count;
+  uint32_t clip_distance_count = 0;
+  uint32_t cull_distance_count = 0;
+  if (per_vertex_modification.vertex.user_clip_plane_cull) {
+    cull_distance_count = user_clip_plane_count;
+  } else {
+    clip_distance_count = user_clip_plane_count;
+  }
+  output_per_vertex_clip_distance_member_index_ = 0;
+  output_per_vertex_cull_distance_member_index_ = 0;
+  if (clip_distance_count) {
+    output_per_vertex_clip_distance_member_index_ =
+        static_cast<unsigned int>(struct_per_vertex_members.size());
+    struct_per_vertex_members.push_back(builder_->makeArrayType(
+        type_float_, builder_->makeUintConstant(clip_distance_count), 0));
+  }
+  if (cull_distance_count) {
+    output_per_vertex_cull_distance_member_index_ =
+        static_cast<unsigned int>(struct_per_vertex_members.size());
+    struct_per_vertex_members.push_back(builder_->makeArrayType(
+        type_float_, builder_->makeUintConstant(cull_distance_count), 0));
+  }
+
   spv::Id type_struct_per_vertex =
       builder_->makeStructType(struct_per_vertex_members, "gl_PerVertex");
   builder_->addMemberName(type_struct_per_vertex,
@@ -1458,6 +1491,22 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
   builder_->addMemberDecoration(type_struct_per_vertex,
                                 kOutputPerVertexMemberPosition,
                                 spv::DecorationBuiltIn, spv::BuiltInPosition);
+  if (clip_distance_count) {
+    builder_->addMemberName(type_struct_per_vertex,
+                            output_per_vertex_clip_distance_member_index_,
+                            "gl_ClipDistance");
+    builder_->addMemberDecoration(
+        type_struct_per_vertex, output_per_vertex_clip_distance_member_index_,
+        spv::DecorationBuiltIn, spv::BuiltInClipDistance);
+  }
+  if (cull_distance_count) {
+    builder_->addMemberName(type_struct_per_vertex,
+                            output_per_vertex_cull_distance_member_index_,
+                            "gl_CullDistance");
+    builder_->addMemberDecoration(
+        type_struct_per_vertex, output_per_vertex_cull_distance_member_index_,
+        spv::DecorationBuiltIn, spv::BuiltInCullDistance);
+  }
   builder_->addDecoration(type_struct_per_vertex, spv::DecorationBlock);
   output_per_vertex_ = builder_->createVariable(
       spv::NoPrecision, spv::StorageClassOutput, type_struct_per_vertex, "");

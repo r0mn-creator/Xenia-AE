@@ -941,6 +941,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
     kOutputPerVertexMemberCount,
   };
   spv::Id output_per_vertex_;
+  // Member indices of gl_ClipDistance / gl_CullDistance inside gl_PerVertex,
+  // 0 when the corresponding array is not allocated (no user clip planes).
+  // See docs/HALO3_VISTA_UPSIDE_DOWN.md.
+  unsigned int output_per_vertex_clip_distance_member_index_ = 0;
+  unsigned int output_per_vertex_cull_distance_member_index_ = 0;
 
   // With fragment shader interlock, variables in the main function.
   // Otherwise, framebuffer color attachment outputs.
