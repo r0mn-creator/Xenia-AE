@@ -1128,3 +1128,43 @@ change to the dedup condition and settles it.
 The ordering difference (n=4 vs n=25) is real either way and is worth
 understanding on its own: a depth surface resolved last rather than early could
 be sampled stale by the composite.
+
+## Both resolve-path differences TESTED — neither fixes the vista
+
+Ported and tested the two concrete `GetResolveInfo` divergences found by diffing
+against XenDroid:
+
+| change | toggle | result |
+|---|---|---|
+| Bail out on empty/inverted resolve rect (we had only `assert_true`, a NO-OP in release) | `resolve_rect_guard` | **Never triggers** - 0 occurrences on Halo 3. Cannot be the cause. |
+| Pass the ALIGNED `copy_dest_pitch` to the tiled-offset helpers instead of the RAW value | `resolve_aligned_pitch` | Active, 0 errors, 15 FPS - **vista still inverted**. |
+
+Both are kept (default OFF): each matches upstream/XenDroid and is more correct
+than what we had. Neither is the vista fix.
+
+### Where the vista search now stands
+
+Eliminated **by direct measurement against a working reference** (XDtester):
+driver/Turnip · resolve row addressing · rect-list GS · viewport Y math ·
+resolve destination addressing · `vulkan_resolve_to_texture` ·
+`vulkan_shared_memory_host_visible` · `readback_resolve` · `fix_wclip` ·
+`fix_rsq` · `vfetch_bounds_clamp` · user clip planes · **NDC scale/offset
+(identical per-draw in both builds)** · **vertex-stage Y (the vista draws DO
+receive the flip)** · **the translated shader position math (instruction-
+identical)** · resolve-rect degeneracy · resolve tiling pitch.
+
+That leaves, concretely:
+
+1. **The `0x04D20000` resolve** - ours 336x336 at n=25, theirs 512x512 at n=4.
+   ⚠️ STILL UNRESOLVED whether that is different geometry or the same resolves
+   in a different ORDER, because the probe dedups on base address. **Remove the
+   dedup for that address in both builds and compare the full sequences.** This
+   is the single most concrete unexplained difference and it has not been
+   properly measured yet.
+2. **How the resolved surface is SAMPLED during composite** - never instrumented.
+   The geometry path is now exhausted; the read side is not.
+
+⚠️ Note the pattern: every geometry/vertex-path hypothesis has failed. The
+evidence says the vertices are right and the flip happens when the resolved
+image is consumed. Instrument the composite's texture fetch next, not more of
+the vertex path.

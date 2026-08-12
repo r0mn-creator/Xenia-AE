@@ -1279,6 +1279,17 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
       (rb_copy_dest_pitch.copy_dest_height +
        (xenos::kTextureTileWidthHeight - 1)) >>
       xenos::kTextureTileWidthHeightLog2;
+
+  // XenDroid passes the ALIGNED destination pitch to the tiled-offset helpers;
+  // we passed the RAW register value. That pitch is what the tiling math uses
+  // to derive each row's address, so a mismatch places rows at wrong offsets in
+  // the destination surface. Toggle: debug.canary.resolve_aligned_pitch
+  // (experiment, default OFF). See docs/HALO3_VISTA_UPSIDE_DOWN.md.
+  const uint32_t copy_dest_pitch_for_tiling =
+      XE_AE_EXPERIMENT_ENABLED("debug.canary.resolve_aligned_pitch")
+          ? (copy_dest_pitch_aligned_div_32
+             << xenos::kTextureTileWidthHeightLog2)
+          : uint32_t(rb_copy_dest_pitch.copy_dest_pitch);
   const FormatInfo& dest_format_info = *FormatInfo::Get(dest_format);
   if (is_depth || dest_format_info.type == FormatType::kResolvable) {
     uint32_t bpp_log2 = xe::log2_floor(dest_format_info.bits_per_pixel >> 3);
@@ -1320,15 +1331,15 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
     } else {
       copy_dest_base_adjusted += texture_util::GetTiledOffset2D(
           int32_t(dest_base_x), int32_t(dest_base_y),
-          rb_copy_dest_pitch.copy_dest_pitch, bpp_log2);
+          copy_dest_pitch_for_tiling, bpp_log2);
       copy_dest_extent_start =
           rb_copy_dest_base + texture_util::GetTiledAddressLowerBound2D(
                                   uint32_t(x0), uint32_t(y0),
-                                  rb_copy_dest_pitch.copy_dest_pitch, bpp_log2);
+                                  copy_dest_pitch_for_tiling, bpp_log2);
       copy_dest_extent_end =
           rb_copy_dest_base + texture_util::GetTiledAddressUpperBound2D(
                                   uint32_t(x1), uint32_t(y1),
-                                  rb_copy_dest_pitch.copy_dest_pitch, bpp_log2);
+                                  copy_dest_pitch_for_tiling, bpp_log2);
     }
   } else {
     XELOGE("Tried to resolve to format {}, which is not a ColorFormat",
