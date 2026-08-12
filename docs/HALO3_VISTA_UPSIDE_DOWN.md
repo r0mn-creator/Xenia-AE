@@ -1210,3 +1210,48 @@ and find where 512 becomes 336.
 
 ⚠️ Probe note: the TEXBIND dedup key collides (many repeated lines). Harmless
 for this result but tighten the key before reusing it.
+
+## ⚠️ RETRACTION: the "336x336 vs 512x512" finding is NOT trustworthy
+
+Checked the arithmetic before acting on it, and it does not hold:
+
+| | reported size | reported len | size x 4 bytes |
+|---|---|---|---|
+| Canary AE | 336x336 | 700,416 | **451,584** - does NOT match its own len |
+| XenDroid | 512x512 | 1,048,576 | **1,048,576** - matches exactly |
+
+Our own line is internally inconsistent. 700,416 / 4 = 175,104 = **512 x 342**,
+so the surface is plausibly ~512 wide, not 336.
+
+Also checked: `ResolveCoordinateInfo`'s `width_div_8` / `height_div_8` bitfield
+declarations are **identical** in both trees, so the probe formula is the same on
+both sides. And the rect trace shows **every** resolve rectangle exactly matching
+its scissor, with **no 336x336 rectangle anywhere**.
+
+**Conclusion: the derived size is an artifact of the probe's arithmetic, not a
+measured defect.** The claim "we write 336x336 and read 512x512" is retracted.
+
+Compounding it: the `VISTA ENUM` probe that produced those numbers lives in the
+stashed session probes (`stash@{0}`), not in the current tree - so the figures
+came from a build that no longer exists.
+
+### What still stands
+
+- The **read-side probe works** (`debug.canary.texbind`) and reliably shows the
+  binding at `0x04D20000` is **512x512 tiled, fmt 22**. That is a direct read of
+  the texture key, not derived.
+- The **`len` values genuinely differ** (700,416 vs 1,048,576) between the two
+  builds. That is a raw field and is still a real, unexplained signal.
+- No resolve rectangle is degenerate or inverted; all match their scissors.
+
+### To settle it properly
+
+Re-add the resolve enumerator logging **raw `width_div_8` / `height_div_8`
+values plus `len`** (not a derived size) in BOTH builds and compare. The probe
+change is written but was not applied, because the enumerator is currently
+stashed rather than in-tree.
+
+**Lesson (again): an instrument that can produce numbers inconsistent with its
+own other outputs must be cross-checked before its output becomes a finding.**
+The 4-bytes-per-pixel sanity check took seconds and invalidated a conclusion I
+had already reported as the strongest of the session.

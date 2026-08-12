@@ -1134,6 +1134,26 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   x1 = std::clamp(x1, int32_t(scissor.offset[0]), scissor_right);
   y1 = std::clamp(y1, int32_t(scissor.offset[1]), scissor_bottom);
 
+  // TESTRIG(gpu): where does the resolve rectangle lose size?
+  //
+  // We RESOLVE 0x04D20000 as 336x336 but SAMPLE it as 512x512 tiled - an
+  // internal inconsistency in our own build (XenDroid does 512x512 both ways).
+  // 336 = 42*8, 512 = 64*8, so the rectangle is being shrunk. The scissor clamp
+  // just above is the prime suspect. Logs the rect before/after clamping plus
+  // the scissor itself. Toggle: debug.canary.resolve_rect_trace.
+  if (XE_AE_DIAG_ENABLED("debug.canary.resolve_rect_trace")) {
+    static std::atomic<uint32_t> trace_count{0};
+    // Skip the common full-surface rect so the interesting resolves are
+    // not buried by it.
+    bool rect_interesting = (x1 - x0) != 1152 || (y1 - y0) != 640;
+    if (rect_interesting && trace_count.fetch_add(1) < 60) {
+      XELOGI("RECTTRACE rect=({},{})-({},{}) w={} h={} "
+             "scissor=({},{})+({}x{})",
+             x0, y0, x1, y1, x1 - x0, y1 - y0, scissor.offset[0],
+             scissor.offset[1], scissor.extent[0], scissor.extent[1]);
+    }
+  }
+
   // XenDroid bails out here; we only had an assert, which is a NO-OP in release
   // builds - so an empty or INVERTED resolve rectangle was processed anyway. An
   // inverted-Y rectangle resolving "backwards" is a direct mechanism for a
