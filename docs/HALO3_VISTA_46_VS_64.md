@@ -455,3 +455,60 @@ and it will not be found by more GPU-side diffing.
 Set `license_mask = 0` and `mount_cache = false` to match XenDroid, and re-check
 the scissor. Two config lines, one run - and it closes out the last untested
 config differences before committing to the much larger memory/JIT hunt.
+
+---
+
+## 12. ⚠️⚠️ CRITICAL CORRECTION: the scissor size is NON-DETERMINISTIC
+
+Three consecutive runs, `seq=0` scissor:
+
+| run | config change | `seq=0` scissor |
+|---|---|---|
+| 1 | baseline | **368x368** |
+| 2 | `license_mask=0`, `mount_cache=false` | **384x384** |
+| 3 | `license_mask=0` only | **336x336** |
+
+The value **varies run to run**. Reading run 2 as "license_mask moved the
+scissor 368 -> 384" was mistaking noise for signal - corrected immediately by
+run 3 going the other way.
+
+`license_mask` and `mount_cache` are therefore **NOT** shown to affect it.
+Config restored.
+
+### What non-determinism actually tells us
+
+Ours **fluctuates** (336-384 at `seq=0`, then decays: 368->328->248->232 within
+a run). XenDroid is a **constant 512** across all 40 resolves.
+
+That is the signature of a **dynamic/adaptive shadow LOD reacting to
+performance**. We run ~15 FPS; XenDroid ~18-20 and never drops below maximum.
+The game is lowering its own shadow-cascade resolution because our emulator is
+slower.
+
+### ⚠️⚠️ THEREFORE THIS LEAD IS PROBABLY NOT THE INVERSION
+
+**A smaller shadow cascade makes shadows blurrier. It does NOT make a scene
+render upside down.** The 46-vs-64 difference is real, measured and reproducible
+in kind - but it is most likely a **quality** symptom of our lower frame rate,
+not the cause of the **orientation** bug.
+
+This whole thread (sections 1, 9, 10, 11) may be a red herring for the vista.
+It was pursued because it was the only difference in the resolve list - but
+"only difference found" is not "cause", and an inverted image and a smaller
+shadow map are different failure modes.
+
+### What this means for the investigation
+
+- **Do not** invest further in 46-vs-64 as the inversion cause without first
+  showing a mechanism by which cascade size could invert an image. There is no
+  obvious one.
+- The **inversion** remains unexplained, with the geometry path exhausted and
+  the read side barely explored.
+- If the adaptive-LOD reading is right, this difference should **disappear on
+  its own** once our frame rate approaches theirs - making it a performance
+  problem, not a rendering one.
+
+**Suggested reset:** go back to the read side with fresh eyes. The composite's
+texture *sampling* (coordinates, orientation of the RT-as-texture handoff) was
+identified as the untouched half of the pipeline and has still never been
+instrumented - only the texture *binding* was.
