@@ -362,3 +362,42 @@ Remaining candidates for the guest-visible input:
 (this `VdQueryVideoMode` line among them). Before writing a new probe, grep
 their tree for an existing one - it is often already there and matching its
 format keeps the two logs diffable.
+
+### Config comparison (2026-08-12) — 35 differences, most eliminated
+
+Diffed all 155 shared cvars between Canary AE and XDtester.
+
+**Eliminated:**
+- **Patches** - we load 480 community patches, XenDroid loads none. BUT every
+  entry in `4D5307E6 - Halo 3.patch.toml` is `is_enabled = false`, so nothing is
+  applied. Not the cause.
+- **Video mode** - both report `1280x720 (mode 8)` to the guest (verified with
+  matching `VdQueryVideoMode` logs on both sides).
+- **`internal_display_resolution`** - our global held the malformed string
+  `'848x480'` in a `DEFINE_uint32`; set to `8`, scissor unchanged.
+
+**Still-differing settings, ranked as candidates:**
+
+| cvar | ours | theirs | note |
+|---|---|---|---|
+| `logged_profile_slot_0_xuid` | `E0300000A360E000` | `E03000009C0D4593` | **⭐ TOP CANDIDATE** - different signed-in profile |
+| `license_mask` | `1` | `0` | full licence vs none - changes unlocked content paths |
+| `mount_cache` | `true` | `false` | cache partition availability |
+| `vulkan_sparse_shared_memory` | `false` | `true` | host-side, but affects memory behaviour |
+
+### ⭐ Leading hypothesis: the PROFILE
+
+**Halo 3 stores its own graphics/quality settings in the player profile (GPD).**
+We run a different profile from XenDroid. If that profile carries a lower
+shadow-quality setting, the game would legitimately request a smaller shadow
+cascade - which matches the evidence exactly:
+
+- our very first resolve (`seq=0`) is already small, i.e. **not** adaptive decay
+- the GPU code is provably correct and identical
+- the guest is *choosing* the smaller size
+
+**NEXT TEST (cheap, decisive):** run Halo 3 in Canary AE with **no profile
+signed in** (or with XenDroid's profile), and check whether the scissor becomes
+`512x512`. If it does, the vista bug is profile/save state, not code.
+
+Also worth trying: `license_mask = 0` to match theirs.
