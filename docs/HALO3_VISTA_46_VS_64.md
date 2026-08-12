@@ -186,3 +186,57 @@ adb shell "grep 'VISTA ENUM' <files>/xe.log"
 - Related: `HALO3_VISTA_UPSIDE_DOWN.md` (full narrative),
   `HALO3_BALL_XENDROID_FIX.md` (the models bug),
   `XENDROID_FULL_COMPARISON.md` (engine-wide comparison).
+
+---
+
+## 9. MEASURED 2026-08-12: the limiter is the SCISSOR, and the code is identical
+
+Logged the inputs at the point `width_div_8` is computed
+(`debug.canary.resolve_inputs`, filtered to `copy_dest_base == 0x04D20000`):
+
+```
+base=0x04D20000 rect=(0,0)-(368,368) w_div8=46 surface_pitch=560 pitch_aligned=560 msaa=0 scissor=(0,0)+(368x368)
+base=0x04D20000 rect=(0,0)-(312,312) w_div8=39 surface_pitch=560 pitch_aligned=560 msaa=0 scissor=(0,0)+(312x312)
+```
+
+**Findings:**
+
+1. **The SCISSOR is the limiter**, not the surface pitch. `surface_pitch = 560`
+   and `pitch_aligned = 560`, both larger than 368 - so the surface-pitch clamp
+   never engages. The rect is exactly the scissor.
+2. **The size varies per call** (368, then 312) - consistent with shadow-map
+   cascades into a depth surface.
+3. **`GetScissorTmpl` is byte-identical between the two trees** (the only diff
+   lines are our own probes).
+
+So: identical scissor code, identical resolve maths, identical clamps - yet
+different inputs. **The guest register state must differ when this resolve is
+reached.**
+
+### That points at the ORDERING difference
+
+Recorded earlier and not yet chased: theirs resolves `0x04D20000` at **n=5**,
+ours at **n=25 (last)**. Same guest command stream, different position in it.
+
+If our build reaches this resolve at a different point in the frame, the scissor
+registers naturally hold different values - which explains identical code
+producing different rects **without any arithmetic being wrong**.
+
+**Hypothesis to test next:** we are **missing or deferring earlier resolves** to
+this address - the ones XenDroid performs with the larger (512) scissor. Our
+n=25 may be a LATER cascade, with the earlier full-size ones never issued or
+dropped.
+
+### NEXT TEST (replaces the old section 3)
+
+Remove the enumerator's dedup for `0x04D20000` and log **every** resolve to it,
+in **both** builds, with the scissor and a frame/draw counter:
+
+- If XenDroid performs resolves ours never does -> find why ours are dropped
+  (candidates: the `!width_div_8 || !height_div_8` early-out, or an upstream
+  condition that skips the resolve entirely).
+- If both perform the same count but with different scissors -> the divergence
+  is upstream in the register state, and the ordering is the clue.
+
+⚠️ Do NOT re-diff `GetScissorTmpl`, `GetResolveInfo`'s maths, or the
+surface-pitch clamp. All three are confirmed identical.

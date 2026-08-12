@@ -1228,6 +1228,33 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
       uint32_t(x1 - x0) >> xenos::kResolveAlignmentPixelsLog2;
   info_out.height_div_8 =
       uint32_t(y1 - y0) >> xenos::kResolveAlignmentPixelsLog2;
+
+  // TESTRIG(gpu): THE 46-vs-64 test. See docs/HALO3_VISTA_46_VS_64.md.
+  //
+  // We produce w_div8=46 (368px) for the 0x04D20000 depth resolve where
+  // XenDroid produces 64 (512px), and the read side binds that surface as
+  // 512x512. The maths here is proven byte-identical between the two builds,
+  // so the INPUTS differ. This logs them. Identical format in XDtester.
+  // Toggle: debug.canary.resolve_inputs.
+  if (XE_AE_DIAG_ENABLED("debug.canary.resolve_inputs")) {
+    uint32_t probe_dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE];
+    if (probe_dest_base == 0x04D20000u) {
+      static std::atomic<uint32_t> n{0};
+      if (n.fetch_add(1) < 6) {
+        XELOGI("RESOLVEIN base=0x{:08X} rect=({},{})-({},{}) w={} h={} "
+               "w_div8={} h_div8={} surface_pitch={} pitch_aligned={} "
+               "msaa={} scissor=({},{})+({}x{})",
+               probe_dest_base, x0, y0, x1, y1, x1 - x0, y1 - y0,
+               uint32_t(info_out.coordinate_info.width_div_8),
+               uint32_t(info_out.height_div_8),
+               uint32_t(rb_surface_info.surface_pitch),
+               int32_t(rb_surface_info.surface_pitch &
+                       ~uint32_t(xenos::kResolveAlignmentPixels - 1)),
+               uint32_t(rb_surface_info.msaa_samples), scissor.offset[0],
+               scissor.offset[1], scissor.extent[0], scissor.extent[1]);
+      }
+    }
+  }
   // 3 bits for each.
   assert_true(draw_resolution_scale_x <= 7);
   assert_true(draw_resolution_scale_y <= 7);
