@@ -1307,3 +1307,40 @@ Instrument `GetResolveInfo` specifically for `copy_dest_base == 0x04D20000`:
 log the source registers (`RB_COPY_DEST_PITCH`, the vertices, the scissor, and
 `rb_copy_control`) in BOTH builds and diff. That is a narrow question with a
 definite answer, and the harness for it already exists on both sides.
+
+## Narrowed further: the resolve MATH is identical, so the INPUTS differ
+
+Compared the code that produces `width_div_8` in both trees:
+
+- **Size assignment - IDENTICAL:**
+  ```cpp
+  info_out.coordinate_info.width_div_8 = uint32_t(x1 - x0) >> kResolveAlignmentPixelsLog2;
+  info_out.height_div_8              = uint32_t(y1 - y0) >> kResolveAlignmentPixelsLog2;
+  ```
+- **Surface-pitch clamp - IDENTICAL** (`x0/x1 = std::min(..., surface_pitch_aligned)`).
+- **8-pixel alignment of the rect - IDENTICAL.**
+
+So `46` vs `64` cannot come from the arithmetic. It must come from the inputs:
+the resolve **vertices** (the guest-supplied rectangle) or
+**`rb_surface_info.surface_pitch`**, which clamps `x1`.
+
+`46*8 = 368` and `64*8 = 512`. If our `surface_pitch_aligned` were 368 for this
+resolve, the clamp alone would produce exactly the observed value - making
+`surface_pitch` the prime suspect.
+
+### THE NEXT TEST (narrow, definite)
+
+Log, in BOTH builds, gated and filtered to `copy_dest_base == 0x04D20000` only:
+
+```
+x0, x1, y0, y1  (immediately before width_div_8 is computed)
+rb_surface_info.surface_pitch, surface_pitch_aligned
+the pre-clamp vertices
+rb_copy_control
+```
+
+One build cycle each; the harness exists on both sides. Whichever input differs
+IS the bug, because the math around it is proven identical.
+
+⚠️ Do NOT re-diff the arithmetic - it is confirmed identical. The answer is in
+the register/vertex state feeding it.
