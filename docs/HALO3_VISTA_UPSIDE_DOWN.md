@@ -1168,3 +1168,45 @@ That leaves, concretely:
 evidence says the vertices are right and the flip happens when the resolved
 image is consumed. Instrument the composite's texture fetch next, not more of
 the vertex path.
+
+## ⭐⭐⭐ 2026-08-11 STRONGEST LEAD: write/read size mismatch at 0x04D20000
+
+Added a READ-SIDE probe (`debug.canary.texbind`, in `TextureCache::RequestTextures`,
+logging what each texture fetch constant actually resolves to). First run on the
+Halo 3 menu:
+
+```
+TEXBIND slot=1 base=0x04D20000 512x512 dim=1 tiled=1 fmt=22 signs=00
+```
+
+Compare against the RESOLVE to the same address:
+
+| | resolve (WRITE) | texture binding (READ) |
+|---|---|---|
+| **Canary AE** | `0x04D20000` **336x336** | `0x04D20000` **512x512** |
+| **XenDroid** | `0x04D20000` **512x512** | same address |
+
+**We write a 336x336 region and then sample it as a 512x512 TILED surface.**
+XenDroid writes 512x512 and reads 512x512 - self-consistent.
+
+Xenos tiling derives each row's address from the surface dimensions, so reading
+a tiled surface at 512 wide when only 336 was written mis-addresses every row.
+That is a coherent-but-wrong image, which matches the symptom far better than
+anything eliminated so far.
+
+It also **resolves the earlier dedup caveat**: the binding is consistently
+512x512 while our resolve was 336x336, so the sizes genuinely differ - this is
+not an ordering artifact of the enumerator probe.
+
+⚠️ Still correlation until proven causally. Confirm by making the resolve
+produce 512x512 (i.e. find why `width_div_8`/`height_div_8` come out 42x42
+instead of 64x64 for this resolve) and re-testing the vista.
+
+**This is the first divergence found on the READ side, and the first that is
+internally inconsistent within our own build rather than merely different from
+theirs.** Next: instrument `GetResolveInfo`'s rectangle inputs for the
+`0x04D20000` resolve specifically (the source registers and the scissor clamp)
+and find where 512 becomes 336.
+
+⚠️ Probe note: the TEXBIND dedup key collides (many repeated lines). Harmless
+for this result but tighten the key before reusing it.

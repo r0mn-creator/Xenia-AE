@@ -12,6 +12,7 @@
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/ae_fix_toggle.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/testrig_debug_server.h"  // TESTRIG(gpu)
 #include "xenia/gpu/gpu_flags.h"
@@ -335,6 +336,38 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     TextureKey old_key = binding.key;
     uint8_t old_swizzled_signs = binding.swizzled_signs;
     BindingInfoFromFetchConstant(fetch, binding.key, &binding.swizzled_signs);
+
+    // TESTRIG(gpu): READ-SIDE probe for the upside-down vista.
+    //
+    // Every geometry/vertex-path hypothesis is now eliminated by direct
+    // measurement against XDtester - the vertices are correct and DO receive
+    // the Y flip. So the inversion must happen when the resolved surface is
+    // CONSUMED, and this is the point where a shader's texture fetch constant
+    // becomes a concrete surface binding. Logs what each slot actually points
+    // at so the two builds can be compared directly.
+    // Toggle: debug.canary.texbind (diag, default OFF).
+    if (XE_AE_DIAG_ENABLED("debug.canary.texbind")) {
+      static std::atomic<uint64_t> texbind_keys[64];
+      uint64_t k = (uint64_t(binding.key.base_page) << 20) ^
+                   (uint64_t(binding.key.width_minus_1) << 8) ^
+                   uint64_t(binding.key.height_minus_1);
+      if (!k) k = 1;
+      bool seen = false;
+      for (auto& slot : texbind_keys) {
+        uint64_t v = slot.load(std::memory_order_relaxed);
+        if (v == k) { seen = true; break; }
+        if (!v && slot.compare_exchange_strong(v, k)) break;
+      }
+      if (!seen) {
+        XELOGI("TEXBIND slot={} base=0x{:08X} {}x{} dim={} tiled={} fmt={} "
+               "signs={:02X}",
+               index, binding.key.base_page << 12,
+               binding.key.width_minus_1 + 1, binding.key.height_minus_1 + 1,
+               uint32_t(binding.key.dimension), binding.key.tiled ? 1 : 0,
+               uint32_t(binding.key.format), binding.swizzled_signs);
+      }
+    }
+
     texture_bindings_in_sync_ |= index_bit;
     if (!binding.key.is_valid) {
       // TESTRIG(halo3-geo-corruption): which fetch slot the
