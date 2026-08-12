@@ -401,3 +401,57 @@ signed in** (or with XenDroid's profile), and check whether the scissor becomes
 `512x512`. If it does, the vista bug is profile/save state, not code.
 
 Also worth trying: `license_mask = 0` to match theirs.
+
+### Profile — TESTED, NOT the cause
+
+Ran Halo 3 with `logged_profile_slot_0_xuid = ''` (no profile signed in).
+**Scissor still `368x368`.** Halo 3's profile-stored graphics settings are not
+driving this. Config restored.
+
+### Scissor call site — IDENTICAL
+
+`GetScissorTmpl` is templated on `clamp_to_surface_pitch`, so an identical
+function could still be called differently. Checked: **both call
+`GetScissor(regs, scissor, false)`** - same template path. Eliminated.
+
+---
+
+## 11. WHERE THIS STANDS — a guest-execution divergence
+
+Everything on the emulator side between the guest's register writes and the
+final resolve is **proven identical**:
+
+- `GetScissorTmpl` and its call site
+- `GetResolveInfo` maths, the surface-pitch clamp, rect alignment
+- The NDC/viewport path (identical per-draw values)
+- The translated shader position math
+- What we report to the guest for video mode (`1280x720`, mode 8)
+
+And these guest-visible inputs are eliminated as the cause: **profile**,
+**patches**, **`internal_display_resolution`**, **video mode**.
+
+**Conclusion: the guest itself writes different `PA_SC_WINDOW_SCISSOR` values
+under our emulator.** This is no longer a rendering bug - it is a
+**guest-execution divergence**: Halo 3's own code takes a different path here
+than it does under XenDroid.
+
+That is a deeper and more expensive class of bug than anything chased so far,
+and it will not be found by more GPU-side diffing.
+
+### Candidate directions (unordered, none tested)
+
+1. **Memory reported to the guest** - heap/physical page counts. A 2007 engine
+   sizing shadow buffers from available memory is entirely plausible, and this
+   has NOT been checked.
+2. **CPU/JIT behavioural difference** - XenDroid has four spin/poll JIT passes,
+   a guest scheduler, `inline_gprlr_saverest`, `context_promote_vec128` and
+   native LSE atomics that we lack. Any of these changes guest timing or
+   execution order.
+3. **Kernel/XAM differences** - `license_mask` (ours `1`, theirs `0`) and
+   `mount_cache` (ours `true`, theirs `false`) still differ and are untested.
+
+### Cheapest next test
+
+Set `license_mask = 0` and `mount_cache = false` to match XenDroid, and re-check
+the scissor. Two config lines, one run - and it closes out the last untested
+config differences before committing to the much larger memory/JIT hunt.
