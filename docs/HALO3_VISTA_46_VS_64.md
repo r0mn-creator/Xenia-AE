@@ -512,3 +512,37 @@ shadow map are different failure modes.
 texture *sampling* (coordinates, orientation of the RT-as-texture handoff) was
 identified as the untouched half of the pipeline and has still never been
 instrumented - only the texture *binding* was.
+
+## 13. ⭐ DEFINITIVE: the GUEST writes the scissor. Registers logged in XDtester.
+
+Instrumented `GetScissorTmpl` in XDtester to log the raw registers, filtered to
+the shadow-cascade range:
+
+```
+win_tl=(0,0)  win_br=(512,512)  scr_tl=(0,0)  scr_br=(8192,8192)
+winoff=(0,0)  ->  out=(0,0)+(512x512)
+```
+
+**`PA_SC_WINDOW_SCISSOR_BR = (512,512)` - written by the GUEST.**
+
+Ours produces ~336-384 from the same code path, so the guest is writing
+different values under our emulator. Our scissor computation is correct; it
+faithfully reflects what Halo 3 asked for.
+
+**This closes the question "what gives XenDroid its 512": the game does.**
+
+### Consequence
+
+Making Canary AE produce 512 means making Halo 3 *choose* 512 - i.e. fixing the
+guest-execution divergence - not changing any GPU code. The value being
+non-deterministic here (336/368/384, decaying within a run) and constant there
+points at an adaptive quality path reacting to our lower frame rate.
+
+⚠️ And per section 12, a larger shadow cascade would make shadows sharper, not
+un-invert the vista. Forcing the scissor would be a hack that changes shadow
+quality without addressing the orientation bug.
+
+### To reproduce
+`debug.canary.scissorlog` in XDtester (filtered to extent 300-600, square).
+Add the same probe to Canary AE's `GetScissorTmpl` to compare register values
+side by side.
