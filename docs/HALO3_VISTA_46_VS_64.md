@@ -298,3 +298,43 @@ our emulator. That is consistent with every prior elimination.
 
 ⚠️ Do not spend more effort on GPU-side resolve/composite code until (1) is
 answered. The evidence now says the inputs are wrong, not the processing.
+
+### `internal_display_resolution` — TESTED, NOT the cause
+
+Our global config held the **string** `'848x480'` in a cvar declared
+`DEFINE_uint32(internal_display_resolution, 8, ...)` - a genuine malformed
+value. XenDroid uses `8`. Looked like a strong candidate for the game choosing
+smaller shadow maps.
+
+**Set ours to `8` and re-tested: scissor still `368x368`, unchanged.**
+
+The per-game Halo 3 config already specified `8`, and the failed global parse
+evidently falls back to the default (also 8), so the malformed string never
+changed the effective value. Worth fixing for hygiene; it is not the vista
+cause.
+
+### Still open: what makes the guest choose 368 instead of 512?
+
+Confirmed by measurement:
+- Our **first** resolve (`seq=0`) is already `368x368` - we never start at 512,
+  so this is NOT gradual adaptation from a good state.
+- Ours then steps DOWN in groups of four: 368 -> 328 -> 248 -> 232.
+- XenDroid is a constant `512x512` across all 40.
+- `surface_pitch=560`, `msaa=0`, identical in both.
+
+So the game picks a smaller shadow-cascade size from the very first frame under
+our emulator, and shrinks further. Remaining candidates for what the guest reads
+to make that decision:
+
+1. **Memory reported to the guest** (available physical pages / heap size).
+2. **A capability or video-mode query** other than
+   `internal_display_resolution` - e.g. widescreen flag, safe area, or the
+   XAM video mode struct.
+3. **Frame timing** feeding an adaptive quality path (we are ~15 FPS vs their
+   ~18-20) - though the `seq=0` value being already low argues against timing
+   alone.
+
+**Next:** log the guest-visible video mode / XAM video query results in both
+builds and diff. That is the class of value a game consults when sizing shadow
+buffers, and it is CPU/kernel-side, consistent with every GPU-side hypothesis
+having failed.
