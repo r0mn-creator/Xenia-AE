@@ -1043,6 +1043,36 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
     return false;
   }
 
+  // TESTRIG(gpu): resolve enumerator, RAW FIELDS ONLY.
+  //
+  // The previous version logged a DERIVED size (width_div_8 * 8) and produced
+  // 336x336 with len=700416 - internally inconsistent (336*336*4 = 451,584),
+  // which got retracted. Log the raw bitfields and the length and let the
+  // comparison be done on numbers the emulator actually holds.
+  // Identical format in XDtester so the two logs diff line-for-line.
+  // Toggle: debug.canary.vista_dump.
+  if (XE_AE_DIAG_ENABLED("debug.canary.vista_dump")) {
+    static std::atomic<uint32_t> enum_n{0};
+    static std::atomic<uint32_t> enum_seen[64];
+    uint32_t base_addr = resolve_info.copy_dest_base;
+    bool is_new = true;
+    for (auto& slot : enum_seen) {
+      uint32_t v = slot.load(std::memory_order_relaxed);
+      if (v == base_addr) { is_new = false; break; }
+      if (!v && slot.compare_exchange_strong(v, base_addr)) break;
+    }
+    if (is_new) {
+      XELOGI("VISTA ENUM base=0x{:08X} len={} w_div8={} h_div8={} fmt={} "
+             "depth={} n={}",
+             base_addr, resolve_info.copy_dest_extent_length,
+             uint32_t(resolve_info.coordinate_info.width_div_8),
+             uint32_t(resolve_info.height_div_8),
+             uint32_t(resolve_info.copy_dest_info.copy_dest_format),
+             resolve_info.IsCopyingDepth() ? 1 : 0,
+             enum_n.fetch_add(1) + 1);
+    }
+  }
+
   // Nothing to copy/clear.
   if (!resolve_info.coordinate_info.width_div_8 || !resolve_info.height_div_8) {
     return true;

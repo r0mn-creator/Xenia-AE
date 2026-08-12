@@ -1255,3 +1255,55 @@ stashed rather than in-tree.
 own other outputs must be cross-checked before its output becomes a finding.**
 The 4-bytes-per-pixel sanity check took seconds and invalidated a conclusion I
 had already reported as the strongest of the session.
+
+## ⭐⭐⭐ CONFIRMED (raw fields, both builds): the 0x04D20000 depth resolve is UNDER-SIZED
+
+Re-added the enumerator logging **raw `width_div_8` / `height_div_8` / `len`** -
+no derived sizes - in BOTH builds, identical format. Halo 3 menu:
+
+**Every resolve matches exactly except one.**
+
+| | `w_div8` | `h_div8` | pixels | `len` | order |
+|---|---|---|---|---|---|
+| Canary AE | **46** | **46** | 368x368 | 770,048 | n=**25** (last) |
+| XenDroid | **64** | **64** | 512x512 | 1,048,576 | n=**5** |
+
+XenDroid's is self-consistent: 64*8 = 512, and 512*512*4 = 1,048,576 exactly.
+
+And the READ side (`debug.canary.texbind`, a direct texture-key read, no
+arithmetic) binds that address as **512x512 tiled, fmt 22**.
+
+So: the guest binds a 512x512 depth surface, XenDroid resolves 512x512 into it,
+and **we resolve only 368x368** - under-writing the surface that the composite
+then samples at full size. Xenos tiling derives row addresses from the surface
+dimensions, so the sampled image is assembled from a partly-unwritten,
+mis-addressed surface.
+
+This supersedes the retracted "336x336" claim: that number came from a derived
+size on a stale build. **46 vs 64 are raw bitfield values read from both
+emulators in the same session with the same probe.**
+
+The ordering difference is real too - theirs resolves it 5th, ours 25th (last of
+25).
+
+### Why this is the strongest candidate yet
+
+- It is the **only** difference across the entire resolve list.
+- It is on the **read/consume side**, where the evidence has pointed since every
+  geometry-path hypothesis failed.
+- It is **internally inconsistent within our own build** (write 368, read 512),
+  not merely different from theirs.
+- It is a **depth** surface, consistent with a deferred scene composited wrongly.
+
+### Next: find where 46 comes from
+
+`width_div_8`/`height_div_8` are set in `GetResolveInfo` from the resolve
+rectangle. The rect trace showed every rectangle matching its scissor and none
+at 368 - so the 46 is likely applied AFTER the traced point, or this resolve is
+reached by a path the trace did not cover (the trace capped at 60 and filtered
+out 1152x640).
+
+Instrument `GetResolveInfo` specifically for `copy_dest_base == 0x04D20000`:
+log the source registers (`RB_COPY_DEST_PITCH`, the vertices, the scissor, and
+`rb_copy_control`) in BOTH builds and diff. That is a narrow question with a
+definite answer, and the harness for it already exists on both sides.
