@@ -240,3 +240,61 @@ in **both** builds, with the scissor and a frame/draw counter:
 
 ⚠️ Do NOT re-diff `GetScissorTmpl`, `GetResolveInfo`'s maths, or the
 surface-pitch clamp. All three are confirmed identical.
+
+---
+
+## 10. ⭐⭐⭐ 2026-08-12 BREAKTHROUGH: the GUEST is setting a different scissor
+
+Logged **every** resolve to `0x04D20000` in both builds, identical probe:
+
+| | scissor across 40 resolves |
+|---|---|
+| **XenDroid** | `(0,0)+(512x512)` - **CONSTANT, all 40** |
+| **Canary AE** | `368x368` (x4) -> `328x328` (x4) -> `248x248` (x4) -> `232x232` (x4) ... **shrinking** |
+
+`surface_pitch = 560` in **both**. `msaa = 0` in both. The scissor code is
+byte-identical. The resolve maths is byte-identical.
+
+**So the scissor REGISTERS differ - the guest is writing different values.**
+
+### What this means
+
+This is **not a GPU-code bug.** Our rect is exactly the scissor the guest asked
+for; we compute it correctly. The game is *choosing* a smaller shadow-map
+resolution in our emulator, and it shrinks over time (368 -> 328 -> 248 -> 232)
+in groups of four - the signature of a **dynamic/adaptive shadow LOD** stepping
+down.
+
+XenDroid holds a constant 512, i.e. the game keeps its shadow resolution pinned
+at maximum there.
+
+### New leading hypothesis
+
+Halo 3 has an **adaptive quality mechanism** that lowers shadow resolution in
+response to some measured value - most likely **frame timing** (we run at ~15
+FPS vs their ~18-20), or a timer/counter we emulate differently. Under our
+emulator it keeps stepping the cascade resolution down.
+
+If the vista is composited from these under-sized depth surfaces, that would
+explain a wrong-looking image while every piece of GPU code is provably correct.
+
+### Why this reframes everything
+
+Nineteen GPU-side hypotheses failed because **the GPU side is not wrong**. The
+divergence enters on the **guest/CPU side** - the game behaves differently under
+our emulator. That is consistent with every prior elimination.
+
+### NEXT TESTS
+
+1. **Confirm the adaptive-LOD theory.** Log `PA_SC_WINDOW_SCISSOR_TL/BR` writes
+   with a frame counter in both builds - does ours start at 512 and step down,
+   or start low? If it starts at 512 and decays, it is adaptive quality reacting
+   to our performance.
+2. **If it decays:** find the guest input driving it. Prime suspects are frame
+   timing / `LOAD_CLOCK` / the vblank rate (this project has a history of clock
+   bugs - see the vblank flood fix) rather than anything in the GPU backend.
+3. **Cheap sanity check:** does the vista look correct in the very FIRST frames
+   before the scissor steps down? If yes, that is near-proof.
+
+⚠️ Do not spend more effort on GPU-side resolve/composite code until (1) is
+answered. The evidence now says the inputs are wrong, not the processing.

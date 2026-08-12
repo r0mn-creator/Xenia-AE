@@ -1240,11 +1240,12 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
     uint32_t probe_dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE];
     if (probe_dest_base == 0x04D20000u) {
       static std::atomic<uint32_t> n{0};
-      if (n.fetch_add(1) < 6) {
-        XELOGI("RESOLVEIN base=0x{:08X} rect=({},{})-({},{}) w={} h={} "
+      uint32_t seq = n.fetch_add(1);
+      if (seq < 40) {
+        XELOGI("RESOLVEIN seq={} base=0x{:08X} rect=({},{})-({},{}) w={} h={} "
                "w_div8={} h_div8={} surface_pitch={} pitch_aligned={} "
                "msaa={} scissor=({},{})+({}x{})",
-               probe_dest_base, x0, y0, x1, y1, x1 - x0, y1 - y0,
+               seq, probe_dest_base, x0, y0, x1, y1, x1 - x0, y1 - y0,
                uint32_t(info_out.coordinate_info.width_div_8),
                uint32_t(info_out.height_div_8),
                uint32_t(rb_surface_info.surface_pitch),
