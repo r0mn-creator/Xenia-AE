@@ -268,6 +268,15 @@ VulkanShader* VulkanPipelineCache::LoadShader(xenos::ShaderType shader_type,
   return shader;
 }
 
+// MAP(gpu/shader): Builds the vertex-shader MODIFICATION - the key that selects
+// which translated SPIR-V variant is used for a draw.
+// FED BY: SQ_PROGRAM_CNTL (register count), the interpolator mask, the host
+//         vertex shader type, PA_CL_CLIP_CNTL (user clip planes).
+// FEEDS: shader translation + the pipeline cache key. Two draws with the same
+//         guest shader but different modifications get DIFFERENT host shaders.
+// NOTE: the modification value appears in dumped shader filenames
+//       (shader_<ucodehash>_<modification>.spv.bin.vert), which makes it
+//       comparable across emulators - see docs/HALO3_VISTA_46_VS_64.md.
 SpirvShaderTranslator::Modification
 VulkanPipelineCache::GetCurrentVertexShaderModification(
     const Shader& shader, Shader::HostVertexShaderType host_vertex_shader_type,

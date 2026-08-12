@@ -310,6 +310,13 @@ uint32_t TextureCache::GuestToHostSwizzle(uint32_t guest_swizzle,
   return host_swizzle;
 }
 
+// MAP(gpu/texture): READ SIDE. Turns each guest texture FETCH CONSTANT into a
+// concrete host texture binding (TextureKey: base_page, width/height, tiled,
+// format, swizzled signs).
+// FED BY: the 32 texture fetch constants in the register file.
+// FEEDS: descriptor writes for the draw; this is where a shader's sampled
+//         surface is finally decided.
+// DEBUG: debug.canary.texbind logs what each slot actually binds.
 void TextureCache::RequestTextures(uint32_t used_texture_mask) {
   const auto& regs = register_file();
 

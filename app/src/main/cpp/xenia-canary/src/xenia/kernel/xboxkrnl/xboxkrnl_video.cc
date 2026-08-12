@@ -204,6 +204,13 @@ void VdGetCurrentDisplayInformation_entry(
 }
 DECLARE_XBOXKRNL_EXPORT1(VdGetCurrentDisplayInformation, kVideo, kStub);
 
+// MAP(kernel/video): Reports the display mode TO THE GUEST.
+// FED BY: cvars::internal_display_resolution (uint32 index) ->
+//         GraphicsSystem::GetInternalDisplayResolution(), plus use_50Hz_mode.
+// FEEDS: XGetVideoMode and any guest code sizing buffers from the display
+//         resolution. Games consult this when choosing render/shadow buffer
+//         sizes, so a wrong value changes GUEST behaviour, not just output.
+// VERIFIED 2026-08-12: reports 1280x720 (mode 8), identical to XenDroid.
 void VdQueryVideoMode(X_VIDEO_MODE* video_mode,
                       [[maybe_unused]] bool is_internal_resolution) {
   // TODO(benvanik): get info from actual display.

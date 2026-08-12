@@ -167,6 +167,14 @@ static float ViewportRecip2_0(float f) {
 
 // chrispy: todo, the int/float divides and the nan-checked mins show up
 // relatively high on uprof when i uc to 1.7ghz
+// MAP(gpu/viewport): Guest viewport regs -> host viewport + NDC scale/offset.
+// FED BY: PA_CL_VTE_CNTL (vport_*_scale_ena), PA_CL_VPORT_[XYZ]SCALE/OFFSET,
+//         PA_CL_CLIP_CNTL, the surface size and the draw resolution scale.
+// FEEDS: SystemConstants.ndc_scale/ndc_offset, consumed by every vertex shader
+//         as  pos.xyz * ndc_scale + ndc_offset * w.
+// KEY: ndc_scale[1] is the ONLY term that flips Y. It is NEGATIVE when the
+//      guest enables the viewport Y scale (normal 3D) and positive on the
+//      fallback path (pre-transformed screen-space 2D, extent 8192).
 void GetHostViewportInfo(GetViewportInfoArgs* XE_RESTRICT args,
                          ViewportInfo& viewport_info_out) {
   assert_not_zero(args->draw_resolution_scale_x);
@@ -649,6 +657,10 @@ void GetHostViewportInfo(GetViewportInfoArgs* XE_RESTRICT args,
   }
 }
 template <bool clamp_to_surface_pitch>
+// MAP(gpu/scissor): Guest scissor rectangle -> host Scissor.
+// FED BY: PA_SC_WINDOW_SCISSOR_TL/BR, PA_SC_SCREEN_SCISSOR_TL/BR and the
+//         window offset. Optionally clamped to the surface pitch.
+// FEEDS: GetResolveInfo (bounds the resolve rect) and the draw scissor.
 static inline void GetScissorTmpl(const RegisterFile& XE_RESTRICT regs,
                                   Scissor& XE_RESTRICT scissor_out) {
 #if XE_ARCH_AMD64 == 1
@@ -1047,6 +1059,16 @@ constexpr ResolveCopyShaderInfo
         {"Resolve Copy Full 128bpp", true, 2, 4, 4, 3},
 };
 XE_MSVC_OPTIMIZE_SMALL()
+// MAP(gpu/resolve): Builds ResolveInfo for an EDRAM->memory resolve.
+// FEEDS: VulkanRenderTargetCache::Resolve -> the resolve compute shaders.
+// FED BY: RB_COPY_DEST_BASE/PITCH, RB_SURFACE_INFO (surface_pitch, msaa),
+//         RB_COPY_CONTROL, the resolve VERTICES, and the SCISSOR (GetScissor).
+// KEY OUTPUTS: coordinate_info.width_div_8 / height_div_8 = (rect size) >> 3,
+//         copy_dest_base/extent. The rect is the guest scissor, clamped to
+//         surface_pitch and aligned to 8px.
+// GOTCHA: the SCISSOR is normally the limiter, not surface_pitch. Halo 3's
+//         shadow cascades resolve here at varying sizes - see
+//         docs/HALO3_VISTA_46_VS_64.md.
 bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
                     TraceWriter& trace_writer, uint32_t draw_resolution_scale_x,
                     uint32_t draw_resolution_scale_y,
