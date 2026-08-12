@@ -338,3 +338,27 @@ to make that decision:
 builds and diff. That is the class of value a game consults when sizing shadow
 buffers, and it is CPU/kernel-side, consistent with every GPU-side hypothesis
 having failed.
+
+### Video mode query — TESTED, IDENTICAL
+
+Mirrored XenDroid's `VdQueryVideoMode` log into Canary AE (they already had it -
+worth knowing their tree carries useful instrumentation we can just copy):
+
+```
+Canary AE: VdQueryVideoMode #0: reporting 1280x720 (cvar mode 8)
+XenDroid:  VdQueryVideoMode #0: reporting 1280x720 (cvar mode 8)
+```
+
+**Identical.** The guest is told the same display resolution by both emulators,
+so the video mode is not what drives the different shadow-cascade size.
+
+Remaining candidates for the guest-visible input:
+1. **Memory reported to the guest** (available physical pages / heap sizing) -
+   now the leading suspect.
+2. Frame timing feeding an adaptive path (weakened: our `seq=0` is already low).
+3. Some other capability/XAM query not yet enumerated.
+
+**Method note:** XenDroid's tree already contains diagnostic logging we lack
+(this `VdQueryVideoMode` line among them). Before writing a new probe, grep
+their tree for an existing one - it is often already there and matching its
+format keeps the two logs diffable.

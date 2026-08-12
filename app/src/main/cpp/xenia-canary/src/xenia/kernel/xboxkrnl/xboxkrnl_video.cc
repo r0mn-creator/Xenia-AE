@@ -9,6 +9,8 @@
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_video.h"
 
+#include <atomic>
+
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/graphics_system.h"
@@ -98,6 +100,8 @@ static std::pair<uint32_t, uint32_t> CalculateScaledAspectRatio(uint32_t fb_x,
 
   return {display_x, display_y};
 }
+
+DECLARE_uint32(internal_display_resolution);
 
 namespace xe {
 namespace kernel {
@@ -209,6 +213,22 @@ void VdQueryVideoMode(X_VIDEO_MODE* video_mode,
 
   video_mode->display_width = display_res.first;
   video_mode->display_height = display_res.second;
+
+  // TESTRIG(kernel): what resolution do we report to the GUEST?
+  //
+  // Halo 3 picks a 368x368 shadow cascade under our emulator where XenDroid
+  // gets 512x512, and the GPU-side code is proven identical - so the guest is
+  // deciding differently from something we report. XenDroid logs the same line
+  // (it reports 1280x720). See docs/HALO3_VISTA_46_VS_64.md.
+  {
+    static std::atomic<uint32_t> queries{0};
+    const uint32_t n = queries.fetch_add(1, std::memory_order_relaxed);
+    if (n < 4) {
+      XELOGI("VdQueryVideoMode #{}: reporting {}x{} (cvar mode {})", n,
+             display_res.first, display_res.second,
+             cvars::internal_display_resolution);
+    }
+  }
   video_mode->is_interlaced = cvars::interlaced;
   video_mode->is_widescreen = cvars::widescreen;
   video_mode->is_hi_def = video_mode->display_width >= 0x500;
