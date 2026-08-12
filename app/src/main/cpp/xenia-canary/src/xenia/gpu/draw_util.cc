@@ -1134,6 +1134,24 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   x1 = std::clamp(x1, int32_t(scissor.offset[0]), scissor_right);
   y1 = std::clamp(y1, int32_t(scissor.offset[1]), scissor_bottom);
 
+  // XenDroid bails out here; we only had an assert, which is a NO-OP in release
+  // builds - so an empty or INVERTED resolve rectangle was processed anyway. An
+  // inverted-Y rectangle resolving "backwards" is a direct mechanism for a
+  // vertically flipped surface, which is exactly the Halo 3 vista symptom.
+  // Toggle: debug.canary.resolve_rect_guard (experiment, default OFF);
+  // debug.canary.resolve_rect_log just reports whether it ever triggers.
+  // See docs/HALO3_VISTA_UPSIDE_DOWN.md.
+  if (x0 >= x1 || y0 >= y1) {
+    if (XE_AE_DIAG_ENABLED("debug.canary.resolve_rect_log")) {
+      XELOGI("RESOLVERECT degenerate/inverted: x0={} x1={} y0={} y1={}", x0, x1,
+             y0, y1);
+    }
+    if (XE_AE_EXPERIMENT_ENABLED("debug.canary.resolve_rect_guard")) {
+      info_out.coordinate_info.width_div_8 = 0;
+      info_out.height_div_8 = 0;
+      return true;
+    }
+  }
   assert_true(x0 <= x1 && y0 <= y1);
 
   // Direct3D 9's D3DDevice_Resolve internally rounds the right/bottom of the
