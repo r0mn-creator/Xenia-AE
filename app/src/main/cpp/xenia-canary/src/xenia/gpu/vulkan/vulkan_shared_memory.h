@@ -74,6 +74,20 @@ class VulkanSharedMemory : public SharedMemory {
 
   VkBuffer buffer_ = VK_NULL_HANDLE;
   uint32_t buffer_memory_type_;
+
+  // Ported from XenDroid: persistent host mapping of the shared memory buffer
+  // when it lands on a host-visible memory type, so guest RAM and the GPU share
+  // one view of memexport/resolve output instead of relying on staging copies.
+  // Gated by debug.canary.shared_memory_host_visible.
+  uint8_t* host_mapped_data_ = nullptr;
+  bool host_mapped_coherent_ = false;
+
+ public:
+  bool IsHostMapped() const { return host_mapped_data_ != nullptr; }
+  uint8_t* host_mapped_data() const { return host_mapped_data_; }
+  bool host_mapped_coherent() const { return host_mapped_coherent_; }
+
+ private:
   // Single for non-sparse, every allocation so far for sparse.
   std::vector<VkDeviceMemory> buffer_memory_;
 

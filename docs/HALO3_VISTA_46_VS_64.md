@@ -1433,3 +1433,52 @@ every transform in the pipeline provably correct.
 **Next:** stop treating this as an orientation bug. Determine which region of
 which surface the composite samples, in both builds - the same measure-don't-
 diff approach that produced s15 and s22.
+
+## 24. Memexport transplant #1: eA validation fix - does NOT fix the ball
+
+Branch `xd-memexport-transplant`, commit 7d48dbf82.
+
+**Ported:** XenDroid's memexport eA validation - Z lane uses all 12 bits of
+const_0x4b0 (shift 20, compare 0x4B0) instead of the top 9 (shift 23, 0x96), so
+the constants the shader accepts match what `draw_util::AddMemExportRanges`
+derives ranges from. Also made the pre-existing compute-path validation bypass
+opt-in (`debug.canary.memexport_bypass_validation`, default OFF) so the
+corrected validation is actually exercised.
+
+**Result: character models are STILL BALLS** (confirmed in real gameplay on
+Sierra 117). The vista is still inverted.
+
+The change is still correct - AE was masking this exact rejection with a hack -
+but it is not the ball's cause. **Keep it, do not re-test it.**
+
+### 24.1 Next transplant target, and it is already identified
+
+`project_halo3_ball_xendroid_fix` in memory records how XenDroid actually fixed
+the ball, and it is NOT the eA validation:
+
+* **`ReadbackResolveMode::kUma` + host-visible shared memory** - guest RAM is
+  aliased directly as the GPU shared-memory buffer, so guest RAM and the GPU
+  never diverge. XenDroid's cvar: `shared_memory_zero_copy = true`
+  ("Alias guest RAM directly as the GPU shared-memory buffer instead of
+  uploading dirty pages each frame. Removes upload copies and **keeps memexport
+  and resolve output coherent with the CPU for free**. Default on for ARM64
+  (unified-memory) builds").
+* ⚠️ **NOT** `VK_EXT_external_memory_host` - unsupported on every Adreno.
+
+**Canary AE has neither `shared_memory_zero_copy` nor
+`vulkan_shared_memory_host_visible` - the cvars do not exist in its source at
+all.** AE uploads dirty pages each frame instead, so GPU-written memexport data
+and the CPU's view of guest RAM can diverge. That is the mechanism that
+collapses skinned geometry.
+
+**Do this next:** port XenDroid's zero-copy / host-visible shared memory path
+(`vulkan_shared_memory.cc` + `shared_memory.cc`), behind a default-OFF toggle,
+and re-test the ball in gameplay.
+
+### 24.2 Test procedure that works (do not rediscover this)
+
+Synthetic taps and instantaneous keyevents do NOT drive the game.
+`adb shell input keyevent --longpress 96` (A, HELD) with `sleep 3` between
+presses, x5, gets from the main menu into gameplay. Halo 3's level intro is a
+PRE-RENDERED VIDEO - frames from it contain no engine-rendered models and cannot
+be used to judge the ball. See memory `feedback-gamepad-input-held-presses`.

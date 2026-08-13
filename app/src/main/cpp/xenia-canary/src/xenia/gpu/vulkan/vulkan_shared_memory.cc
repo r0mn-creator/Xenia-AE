@@ -126,9 +126,63 @@ bool VulkanSharedMemory::Initialize() {
     VkMemoryRequirements buffer_memory_requirements;
     dfn.vkGetBufferMemoryRequirements(device, buffer_,
                                       &buffer_memory_requirements);
-    if (!xe::bit_scan_forward(buffer_memory_requirements.memoryTypeBits &
-                                  vulkan_device->memory_types().device_local,
-                              &buffer_memory_type_)) {
+    // Ported from XenDroid: prefer a HOST-VISIBLE memory type for the shared
+    // memory buffer on unified-memory GPUs (Adreno, integrated), and map it
+    // persistently.
+    //
+    // Why this matters beyond speed: with a device-local-only buffer, data the
+    // GPU writes (memexport output, resolve output) and the CPU's view of guest
+    // RAM can diverge, because the CPU only ever sees what a staging copy
+    // brings back. Host-visible shared memory is read directly, so guest RAM
+    // and the GPU never diverge - which is the mechanism XenDroid credits for
+    // fixing Halo 3's collapsed skinned geometry (the "ball"). AE had neither
+    // this nor XenDroid's shared_memory_zero_copy; it uploads dirty pages each
+    // frame instead.
+    //
+    // Prefer cached-coherent, accept cached non-coherent, never map uncached
+    // (CPU reads would be slower than staging). The candidate types must be
+    // tested against THIS BUFFER's memoryTypeBits - a whole-device test fails
+    // on Adreno, whose LAZILY_ALLOCATED type is not host-visible.
+    //
+    // Toggle: debug.canary.shared_memory_host_visible (experiment, default OFF
+    // until the ball is re-tested in gameplay - this is shared by every title).
+    const ui::vulkan::VulkanDevice::MemoryTypes& memory_types =
+        vulkan_device->memory_types();
+    const uint32_t buffer_memory_type_bits =
+        buffer_memory_requirements.memoryTypeBits;
+    const bool is_uma =
+        memory_types.device_local &&
+        (memory_types.device_local & memory_types.host_visible) ==
+            memory_types.device_local;
+    bool buffer_host_visible = false;
+    bool buffer_host_coherent = false;
+    if (XE_AE_EXPERIMENT_ENABLED("debug.canary.shared_memory_host_visible")) {
+      const uint32_t cached_coherent =
+          buffer_memory_type_bits & memory_types.device_local &
+          memory_types.host_visible & memory_types.host_cached &
+          memory_types.host_coherent;
+      const uint32_t cached =
+          buffer_memory_type_bits & memory_types.device_local &
+          memory_types.host_visible & memory_types.host_cached;
+      if (xe::bit_scan_forward(cached_coherent, &buffer_memory_type_)) {
+        buffer_host_visible = true;
+        buffer_host_coherent = true;
+      } else if (xe::bit_scan_forward(cached, &buffer_memory_type_)) {
+        buffer_host_visible = true;
+      }
+      XELOGI(
+          "SHMHOSTVIS host-map decision: is_uma={} type_bits={:#x} "
+          "device_local={:#x} host_visible={:#x} host_cached={:#x} "
+          "host_coherent={:#x} -> host_visible={} coherent={}",
+          is_uma, buffer_memory_type_bits, memory_types.device_local,
+          memory_types.host_visible, memory_types.host_cached,
+          memory_types.host_coherent, buffer_host_visible,
+          buffer_host_coherent);
+    }
+    if (!buffer_host_visible &&
+        !xe::bit_scan_forward(
+            buffer_memory_type_bits & memory_types.device_local,
+            &buffer_memory_type_)) {
       XELOGE(
           "Shared memory: Failed to get a device-local Vulkan memory type for "
           "the buffer");
@@ -173,6 +227,20 @@ bool VulkanSharedMemory::Initialize() {
       Shutdown();
       return false;
     }
+    // Persistently map when the buffer landed on a host-visible type, so guest
+    // RAM and the GPU share one view of the data.
+    if (buffer_host_visible) {
+      void* mapped_data;
+      if (dfn.vkMapMemory(device, buffer_memory, 0, VK_WHOLE_SIZE, 0,
+                          &mapped_data) == VK_SUCCESS) {
+        host_mapped_data_ = static_cast<uint8_t*>(mapped_data);
+        host_mapped_coherent_ = buffer_host_coherent;
+        XELOGI("SHMHOSTVIS buffer host-mapped, coherent={}",
+               buffer_host_coherent ? 1 : 0);
+      } else {
+        XELOGW("SHMHOSTVIS failed to map the host-visible buffer");
+      }
+    }
   }
 
   // The first usage will likely be uploading.
@@ -196,6 +264,13 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
+
+  // Unmap before freeing - the mapping is owned by buffer_memory_.front().
+  if (host_mapped_data_ != nullptr && !buffer_memory_.empty()) {
+    dfn.vkUnmapMemory(device, buffer_memory_.front());
+    host_mapped_data_ = nullptr;
+    host_mapped_coherent_ = false;
+  }
 
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device, buffer_);
   for (VkDeviceMemory memory : buffer_memory_) {
