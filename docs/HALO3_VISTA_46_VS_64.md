@@ -1867,3 +1867,57 @@ CPU-side performance and correctness, in this order:
    `a64_park_spin_backoff` exists in XenDroid's cvar list.
 2. Re-measure PM4TOTAL after each - if the stream thickens as CPU time frees up,
    the dynamic-detail theory is confirmed and the vista may follow.
+
+## 34. JIT spin/poll pass transplant - REGRESSED, defaulted OFF
+
+Following s33 (AE is ~5x slower per unit of guest work), ported the JIT passes
+XenDroid has and AE lacks. Diff of `cpu/compiler/passes/`:
+
+| pass | present |
+|---|---|
+| `memory_poll_park_pass` | XD only |
+| `delay_countdown_collapse_pass` | XD only |
+| `preempt_check_injection_pass` | XD only |
+
+(AE already had `SpinLoopBackoffPass`, ported earlier, gated off by
+`collapse_ctr_spin_loops`, and `a64_park_spin_backoff` which is ON.)
+
+**`PreemptCheckInjectionPass` was NOT ported.** It needs a whole preemption
+subsystem AE lacks: HIR `OPCODE_CHECK_PREEMPT`, `HIRBuilder::CheckPreempt`, an
+a64 `EmitPreemptCheck` depending on `PPCContext::preempt_requested`,
+`PPCContext::last_safepoint_pc`, and a `preempt_yield_handler` scheduler hook.
+The other two passes only *tolerate* that opcode during analysis, so those
+references were removed.
+
+**Result with the two passes ON (XenDroid's default): SEVERE REGRESSION.**
+
+| | PM4 packets | FPS | state |
+|---|---|---|---|
+| passes ON | **~8,192** | **1.6** | stuck on the legal screen |
+| passes OFF | ~1.6-4.4M | ~10-15 | normal, 84 draws/frame |
+
+The guest essentially stopped executing. Both are now **default OFF** in AE with
+the reason recorded in-file.
+
+### 34.1 Why this probably happened
+
+XenDroid's passes park/collapse guest loops on the assumption that a preemption
+safepoint exists to get the thread going again. Without
+`PreemptCheckInjectionPass` injecting those safepoints, a parked loop has
+nothing to wake it - so the guest wedges. **Porting these two without the
+preemption subsystem is not a valid transplant.**
+
+### 34.2 If this is retried
+
+Port the whole preemption subsystem first, in this order:
+1. `OPCODE_CHECK_PREEMPT` (opcodes.h + opcodes.inl) and
+   `HIRBuilder::CheckPreempt`.
+2. `PPCContext::preempt_requested` / `last_safepoint_pc` fields and the
+   `preempt_yield_handler` hook.
+3. `A64Emitter::EmitPreemptCheck` (36 lines) and the a64 `CHECK_PREEMPT`
+   sequence.
+4. `PreemptCheckInjectionPass`.
+5. Only then re-enable the two ported passes.
+
+Do NOT enable `park_memory_poll_loops` or `collapse_memory_delay_spins` before
+step 4 is done.
