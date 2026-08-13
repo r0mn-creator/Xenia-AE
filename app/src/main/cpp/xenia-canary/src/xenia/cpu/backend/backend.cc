@@ -27,6 +27,10 @@ void* Backend::AllocThreadData() { return nullptr; }
 
 void Backend::FreeThreadData(void* thread_data) {}
 
+void (*preempt_yield_handler)(void* raw_context) = nullptr;
+
+void (*spin_backoff_yield_handler)(void* raw_context) = nullptr;
+
 }  // namespace backend
 }  // namespace cpu
 }  // namespace xe

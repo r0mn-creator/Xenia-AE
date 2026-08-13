@@ -28,3 +28,19 @@ DEFINE_bool(log_all_kernel_calls, false,
 
 DEFINE_bool(log_high_frequency_kernel_calls, false,
             "Log kernel calls with the kHighFrequency tag.", "Kernel");
+
+// Ported from XenDroid (Canary AEX overhaul, docs/AEX_OVERHAUL.md step 1).
+// Defaults OFF here: AEX must boot identically to Canary AE until the whole
+// scheduler chain (steps 1-4) is in place. Partial enablement wedges the guest.
+DEFINE_bool(
+    guest_scheduler, false,
+    "Run guest threads as cooperative fibers driven by an in-kernel scheduler "
+    "instead of mapping each to its own host OS thread. Requires a restart to "
+    "take effect.",
+    "Kernel");
+DEFINE_uint32(
+    guest_scheduler_quantum_us, 1000,
+    "Cooperative-scheduler timeslice in microseconds. A guest fiber running "
+    "this long yields at its next JIT safepoint so co-resident fibers on the "
+    "same dispatch thread make progress. Lower is fairer but switches more.",
+    "Kernel");

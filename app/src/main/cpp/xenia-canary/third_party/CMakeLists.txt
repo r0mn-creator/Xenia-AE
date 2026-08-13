@@ -825,3 +825,10 @@ if(WIN32)
 endif()
 target_link_libraries(libavformat PRIVATE libavutil libavcodec)
 ffmpeg_common(libavformat)
+
+# ==============================================================================
+# boost_context (fcontext_t fiber context switching)
+# ==============================================================================
+# Needed by xe::threading::Fiber, which backs the cooperative guest scheduler
+# ported from XenDroid (docs/AEX_OVERHAUL.md step 1).
+add_subdirectory(boost_context)

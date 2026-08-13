@@ -10,6 +10,8 @@ if(_base_exclude AND _base_srcs)
   set_target_properties(xenia-base PROPERTIES SOURCES "${_base_srcs}")
 endif()
 target_link_libraries(xenia-base PUBLIC fmt)
+# boost_context backs xe::threading::Fiber (cooperative guest scheduler).
+target_link_libraries(xenia-base PRIVATE boost_context)
 xe_target_defaults(xenia-base)
 
 if(XENIA_BUILD_TESTS)

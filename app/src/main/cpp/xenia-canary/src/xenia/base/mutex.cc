@@ -114,6 +114,10 @@ void xe_global_mutex::lock() {
   lock_slow();
 }
 
+bool xe_global_mutex::is_held_by_current_thread() const {
+  return owner_.load(std::memory_order_relaxed) == gettid();
+}
+
 void xe_global_mutex::lock_slow() {
   pid_t self = gettid();
 
@@ -251,6 +255,10 @@ bool xe_fast_mutex::try_lock() {
 global_mutex_type& global_critical_region::mutex() {
   static global_mutex_type global_mutex;
   return global_mutex;
+}
+
+bool global_critical_region::is_held_by_current_thread() {
+  return mutex().is_held_by_current_thread();
 }
 
 }  // namespace xe

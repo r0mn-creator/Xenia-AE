@@ -75,3 +75,56 @@ formats**, so the two logs diff line-for-line.
 XenDroid's, and run-to-run variance collapsing.
 **Cheap visual proxy:** the Halo 3 menu vista (s26) - if it is still inverted,
 do not bother with the expensive in-game ball test.
+
+---
+
+## Step 1 progress (2026-08-13)
+
+### Landed — the fiber foundation builds
+
+| piece | where | status |
+|---|---|---|
+| `boost_context` (Boost.Context fcontext asm, incl. arm64 ELF GAS) | `third_party/boost_context` | copied, `add_subdirectory` wired, **builds** |
+| `xe::threading::Fiber` class | `base/threading.h` | declared |
+| Fiber implementation | `base/threading_fiber.cc` | copied, compiles |
+| `xenia-base` links `boost_context` | `base/CMakeLists.txt` | done |
+| `PPCContext::preempt_requested`, `last_safepoint_pc` | `cpu/ppc/ppc_context.h` | added |
+| `backend::preempt_yield_handler`, `spin_backoff_yield_handler` | `cpu/backend/backend.{h,cc}` | added (null until the scheduler registers them) |
+| `xe_global_mutex::is_held_by_current_thread` | `base/mutex.{h,cc}` | added (POSIX; uses the existing `owner_`) |
+| `global_critical_region::is_held_by_current_thread` | `base/mutex.{h,cc}` | added |
+| `guest_scheduler` / `guest_scheduler_quantum_us` cvars | `kernel/kernel_flags.{cc,h}` | added, **default OFF** (XenDroid ships ON) |
+| `guest_scheduler.{cc,h}` | `kernel/` | copied, not yet compiling |
+
+### ⚠️ DOES NOT BUILD YET - remaining step 1 work
+
+`guest_scheduler.cc` still needs these host-side integrations:
+
+1. **`XThread`** (`kernel/xthread.{h,cc}`) - the big one:
+   * `SchedulerLinks` struct (ready/blocked list links, quantum deadline,
+     wait-gating epoch/deadline, `CooperativeWaitKind` + wait handles/objects,
+     IRQL and lock preempt-defer counters) and `scheduler_links()`.
+   * `std::unique_ptr<threading::Fiber> fiber_` + `fiber()`, the fiber path in
+     `Create()`, `ReclaimExited()`, `fiber_exit_event_`.
+   * `static XThread* GetCurrentFiberThread()`.
+   * `set_cooperative_wait_shape()` / clear helpers.
+2. **`XObject`** - `AbandonCooperativeWait`, `cooperative_signal_epoch()`,
+   `Enter/LeaveCooperativeWait`.
+3. **`KernelState`** - a `guest_scheduler()` accessor plus construction and
+   shutdown.
+4. Wait-path call sites: `xboxkrnl_threading.cc`, `xevent`, `xmutant`, `xfile`,
+   `xsocket`, `xiocompletion`, `xobject`.
+
+### How to resume
+
+Build and read the error list - it is a precise worklist:
+```
+JAVA_HOME=/opt/android-studio/jbr ./gradlew :app:assembleDebug 2>&1 \
+  | grep -oE "error: .*" | sed 's/error: //' | sort -u
+```
+It went 8 -> 5 distinct errors as the pieces above landed. Remaining:
+`GetCurrentFiberThread`, `scheduler_links`, `KernelState::guest_scheduler`,
+`XObject::AbandonCooperativeWait`.
+
+**Keep `guest_scheduler` default OFF until steps 1-4 are all in.** AEX must boot
+identically to Canary AE until the whole chain lands - s34 proved partial
+enablement wedges the guest.
