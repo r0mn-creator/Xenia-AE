@@ -95,7 +95,23 @@ do not bother with the expensive in-game ball test.
 | `guest_scheduler` / `guest_scheduler_quantum_us` cvars | `kernel/kernel_flags.{cc,h}` | added, **default OFF** (XenDroid ships ON) |
 | `guest_scheduler.{cc,h}` | `kernel/` | copied, not yet compiling |
 
+### Landed since — host-side plumbing
+
+| piece | where | status |
+|---|---|---|
+| `XThread` scheduler block: `CooperativeWaitKind`, `set/clear_cooperative_wait_shape`, `cooperative_wait_set_epoch/count`, `cooperative_wait_object`, `SchedulerLinks` + accessor | `kernel/xthread.h` | added (in `protected:` so `XHostThread` sees them) |
+| `XThread` members: `fiber_`, `scheduler_links_`, `cooperative_wait_object_`, `fiber_exit_event_`, `self_reference_dropped_` | `kernel/xthread.h` | added |
+| `XThread::GetCurrentFiberThread` / `fiber()` / `ReclaimExited` declarations | `kernel/xthread.h` | declared |
+| `XObject` cooperative API: `cooperative_signal_epoch`, `cooperative_pulse_epoch`, `Enter/LeaveCooperativeWait`, `AbandonCooperativeWait`, epoch member | `kernel/xobject.h` | declared |
+| `threading::Fence::TryWait` | `base/threading.h` | added |
+| `threading::PreciseSleep` | `base/threading.{h,posix.cc}` | added — **portable nanosleep form**; XenDroid's ARM WFE/event-stream path needs `cvars::wfe_precise_sleep` + `AT_HWCAP`/`HWCAP_EVTSTRM`, none of which exist here |
+| `logging::GetFrameNumber` + `global_frame_number_` | `base/logging.{h,cc}` | added — counter is never advanced yet (AE has no per-present hook); only labels the scheduler's no-progress report, so 0 is harmless |
+
+⚠️ **Two deliberate simplifications** to record so they are not mistaken for
+faithful ports: `PreciseSleep` (no WFE path) and `GetFrameNumber` (static 0).
+
 ### ⚠️ DOES NOT BUILD YET - remaining step 1 work
+
 
 `guest_scheduler.cc` still needs these host-side integrations:
 
@@ -121,9 +137,19 @@ Build and read the error list - it is a precise worklist:
 JAVA_HOME=/opt/android-studio/jbr ./gradlew :app:assembleDebug 2>&1 \
   | grep -oE "error: .*" | sed 's/error: //' | sort -u
 ```
-It went 8 -> 5 distinct errors as the pieces above landed. Remaining:
-`GetCurrentFiberThread`, `scheduler_links`, `KernelState::guest_scheduler`,
-`XObject::AbandonCooperativeWait`.
+Distinct errors: 8 -> 5 -> 5 (now all leaf kernel integration). Current list:
+
+1. `KernelState::guest_scheduler` accessor + construction/shutdown.
+2. `XThread::HasPendingUserApc` - does the thread have a pending user APC
+   (gates alertable re-polls).
+3. `XThread::OnQuantumEnd` - hook the scheduler calls at slice end.
+4. `XObject::RecentCooperativeSignals` + `SignalRecord` +
+   `RecordCooperativeSignal` - the signal ring for the no-progress report.
+5. one "call to non-static member function without an object argument".
+
+Then the **implementations** still have to be written in `xthread.cc` /
+`xobject.cc` (`GetCurrentFiberThread`, `ReclaimExited`, `Enter/Leave/Abandon
+CooperativeWait`, the fiber path in `Create()`), plus the wait-path call sites.
 
 **Keep `guest_scheduler` default OFF until steps 1-4 are all in.** AEX must boot
 identically to Canary AE until the whole chain lands - s34 proved partial

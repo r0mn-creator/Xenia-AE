@@ -221,6 +221,23 @@ void MaybeYield() {
 
 void SyncMemory() { __sync_synchronize(); }
 
+// Ported from XenDroid for the cooperative guest scheduler.
+//
+// XenDroid's version can use an ARM WFE/event-stream path gated on
+// cvars::wfe_precise_sleep and AT_HWCAP/HWCAP_EVTSTRM; neither exists here, so
+// this is the portable nanosleep form. Same contract: sleep at least
+// |duration|, with better than millisecond granularity.
+void PreciseSleep(std::chrono::nanoseconds duration) {
+  if (duration.count() <= 0) {
+    return;
+  }
+  struct timespec ts;
+  ts.tv_sec = static_cast<time_t>(duration.count() / 1000000000LL);
+  ts.tv_nsec = static_cast<long>(duration.count() % 1000000000LL);
+  while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {
+  }
+}
+
 void Sleep(std::chrono::microseconds duration) {
   timespec rqtp = DurationToTimeSpec(duration);
   timespec rmtp = {};

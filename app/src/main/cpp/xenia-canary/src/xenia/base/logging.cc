@@ -80,6 +80,12 @@ class Logger;
 
 Logger* logger_ = nullptr;
 
+// Ported from XenDroid: present-frame counter for cooperative-scheduler
+// diagnostics. Advanced once per guest present where that hook exists; the
+// scheduler only uses it to label its no-progress report, so a static 0 is
+// harmless until the present hook is wired.
+std::atomic<uint32_t> global_frame_number_{0};
+
 struct LogLine {
   size_t buffer_length;
   uint32_t thread_id;
@@ -563,6 +569,11 @@ void FatalError(const std::string_view str) {
 #else
   std::exit(EXIT_FAILURE);
 #endif  // XE_PLATFORM_ANDROID
+}
+
+
+uint32_t logging::GetFrameNumber() {
+  return global_frame_number_.load(std::memory_order_relaxed);
 }
 
 }  // namespace xe

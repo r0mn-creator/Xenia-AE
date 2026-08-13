@@ -77,6 +77,8 @@ void InitializeLogging(const std::string_view app_name);
 void ShutdownLogging();
 
 namespace logging {
+// Ported from XenDroid: current frame number, used by scheduler diagnostics.
+uint32_t GetFrameNumber();
 
 constexpr char kPrefixCharError = '!';
 constexpr char kPrefixCharWarning = 'w';

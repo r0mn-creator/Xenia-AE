@@ -383,6 +383,9 @@ class XThread : public XObject, public cpu::Thread {
   static bool IsInThread(XThread* other);
   static bool IsInThread();
   static XThread* GetCurrentThread();
+  // The guest thread whose fiber is currently executing on this host thread,
+  // or nullptr under the host-thread model.
+  static XThread* GetCurrentFiberThread();
   static uint32_t GetCurrentThreadHandle();
   static uint32_t GetCurrentThreadId();
 
@@ -470,6 +473,125 @@ class XThread : public XObject, public cpu::Thread {
 
   xe::threading::Thread* thread() { return thread_.get(); }
 
+  // ===== Cooperative guest scheduler (ported from XenDroid) =====
+  // docs/AEX_OVERHAUL.md step 1. Inert while cvars::guest_scheduler is off.
+
+  // The fiber this guest thread runs on when the cooperative scheduler is
+  // active (null under the host-thread model).
+  xe::threading::Fiber* fiber() const { return fiber_.get(); }
+
+  // Drops the self reference from Create and any surviving handle. The delete
+  // point for a fiber thread, so the caller must ensure it is not executing.
+  void ReclaimExited();
+
+  // Why a fiber is parked, for the scheduler's no-progress report.
+  enum class CooperativeWaitKind : uint8_t {
+    kNone = 0,
+    kSingle,
+    kMultiAny,
+    kMultiAll,
+    kDelay,
+    kFence,
+    kIoOffload,
+  };
+  // Records the wait shape for diagnostics. Extra handles beyond the array are
+  // dropped; the count reported is the real one so truncation stays visible.
+  void set_cooperative_wait_shape(CooperativeWaitKind kind,
+                                  const uint32_t* handles, uint32_t count,
+                                  XObject* const* objects = nullptr) {
+    auto& links = scheduler_links_;
+    links.wait_kind = static_cast<uint8_t>(kind);
+    links.wait_handle_count = static_cast<uint8_t>(count > 255 ? 255 : count);
+    uint32_t n = count < 8 ? count : 8;
+    for (uint32_t i = 0; i < n; ++i) {
+      links.wait_handles[i] = handles ? handles[i] : 0;
+    }
+    // Gating needs every object, so a set that does not fit is not gated at
+    // all rather than gated on a subset, which could park past a signal.
+    links.wait_gate_count = 0;
+    if (objects && count <= 8) {
+      for (uint32_t i = 0; i < count; ++i) {
+        links.wait_gate_objects[i] = objects[i];
+      }
+      links.wait_gate_count = static_cast<uint8_t>(count);
+    }
+  }
+  void clear_cooperative_wait_shape() {
+    scheduler_links_.wait_kind =
+        static_cast<uint8_t>(CooperativeWaitKind::kNone);
+    scheduler_links_.wait_handle_count = 0;
+    scheduler_links_.wait_gate_count = 0;
+  }
+  // Summed signal epoch of a tracked multi-wait set; 0 when untracked. Any
+  // signal or pulse to any member moves the sum, since both bump the epoch.
+  uint32_t cooperative_wait_set_epoch() const {
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < scheduler_links_.wait_gate_count; ++i) {
+      sum += scheduler_links_.wait_gate_objects[i]->cooperative_signal_epoch();
+    }
+    return sum;
+  }
+  uint8_t cooperative_wait_set_count() const {
+    return scheduler_links_.wait_gate_count;
+  }
+
+  XObject* cooperative_wait_object() const {
+    return cooperative_wait_object_.load(std::memory_order_acquire);
+  }
+  void set_cooperative_wait_object(XObject* object) {
+    cooperative_wait_object_.store(object, std::memory_order_release);
+  }
+
+  // Intrusive scheduler links, owned exclusively by GuestScheduler and only
+  // touched under its lock. Embedding them here keeps the queue operations
+  // allocation-free. A thread is in at most one of the ready or blocked lists.
+  struct SchedulerLinks {
+    XThread* ready_next = nullptr;  // link for the ready OR blocked list
+    int cpu = -1;                   // CPU owning the list we are on
+    int queued_prio = 0;     // priority level of the ready list we are on
+    bool queued = false;     // in the ready list
+    bool blocked = false;    // parked in the blocked (waiting) list
+    bool suspended = false;  // parked with a nonzero suspend count
+    bool running = false;    // executing on a dispatch thread
+    bool preempted = false;  // slice cut short by a higher-priority thread
+    bool has_run = false;    // diagnostic: dispatched at least once
+    bool forced_preempt_logged = false;  // one forced-preempt warning per thread
+    // Set by an external Terminate, exits the fiber at its next
+    // ExitIfTerminated check.
+    std::atomic<bool> terminate_pending{false};
+    // Absolute raw-tick end of the granted timeslice, 0 = grant fresh at
+    // dispatch. Preemption preserves it so the quantum end still arrives.
+    uint64_t quantum_deadline_tick = 0;
+    // Re-poll gating, written by BlockCurrentThread, read by RereadyBlocked.
+    bool wait_gated = false;        // skip re-polls until something below fires
+    bool wait_alertable = false;    // also re-poll on a pending user APC
+    uint32_t wait_epoch = 0;        // object epoch sampled before the last poll
+    uint64_t wait_deadline_ms = 0;  // absolute host uptime, 0 = none
+    // What this fiber parked in and the guest handles it named. Handles, not
+    // XObject pointers: safe to print if the object is released mid-dump, and
+    // they key the signal ring. Without it a multi-object wait dumps obj=0x0.
+    uint8_t wait_kind = 0;  // CooperativeWaitKind
+    uint8_t wait_handle_count = 0;
+    uint32_t wait_handles[8] = {};
+    // Objects of a multi-wait, for re-poll gating. Only read while the fiber is
+    // parked, where the waiting frame keeps them alive - the same lifetime the
+    // single-object cooperative_wait_object() already relies on. Zero when the
+    // set was too large to track, which just means no gating.
+    XObject* wait_gate_objects[8] = {};
+    uint8_t wait_gate_count = 0;
+
+    // Consecutive safepoints that declined to preempt because the guest was at
+    // IRQL >= 2. Bounds the defer so a guest spinning at DISPATCH_LEVEL on a
+    // co-resident holder cannot livelock its dispatch CPU forever.
+    uint32_t preempt_defers_irql = 0;
+    // Same, for holding the global critical region. Diagnostic only - yielding
+    // there would let a co-resident fiber re-enter the recursive lock.
+    uint32_t preempt_defers_lock = 0;
+  };
+  SchedulerLinks& scheduler_links() { return scheduler_links_; }
+
+
+
   virtual bool Save(ByteStream* stream) override;
   static object_ref<XThread> Restore(KernelState* kernel_state,
                                      ByteStream* stream);
@@ -481,6 +603,14 @@ class XThread : public XObject, public cpu::Thread {
   void SetCurrentThread();
 
  protected:
+  // ===== Cooperative scheduler state (ported from XenDroid) =====
+  // docs/AEX_OVERHAUL.md step 1. Inert unless cvars::guest_scheduler is set.
+  std::unique_ptr<xe::threading::Fiber> fiber_;
+  SchedulerLinks scheduler_links_;
+  std::atomic<XObject*> cooperative_wait_object_{nullptr};
+  std::unique_ptr<xe::threading::Event> fiber_exit_event_;
+  std::atomic<bool> self_reference_dropped_{false};
+
   bool AllocateStack(uint32_t size);
   void FreeStack();
   void InitializeGuestObject();

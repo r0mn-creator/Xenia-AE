@@ -43,6 +43,19 @@ void AndroidShutdown();
 // This is more like an Event with self-reset when returning from Wait()
 class Fence {
  public:
+  // Ported from XenDroid: non-blocking signal check for the cooperative
+  // guest scheduler.
+  bool TryWait() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!(signal_state_ & SIGMASK_)) {
+      return false;
+    }
+    // Only the signal. The low bits count threads inside Wait(), and clearing
+    // those would strand one and trip Wait()'s count assert on the next Signal.
+    signal_state_ &= ~SIGMASK_;
+    return true;
+  }
+
   Fence() : signal_state_(0) {}
 
   void Signal() {
@@ -115,6 +128,8 @@ void SyncMemory();
 
 // Sleeps the current thread for at least as long as the given duration.
 void Sleep(std::chrono::microseconds duration);
+// Ported from XenDroid: sleep with sub-millisecond precision.
+void PreciseSleep(std::chrono::nanoseconds duration);
 void NanoSleep(int64_t ns);
 template <typename Rep, typename Period>
 void Sleep(std::chrono::duration<Rep, Period> duration) {

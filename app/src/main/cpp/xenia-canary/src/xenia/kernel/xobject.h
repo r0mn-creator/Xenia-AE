@@ -30,6 +30,7 @@ namespace kernel {
 constexpr fourcc_t kXObjSignature = make_fourcc('X', 'E', 'N', '\0');
 
 class KernelState;
+class XThread;
 
 template <typename T>
 class object_ref;
@@ -275,11 +276,38 @@ class XObject {
   // if we allocated it!
   uint32_t guest_object_ptr_ = 0;
   bool allocated_guest_object_ = false;
+ public:
+  // ===== Cooperative guest scheduler (ported from XenDroid) =====
+  // docs/AEX_OVERHAUL.md step 1. Inert unless cvars::guest_scheduler is set.
+
+  // Bumped by every state change that could satisfy a cooperative waiter, so
+  // the scheduler can skip re-polling a parked waiter until it moves.
+  uint32_t cooperative_signal_epoch() const {
+    return cooperative_signal_epoch_.load();
+  }
+  // Bumped by a release-everyone-then-reset transition (a manual-reset pulse),
+  // which is gone from the host primitive before any parked fiber re-polls it.
+  virtual uint32_t cooperative_pulse_epoch() const { return 0; }
+
+  // Registers |thread| as a cooperative waiter on this object and records the
+  // registration on the thread, so a terminate that never unwinds the parked
+  // stack can still release it.
+  void EnterCooperativeWait(XThread* thread);
+  void LeaveCooperativeWait(XThread* thread);
+  // Releases whatever registration |thread| still holds, if any. Called when a
+  // thread is torn down without returning through its wait.
+  static void AbandonCooperativeWait(XThread* thread);
+
+ private:
+  // Cooperative scheduler signal epoch (ported from XenDroid).
+  std::atomic<uint32_t> cooperative_signal_epoch_{0};
+
 };
 
 template <typename T>
 class object_ref {
  public:
+
   object_ref() noexcept : value_(nullptr) {}
   object_ref(std::nullptr_t) noexcept  // NOLINT(runtime/explicit)
       : value_(nullptr) {}
@@ -364,6 +392,7 @@ class object_ref {
   }
 
  private:
+
   T* value_ = nullptr;
 };
 
