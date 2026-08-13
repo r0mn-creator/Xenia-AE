@@ -90,6 +90,22 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
   compiler_->AddPass(std::make_unique<passes::SpinLoopBackoffPass>());
   if (validate) compiler_->AddPass(std::make_unique<passes::ValidationPass>());
 
+  // Ported from XenDroid. Collapse the memory-counter sibling of the CTR spin
+  // loop above: delay countdowns whose counter was spilled to a stack slot
+  // instead of CTR. Same still-valid ControlFlowAnalysisPass edges, and must
+  // stay ahead of MemorySequenceCombinationPass, which fuses the byte swaps it
+  // models explicitly. cvar-gated, behaviour-neutral when off.
+  compiler_->AddPass(std::make_unique<passes::DelayCountdownCollapsePass>());
+  if (validate) compiler_->AddPass(std::make_unique<passes::ValidationPass>());
+
+  // Ported from XenDroid. Gives the polls the collapses above cannot touch -
+  // indefinite waits on memory another agent writes (GPU fence and frame waits)
+  // - the same adaptive spin-then-park. Runs after them so it only sees loops
+  // that survived. This is the pass aimed squarely at guest_826DEFD0, measured
+  // at 14% of ALL process CPU.
+  compiler_->AddPass(std::make_unique<passes::MemoryPollParkPass>());
+  if (validate) compiler_->AddPass(std::make_unique<passes::ValidationPass>());
+
   if (backend->machine_info()->supports_extended_load_store) {
     // Backend supports the advanced LOAD/STORE instructions.
     // These will save us a lot of HIR opcodes.
