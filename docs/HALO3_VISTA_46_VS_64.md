@@ -1813,3 +1813,57 @@ draws. **Do not re-test it for the vista.**
 
 The s31 conclusion stands: the draws are absent from the ring buffer, and the
 cause is upstream of the GPU - JIT, kernel or timing.
+
+## 33. ⭐ The whole command stream is 3x thinner - and AE is SLOWER doing less
+
+`debug.canary.pm4total` counts every PM4 packet parsed, alongside PM4DRAW.
+Halo 3 menu, same device, symmetric probes in both builds:
+
+| | total pkts/frame | draws/frame | draws as % of stream |
+|---|---|---|---|
+| **Canary AE** | 5,251 | 88 | **1.69%** |
+| **XDtester** | 15,692 | 611 | **3.89%** |
+
+Raw: AE 4,374,528 total / 73,728 draws / 833 frames.
+XDtester 18,956,288 total / 738,304 draws / 1,208 frames.
+
+Two distinct effects, both real:
+1. **The stream is 3x thinner overall** - the guest is issuing far fewer
+   commands of every kind, not just draws.
+2. **Draws are half the share of what remains** (1.69% vs 3.89%) - so on top of
+   doing less overall, proportionally less of it is drawing.
+
+### 33.1 The damning part
+
+**Canary AE runs at 15 FPS while processing a THIRD of the command work that
+XenDroid processes at 24 FPS.** Per unit of guest work, AE is roughly 5x slower.
+
+That inverts the usual reading. AE is not slow because it is drawing more; it is
+slow while doing dramatically less. The bottleneck is on the **CPU/guest side**,
+not the renderer - which is exactly what sections 14-32 concluded by
+elimination, now with a positive number attached.
+
+### 33.2 The likely shape of it
+
+Halo 3 scales detail dynamically. A guest that is starved of CPU time will be
+told, by its own timing code, that it must cut work - fewer objects, lower LOD,
+fewer passes. That produces precisely this signature: a uniformly thinner
+command stream with proportionally fewer draws, varying run to run (88 vs 138
+draws/frame across runs, s30/s31), against a stable reference.
+
+It also ties back to the recorded JIT hotspot `guest_826DEFD0` - 14% of ALL
+process CPU in a guest polling loop ([[project-xenia-ae-jit-hotspot]]). A guest
+burning its frame budget in a spin loop is a guest that will cut detail.
+
+⚠️ This does NOT yet explain the vista being *inverted* - a thinner scene is not
+a mirrored one. Treat "fewer draws" and "inverted" as possibly separate defects
+until one is shown to cause the other.
+
+### 33.3 Next
+
+CPU-side performance and correctness, in this order:
+1. Attack `guest_826DEFD0` - XenDroid has four JIT passes aimed at spin/poll
+   loops ([[project-xendroid-comparison]]) and AE has none of them ported.
+   `a64_park_spin_backoff` exists in XenDroid's cvar list.
+2. Re-measure PM4TOTAL after each - if the stream thickens as CPU time frees up,
+   the dynamic-detail theory is confirmed and the vista may follow.
