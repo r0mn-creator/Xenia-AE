@@ -1637,3 +1637,123 @@ Find why draws in AE observe so few distinct bone states. Candidates, in order:
 The CWRITE probe in `command_processor.cc` already counts writes to the same
 register range; pair it with BONEDISTINCT in one run to see writes and observed
 states on the same timeline.
+
+## 30. ⭐⭐⭐ THE GUEST ISSUES 4.6x FEWER DRAWS IN CANARY AE
+
+The single most important measurement in this investigation.
+
+`debug.canary.drawentry` counts draws **entering `IssueDraw`**, before any
+emulator-side filtering. Same probe, same name and format, in both builds. Halo 3
+main menu, same device, same driver:
+
+| | draws entered | frames | **draws/frame** |
+|---|---|---|---|
+| **Canary AE** | 118,784 | 858 | **138** |
+| **XDtester** | 854,016 | 1,332 | **641** |
+
+**XenDroid's guest issues 4.6x more draw commands per frame than ours.**
+
+### 30.1 It is not us dropping them
+
+* `debug.canary.dropdraw`: **ZERO** draws discarded at the
+  `host_vertex_shader_type` gate (`vulkan_command_processor.cc:2480`) - so the
+  fact that AE accepts fewer types than XenDroid there
+  (AE: kVertex / kPointListAsTriangleStrip / adaptive-triangle only; XenDroid
+  additionally kRectangleListAsTriangleStrip and **all** domain types via
+  `IsHostVertexShaderTypeDomain`) is real but **never fires at the menu**.
+  Worth fixing on principle, not the cause here.
+* Entry (118,784) vs mid-function (113,664) differ by only ~4%, so almost
+  nothing is lost inside `IssueDraw` either.
+
+**The draws never arrive. The guest does not issue them.**
+
+### 30.2 And AE is slower while drawing far less
+
+AE: 858 frames / 55 s = 15.6 FPS. XDtester: 1,332 / 55 s = 24 FPS. XenDroid is
+1.5x the frame rate while issuing 4.6x the draws - roughly **7x more draw work
+per second**. So AE being slow is not explained by draw load; it is slow *and*
+drawing a fraction of the scene.
+
+### 30.3 What this means
+
+A GPU-backend bug cannot make the guest emit fewer draw commands. This is
+**guest execution divergence**, and it corroborates section 22, where the guest
+was caught emitting the 512x512 scissor path in one run and not at all in the
+next.
+
+The game is simply not drawing most of the scene in Canary AE. That is a
+sufficient explanation for an incomplete/wrong vista AND for collapsed skinned
+models, without any renderer defect at all - and it is consistent with every
+GPU-side comparison in sections 14-23 coming back identical.
+
+**The investigation should move to the CPU side: JIT correctness, kernel state,
+and thread/timing behaviour.** Sections 14-29 have, between them, eliminated the
+GPU backend fairly comprehensively.
+
+### 30.4 Immediate next steps
+
+1. Find where the guest's draw commands are lost: trace PM4 packet counts
+   (`PM4_DRAW_INDX` / `PM4_DRAW_INDX_2`) per frame in both builds. If the ring
+   buffer carries 4.6x fewer draw packets, the divergence is upstream of the GPU
+   entirely (JIT/kernel); if the packets are there but do not reach `IssueDraw`,
+   it is in the command processor's parsing.
+2. That is a small probe in `pm4_command_processor_implement.h`, symmetric in
+   both builds, and it cleanly splits "the guest never submitted them" from
+   "we failed to parse them".
+
+## 31. ⭐⭐⭐ CONFIRMED: the draws are missing from the RING BUFFER, not lost by us
+
+`debug.canary.pm4draw` counts draw PACKETS parsed out of the ring buffer, at the
+single point both `PM4_DRAW_INDX` and `PM4_DRAW_INDX_2` funnel through
+(`ExecutePacketType3Draw`).
+
+**Canary AE: `PM4DRAW packets=73728` and `DRAWENTRY entered=73728` - EXACTLY
+EQUAL.** Every draw packet parsed becomes an `IssueDraw` call. The command
+processor loses nothing.
+
+| | draws/frame |
+|---|---|
+| Canary AE | 73,728 / 836 frames = **88** |
+| XDtester | 744,448 / 1,212 frames = **614** |
+
+Since AE's parsing is lossless, fewer `IssueDraw` calls **necessarily** means
+fewer draw packets in the ring buffer. **~7x fewer draws are being submitted.**
+
+### 31.1 This closes the question section 30 opened
+
+The candidates were "the guest never submitted them" vs "we failed to parse
+them". Parsing is proven lossless, so it is the former:
+
+**the guest, running under Canary AE, does not submit the draw commands.**
+
+Nothing in the GPU backend can cause that. Combined with s22 (the guest emitting
+the 512x512 scissor path in one run and not the next) and the run-to-run
+variation in this very measurement (138 draws/frame one run, 88 the next, versus
+XenDroid's stable ~614-641), the picture is consistent: **guest execution in
+Canary AE is both impoverished and non-deterministic.**
+
+### 31.2 Where the investigation goes now
+
+Out of the GPU entirely. The scene is not being drawn because the game is not
+asking for it to be drawn. Targets, in order:
+
+1. **JIT correctness** - wrong results in game logic would cause the title to
+   skip rendering work (culling everything, failing visibility tests, taking
+   error paths). The recorded JIT hotspot `guest_826DEFD0` (14% of process CPU,
+   a polling loop) is a hint that guest control flow is not behaving.
+2. **Kernel/threading** - a lost wakeup or mis-timed event would let a frame be
+   built and submitted half-populated. This project has already found and fixed
+   exactly that class of bug once (thread-start lost-wakeup race).
+3. **Timing** - anything frame-rate or clock dependent the guest samples to
+   decide how much to draw.
+
+⚠️ **Do not spend more effort diffing the GPU backend.** Sections 14-31 have
+eliminated it by measurement: identical maths at every stage, lossless packet
+parsing, and now proof that the work never arrives.
+
+### 31.3 Probe note
+
+The XDtester side of PM4DRAW needs `#include "xenia/base/xdt_debug.h"` in
+`pm4_command_processor_implement.h` (build failed on the undeclared macro). Not
+needed for the conclusion above - AE's packet/entry equality carries it - but
+add it if XenDroid's own packet count is ever wanted.

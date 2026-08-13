@@ -1010,6 +1010,22 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_ZPD(
 bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
     uint32_t packet, const char* opcode_name, uint32_t viz_query_condition,
     uint32_t count_remaining) XE_RESTRICT {
+  // DIAG(gpu/pm4draw): draw PACKETS parsed out of the ring buffer.
+  //
+  // Splits "the guest never submitted these draws" from "we failed to turn them
+  // into IssueDraw calls". DRAWENTRY showed Canary AE reaching IssueDraw 138
+  // times/frame against XDtester's 641 (docs s30). If this packet count is
+  // equally lopsided, the divergence is upstream of the GPU entirely - JIT or
+  // kernel - because the ring buffer simply does not contain the draws.
+  {
+    static std::atomic<uint32_t> pkts{0};
+    if (XE_AE_DIAG_ENABLED("debug.canary.pm4draw")) {
+      uint32_t n = pkts.fetch_add(1) + 1;
+      if ((n & 1023u) == 0) {
+        XELOGI("PM4DRAW packets={}", n);
+      }
+    }
+  }
   // if viz_query_condition != 0, this is a conditional draw based on viz query.
   // This ID matches the one issued in PM4_VIZ_QUERY
   // uint32_t viz_id = viz_query_condition & 0x3F;
