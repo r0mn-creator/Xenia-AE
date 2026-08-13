@@ -61,6 +61,20 @@ xesl_entry_inputs_end_code_begin_compute
     }
     pixels_0123.x = pixels_0123.y;
   }
+  #ifdef XE_RESOLVE_ROW_MARKER
+    // DIAG(gpu/resolve): row-index marker - see resolve_full_32bpp.xesli for
+    // the rationale. The fast path copies raw EDRAM bits without unpacking to
+    // float, so the ramp is written directly as a grey RGBA8 value rather than
+    // through XePack32bpp4Pixels. Direction is the same: dark at row 0,
+    // bright at row 512.
+    uint xe_row_marker_level = min(pixel_index.y >> 1u, 255u);
+    uint xe_row_marker = xe_row_marker_level |
+                         (xe_row_marker_level << 8u) |
+                         (xe_row_marker_level << 16u) | 0xFF000000u;
+    pixels_0123 = xesl_uint4(xe_row_marker, xe_row_marker, xe_row_marker,
+                             xe_row_marker);
+    pixels_4567 = pixels_0123;
+  #endif  // XE_RESOLVE_ROW_MARKER
   XeResolveSwap8PixelsRedBlue32bpp(resolve_info, pixels_0123, pixels_4567);
   uint dest_address =
       XeResolveDestPixelAddress(resolve_info, pixel_index, 2u) >> 4u;

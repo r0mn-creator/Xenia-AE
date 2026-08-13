@@ -546,3 +546,890 @@ quality without addressing the orientation bug.
 `debug.canary.scissorlog` in XDtester (filtered to extent 300-600, square).
 Add the same probe to Canary AE's `GetScissorTmpl` to compare register values
 side by side.
+
+---
+
+## 14. Session round N+1 — the 46-vs-64 lead is DEAD, plus 5 new eliminations
+
+### 14.1 FORCE512 result — the scissor was never the limiter (RETRACTS the lead)
+
+`debug.canary.force_shadow_512` (experiment, default OFF, in `GetScissorTmpl`)
+raised any square scissor in [200,512) to 512x512. It took: **120 hits, scissor
+logged as `(0,0)+(512x512)`**.
+
+**The resolve rect stayed 384x384** (`w_div8=48`).
+
+So the rect is NOT clamped by the scissor in this path. Reading
+`GetResolveInfo` (`draw_util.cc:1120-1155`) confirms why: the rect comes from
+**guest memory** - vertex fetch constant 0, "D3D9 HACK: Vertices to use are
+always in vf0, and are written by the CPU" - and only afterwards is clamped to
+the scissor. With the scissor widened the guest vertices (384) bound the rect
+by themselves.
+
+**Consequences:**
+1. The whole "46 vs 64 / surface_pitch clamp" line of attack is spent. The
+   difference is guest-authored vertex data, not our clamp maths.
+2. It could never have explained the symptom anyway: a smaller resolve is a
+   smaller/blurrier image, **not a vertically mirrored one**. Flagged before
+   the test, confirmed by it.
+3. Screenshot `scratchpad/force512.png`: vista still upside down, unchanged.
+
+**Do not re-run scissor/surface_pitch/resolve-rect experiments for the vista.**
+
+### 14.2 XenDroid's resolve architecture (real, but NOT the cause)
+
+XenDroid has an entire resolve subsystem we lack, exposed as cvars in
+`vulkan_render_target_cache.cc`: `vulkan_in_pass_resolve` (in-pass EDRAM
+resolve via `VK_KHR_dynamic_rendering_local_read`), `vulkan_direct_host_resolve`
+("resolve eligible host render targets directly to guest memory with compute
+shaders instead of first dumping the host render target back through EDRAM"),
+`vulkan_in_pass_transfers`, `vulkan_normalize_dontcare_keys`,
+`vulkan_depth_unorm24`, plus four `vulkan_in_pass_resolve_debug_*` probes.
+
+⚠️ **`vulkan_resolve_to_texture` means something DIFFERENT in each tree.** In
+XenDroid it means "have the in-pass resolve also store into the promoted
+destination texture". Toggling the same-named cvar in our build was therefore
+never the equivalent experiment.
+
+**Test run:** set `vulkan_direct_host_resolve = false` in XDtester, i.e. force
+XenDroid onto "always use the EDRAM dump path" - the path our build always
+takes. **XDtester's vista still rendered correctly** (screenshot
+`scratchpad/xdt_nodirect.png`, 19.8 FPS, horizon and terrain the right way up).
+
+**=> The in-pass / direct-host resolve family is NOT what fixes the vista.**
+This also means the EDRAM dump round-trip is not inherently the flipper.
+
+### 14.3 Four more source-level eliminations (all confirmed identical)
+
+| Suspect | Result |
+|---|---|
+| `GetHostViewportInfo` | **Byte-identical** between trees apart from our own probe code. Re-confirmed by direct diff, not inference. |
+| Tessellation vertex winding | Both trees emit `spv::ExecutionModeVertexOrderCw`. (XenDroid moved it into `spirv_shader_translator.cc`; ours is in `vulkan_pipeline_cache.cc:2350`. Same value.) |
+| Render-target path | Both retain `Path::kPixelShaderInterlock` and `kHostRenderTargets`. XenDroid **deleted the `render_target_path_vulkan` cvar**; ours is `''` (auto). Same code paths exist in both. |
+| Fullscreen-pass Y direction | **The most promising of the four, and it is negative.** `fullscreen_cw.vs` (the VS behind every transfer/resolve/composite pass) scales Y by `XESL_Y_SCREEN_DIRECTION`. XenDroid renamed it `NDC_DIRECTION_Y_XE` and *widened* its condition to `#if SHADING_LANGUAGE_GLSL_XE \|\| XE_SLANG_SPIRV` (they compile via Slang, which would otherwise have taken the HLSL `-1.0` branch on Vulkan). We have no Slang path: `tools/build/compile_shader_spirv.py:96` passes `-DXESL_LANGUAGE_GLSL=1`, so we take `1.0` - **the same value XenDroid uses on Vulkan.** |
+
+### 14.4 Where this leaves the vista
+
+Everything in the *vertex* stage is now proven identical (viewport maths,
+NDC scale/offset, translated SPIR-V, winding, fullscreen-pass Y). The guest's
+own compositing quad uses guest shaders and guest vertices, identical in both.
+The UI drawn over the vista is never flipped, and the final gamma/present pass
+is shared by both - so the flip cannot be there either.
+
+By elimination the mirrored data must already be **in the resolved texture**,
+written by one of our own `.xesl` passes between the host RT and the sampled
+texture: the EDRAM dump, the resolve shader, or the texture-load shader.
+
+**Next step (not yet run) - the row-marker binary search.** Instead of
+comparing more source, write a *known* row-indexed gradient at one stage of
+that chain and look at the screen:
+* if the gradient appears inverted, the flip is **downstream** of that write;
+* if it appears correct, the flip is **upstream**.
+Two or three rebuilds localise it exactly. This is a positive identification,
+which is what the previous rounds of source-diffing have failed to produce.
+
+---
+
+## 15. THE ROW-MARKER RESULT — first positive localisation of the flip
+
+After eight consecutive "not it" answers from source diffing, this is the first
+test that says where the flip **is**.
+
+### 15.1 The instrument
+
+`debug.canary.resolve_row_marker` (experiment, default OFF). Two marker
+variants of the 32bpp colour resolve shaders
+(`resolve_full_32bpp_marker.cs.xesl`, `resolve_fast_32bpp_1x2xmsaa_marker.cs.xesl`,
+both gated by `#define XE_RESOLVE_ROW_MARKER` inside the shared `.xesli`)
+discard the resolved colour and instead write a vertical ramp keyed on the
+**destination row**. They are compiled to their own bytecode headers and
+substituted at pipeline-creation time in
+`vulkan_render_target_cache.cc` (search `ROWMARKER`).
+
+Why the resolve is the right place: the resolve is orientation-preserving **by
+construction** - `XeResolveColorCopySourcePixelAddress...` and
+`XeResolveDestPixelAddress` are indexed by the *same* `pixel_index` - so no flip
+can originate there, which makes it a clean place to inject a known orientation.
+
+### 15.2 The measurement (measured, not eyeballed)
+
+Sampling column x=900 of `scratchpad/marker2.png` and taking per-band extremes:
+
+| band top (screen y) | peak R | peak G | min R |
+|---|---|---|---|
+| 40 | 151 | 219 | 2 |
+| 199 | 167 | 226 | 5 |
+| 411 | 193 | 236 | 8 |
+| 623 | 230 | 247 | 11 |
+| 729 | 246 | 251 | 13 |
+
+**The envelope rises monotonically from top to bottom.** Destination row 0
+appears at the TOP of the screen.
+
+### 15.3 Conclusion
+
+**Everything downstream of the resolve destination write preserves orientation:
+the texture load, the tiled addressing, the guest's sampling and the composite
+are all innocent. The mirroring is introduced UPSTREAM - the EDRAM contents are
+already mirrored by the time the resolve reads them.**
+
+That narrows the remaining search to:
+* the host render target -> EDRAM dump (generated in C++ in
+  `vulkan_render_target_cache.cc`, not a `.xesl` file - note XenDroid has no
+  dump/transfer shader sources either, both generate them), or
+* the guest draws writing into the host RT / EDRAM already mirrored (the ROV
+  `kPixelShaderInterlock` path derives its EDRAM address from the fragment
+  coordinate - a Y-convention error there mirrors exactly this way and would
+  affect only resolved 3D content, never the directly-drawn UI).
+
+The ROV path is the stronger of the two: it is the one place left where a
+fragment Y coordinate is turned into an EDRAM address.
+
+### 15.4 Second, separate observation - a 32-row sawtooth
+
+Superimposed on that envelope the ramp resets every **~53 screen px ~= 32
+destination rows** - exactly `kTextureTileWidthHeight`. If write and read agreed
+on the layout, a linear ramp in the destination would appear as a smooth linear
+ramp on screen; instead the fast component is periodic at tile height while the
+slow component tracks correctly.
+
+This is an addressing inconsistency between the resolve write and the read side,
+and it is plausibly the *visible* form of the recorded 46-vs-64 mismatch (we
+resolve 368/384 wide into a surface the read side binds as 512x512). It is a
+**second defect, independent of the flip**, and it now has a direct instrument.
+Note it does NOT resurrect the surface_pitch theory as a cause of the flip -
+section 14.1 stands.
+
+### 15.5 Gotchas added this round
+
+* **A tap on the Canary AE library tile only SELECTS it; it takes a second tap
+  to launch.** A whole marker run was scored as "probe never fired" when the
+  game had simply never started. Confirm the game is actually running before
+  reading anything into an empty log.
+* **`xe.log` is appended across sessions and is ~38 MB.** Old probe output from
+  previous runs is still in it. Check the log's mtime and the screenshot before
+  concluding a probe did or did not fire.
+* `ui::vulkan::util::CreateComputePipeline` takes `const uint32_t*`, not
+  `const void*`.
+
+---
+
+## 16. Full trace of the localised stage (host RT -> EDRAM -> resolve)
+
+Section 15 localised the flip to *upstream of the resolve*. This section traces
+that stage end to end in both trees.
+
+### 16.1 Correction: AE is NOT on the ROV path
+
+Section 15.3 named `kPixelShaderInterlock` as prime suspect. **Wrong.**
+`vulkan_render_target_cache.cc` selects the ROV path only when
+`cvars::render_target_path_vulkan == "fsi"`; AE's config has `''`, so AE runs
+**`kHostRenderTargets`**. The ROV path is not used and cannot be the cause.
+
+### 16.2 AE-only code in this stage — found, then eliminated
+
+`read_resolved_1x`, `ResolveColorRenderTargetForDump`,
+`DestroyResolvedDumpCompanions` exist in AE and **not at all** in XenDroid (an
+Adreno MSAA workaround). Promising - AE-only code in exactly the localised
+stage - but **dormant**: `pipeline_key.read_resolved_1x = 0;` is hardcoded, with
+a comment recording it as already disproven. Dead code. Eliminated. The
+`vkCmdResolveImage` it would use has zero offsets and full extent, so it is
+orientation-preserving anyway.
+
+### 16.3 Everything else in the stage is IDENTICAL
+
+Verified by direct diff, not inference:
+
+| Component | Result |
+|---|---|
+| Dump shader (`GetDumpPipeline`, generated SPIR-V) | Y/tile maths identical; XD's only changes are `native_layout`/`source_scale_native` for its scale classes, which are no-ops at scale 1 |
+| Transfer shader (`GetTransferShader`) address maths | Identical |
+| Transfer rectangle vertex generation | Identical |
+| `transfer_viewport` + `pixels_to_ndc_y` | Identical (both positive) |
+| `VulkanCommandProcessor::SetViewport` | Identical |
+| `GetViewportInfoArgs::Setup` — `origin_bottom_left` | **`false` in both** |
+
+Two `Setup` arguments *do* differ, and both are behaviourally equivalent under
+default config, but they are worth knowing:
+* `allow_reverse_z`: AE hardcodes `true`; XD passes `cvars::vulkan_allow_reverse_z`,
+  which **defaults to `true`**.
+* `convert_z_to_float24`: AE hardcodes `false`; XD passes
+  `host_render_targets_used && depth_float24_convert_in_pixel_shader()`, and
+  AE's own `depth_float24_convert_in_pixel_shader` **defaults to `false`**.
+  AE has the cvar but never implemented the accessor, so the plumbing is absent
+  rather than merely off.
+
+### 16.4 REAL divergence found — gamma render targets (Halo 3 by name)
+
+The one substantive difference in this stage:
+
+| | cvar | default |
+|---|---|---|
+| Canary AE | `gamma_render_target_as_srgb` | **false** |
+| XenDroid | `gamma_render_target_as_unorm16` | **true** |
+
+XenDroid replaced the sRGB approach with promotion to `R16G16B16A16_UNORM` and
+**turned it on**, and carried the conversion through the dump shader
+(`bool is_gamma = ...k_8_8_8_8_GAMMA`, "stored as linear in the unorm16 host
+render target, so encode RGB linear -> gamma before packing"). AE does **no**
+gamma render-target handling at all.
+
+Both trees carry the upstream comment tying this directly to Halo 3:
+*"conversion in pixel shader output ... results in incorrect blending,
+especially visible on decals in **4D5307E6**"* - and 4D5307E6 is Halo 3.
+
+**Test:** set `gamma_render_target_as_srgb = true` in Canary AE (config only, no
+rebuild), cleared the pipeline cache, relaunched.
+
+**Result (`scratchpad/gamma_srgb.png`): a large, real improvement in the vista's
+image - terrain texture, the ship hull, cables and structures all resolve where
+before the vista was flat dark navy. The ORIENTATION is unchanged: ground still
+at the top, sky at the bottom.** Frame rate fell from ~17 to ~9.
+
+So gamma handling is a genuine Canary-AE defect with a visible fix, but it is
+**not** the flip. Reverted to `false` pending a decision on the perf cost;
+the proper fix is to port XenDroid's `gamma_render_target_as_unorm16` path
+rather than enable the lossy sRGB one.
+
+### 16.5 State of the flip
+
+Within the localised stage, every code path that could mirror has now been
+diffed and matches XenDroid. The flip is therefore **not in the host-RT ->
+EDRAM -> resolve code**; it must be in the *content of the host render target*,
+i.e. established before the dump ever runs.
+
+Next: capture the host render target image directly rather than reasoning about
+it. AE already has `TestrigCaptureImageDeferred(image, layout, width, height)`
+wired into `ResolveColorRenderTargetForDump` (currently behind `if (false)`).
+Pointing that at the vista's colour RT and viewing the captured image answers
+"is the host RT itself mirrored?" outright - the same measure-don't-diff move
+that produced section 15.
+
+### 16.6 Host-RT capture — instrument built, result inconclusive
+
+Built on the existing (dormant) capture path, gated by
+`debug.canary.halo3_vista_probe`:
+
+* `TESTRIG_ROWPROFILE` — mean luminance per 8 row bands of the captured render
+  target, added to `TestrigReadCapturedImage`. Reads orientation directly off a
+  sky-over-ground scene without needing an image viewer.
+* `VISTA_RTCAND` — enumerates every colour RT receiving a transfer.
+* `debug.canary.vista_rt_base` — selects which RT is captured (default 1216,
+  the historical hardcoded guess).
+* Column capture — `TestrigCaptureImageDeferred` now grabs a 4-px-wide
+  **full-height** strip instead of a 256x256 top-left crop when the RT is
+  taller than 256, so a whole-image vertical profile is actually visible.
+
+**Findings:**
+
+1. **RT 1216 was the wrong target all along.** Its profile is
+   `1 1 1 1 1 0 0 0` — essentially black, confirming the
+   `HALO3_FINDINGS_CHECKLIST.md` note that it is a uniform near-black
+   feedback-decay target. Every earlier capture aimed at 1216 was measuring
+   nothing. The probe no longer hardcodes it.
+2. The real candidates are:
+
+   | base_tiles | fmt | msaa | pitch_tiles |
+   |---|---|---|---|
+   | 1216 | 3 | 1x | 15 |
+   | **0** | **0** | **4x** | **29** |
+   | 608 | 0 | 1x | 15 |
+
+   `base_tiles=0, 4x MSAA, pitch 29` is the main scene target.
+3. Its full-height profile (568 rows) is `258 271 67 0 0 0 0 0` — **the image
+   occupies only the top ~213 rows of a 568-row render target; the rest is
+   black.** Within the content the two bands are nearly equal (258 vs 271), so
+   this does **not** yet resolve orientation.
+
+**Do not read a conclusion into this yet.** What it does establish is that the
+vista's scene fills only the top ~37% of its render target, which is itself
+worth explaining and is consistent with the recorded 46-vs-64 size anomaly
+(a resolve/read disagreement about how tall this surface is).
+
+**Next:** the two content bands are too coarse. Re-run with more bands (say 32)
+over just the populated rows, and compare the same profile from XDtester — the
+symmetric probe harness already exists in that build. A profile that rises in
+one build and falls in the other is the flip, stated as a number.
+
+---
+
+## 17. Batch elimination + a CONFIRMED AE regression
+
+### 17.1 It is not a XenDroid GPU feature (batch test)
+
+Set **seven** XenDroid-only GPU features to their AE-equivalent values at once in
+XDtester: `vulkan_dynamic_rendering`, `vulkan_in_pass_transfers`,
+`vulkan_in_pass_resolve`, `vulkan_normalize_dontcare_keys`,
+`vulkan_depth_unorm24`, `gamma_render_target_as_unorm16`,
+`rt_cache_ownership_claim_memo` — all `false`.
+
+**XDtester still rendered the vista correctly, at 23.8 FPS**
+(`scratchpad/xdt_batch.png`). None of XenDroid's GPU features is what fixes the
+vista. Combined with sections 14 and 16 this closes off "XenDroid does something
+special" as a line of attack: **XenDroid is close to upstream here, and it is
+Canary AE that regressed.**
+
+The right comparison is therefore **AE vs upstream canary**, not AE vs XenDroid.
+Local trees, by diff size against AE's `vulkan_render_target_cache.cc`:
+`xeniatest/canary-git` **1112 lines** (closest base), `canary-fork` 1112,
+`xeniatest/oracle` 1700 (a newer canary — it has the `copy_native` /
+`IsResolveSourceNativeOnly` work AE predates, which is also where XenDroid's
+`source_scale_native`/`native_layout` come from; at scale 1 all of it is a
+no-op, so it is not the flip).
+
+### 17.2 CONFIRMED REGRESSION: AE deleted upstream's gamma render-target support
+
+Diffing AE against `canary-git` shows AE **removed** code upstream has:
+
+```
+-    gamma_render_target_as_unorm16_ = false;              (x2, capability setup)
+-      return gamma_render_target_as_unorm16_ ? VK_FORMAT_R16G16B16A16_UNORM
+-                                             : VK_FORMAT_R8G8B8A8_UNORM;
+-bool VulkanRenderTargetCache::IsGammaFormatHostStorageSeparate() const {
+-  return gamma_render_target_as_unorm16_;
+-}
+```
+
+`grep -c gamma_render_target_as_unorm16` → **canary-git: 5+, Canary AE: 0.**
+
+So AE has neither upstream's UNORM16 path nor XenDroid's; its only gamma option
+is the older `gamma_render_target_as_srgb`, defaulted off. This is a genuine
+Canary-AE regression against its own upstream, and it is **independently
+confirmed by measurement**: setting `gamma_render_target_as_srgb = true`
+visibly restores the vista's detail (terrain, ship hull, cables, structures
+instead of flat navy) - section 16.4, `scratchpad/gamma_srgb.png` - at a cost of
+~17 -> ~9 FPS.
+
+**Fix to apply:** restore `gamma_render_target_as_unorm16_` from `canary-git`
+(`VulkanRenderTargetCache` capability setup, `GetColorVulkanFormat`,
+`IsGammaFormatHostStorageSeparate`) rather than shipping the lossy sRGB path.
+This fixes vista *fidelity*. It does **not** fix the flip - tested.
+
+### 17.3 The flip: still open, and the search is now correctly framed
+
+Not fixed. What is now established:
+* preserved orientation everywhere downstream of the resolve (s15);
+* every host-RT -> EDRAM -> resolve code path identical to XenDroid (s16);
+* not caused by any XenDroid GPU feature (s17.1);
+* therefore an **AE-vs-upstream-canary regression**, in a 1112-line diff.
+
+**Next step, concrete:** walk the `canary-git` -> AE diff of
+`vulkan_render_target_cache.cc` (1112 lines, much of it TESTRIG noise that
+filters out easily) and of `vulkan_command_processor.cc`, looking for AE
+deletions like the gamma one above. The gamma regression was found in a single
+filtered grep of AE's *removed* lines - that same filter over the remaining
+files is the cheapest next move, and it is a far smaller space than the XenDroid
+comparison ever was.
+
+Also open from s16.6: the vista's scene occupies only the **top ~213 of 568
+rows** of its render target (`base_tiles=0`, 4x MSAA, pitch 29). Unexplained,
+and consistent with the recorded write/read size disagreement.
+
+---
+
+## 18. Gamma path: a real latent bug FIXED, and a RETRACTION
+
+### 18.1 ⚠️ RETRACTED: "gamma_render_target_as_srgb=true improves the vista" (s16.4)
+
+**That result was a confound, not an effect.** On the `kHostRenderTargets` path
+the cvar was wired to nothing (see 18.2), so it could not have changed anything.
+The visible improvement in `scratchpad/gamma_srgb.png` came from the **pipeline
+cache being deleted** on that run, which was changed at the same time.
+
+Classic single-variable failure - two things changed in one run. Recorded so it
+is not cited again.
+
+### 18.2 THE BUG (fixed): the cvar was dead on the path AE actually uses
+
+`VulkanRenderTargetCache` has a complete sRGB gamma implementation -
+`GetColorVulkanFormat` returns `VK_FORMAT_R8G8B8A8_SRGB`, plus handling in the
+transfer and framebuffer paths (lines ~1557, ~1852, ~2003). But
+`gamma_render_target_as_srgb_` was:
+
+* declared `= false` in the header,
+* assigned `false` in the `kPixelShaderInterlock` branch,
+* **never assigned at all in the `kHostRenderTargets` branch.**
+
+`render_target_path_vulkan` defaults to host render targets, so the member was
+permanently `false` and `cvars::gamma_render_target_as_srgb` did nothing on the
+only path the backend runs. Dead cvar, live implementation.
+
+**Fix applied** (`vulkan_render_target_cache.cc`, `kHostRenderTargets` branch):
+
+```cpp
+gamma_render_target_as_srgb_ = cvars::gamma_render_target_as_srgb;
+```
+
+Default remains `false`, so shipped behaviour is unchanged; the difference is
+that the cvar is now functional.
+
+### 18.3 Measured result — the cvar works, but sRGB is the wrong curve
+
+Controlled A/B, both runs with the pipeline cache deleted, same region
+(x 80-620, y 40-560), 8 bands:
+
+| | profile | mean |
+|---|---|---|
+| gamma OFF (control, `prof_screen.png`) | 83 78 69 73 79 104 133 145 | **95** |
+| gamma ON (`gamma_wired.png`) | 369 370 373 376 373 376 378 363 | **372** |
+
+The cvar now has a large, unmistakable effect - which **proves the wiring fix** -
+but the image is *worse*: flat, washed out, low contrast, the UI blown out with
+it, and ~9 FPS. Expected: Xenos piecewise-linear gamma is **not** sRGB, so
+encoding it as sRGB applies the wrong transfer curve.
+
+**Conclusion: keep `gamma_render_target_as_srgb` default OFF.** The correct fix
+for 8_8_8_8_GAMMA fidelity is `gamma_render_target_as_unorm16` (promote to
+`R16G16B16A16_UNORM`, blend in linear space).
+
+### 18.4 Why "restore upstream's gamma path" is not enough
+
+Upstream `canary-git`'s Vulkan backend **hardcodes it off in both paths**:
+
+```cpp
+// TODO(Triang3l): When color space conversion is implemented in the ownership
+// transfer and resolve dump shaders, allow `gamma_render_target_as_unorm16` ...
+gamma_render_target_as_unorm16_ = false;   // kHostRenderTargets
+gamma_render_target_as_unorm16_ = false;   // kPixelShaderInterlock
+```
+
+So restoring upstream verbatim would be a **no-op on Vulkan** - upstream never
+enables it there; it is a D3D12-only feature upstream. **XenDroid completed that
+TODO**, which is what their dump-shader gamma encode is
+(`bool is_gamma = ... k_8_8_8_8_GAMMA`, "stored as linear in the unorm16 host
+render target, so encode RGB linear -> gamma before packing").
+
+Porting it therefore means porting XenDroid's colour-space conversion into the
+ownership-transfer and resolve-dump shaders, plus
+`IsGammaFormatHostStorageSeparate()` (which AE's base predates entirely - AE has
+zero references to it, upstream has it as a pure virtual with a
+`GetColorResourceFormat` call site). That is a real port, not a restore.
+
+**Still unrelated to the flip**, which remains open per section 17.3.
+
+---
+
+## 19. THE REGRESSION: AE passes RAW pitch/height to the resolve tiled-address helpers
+
+Continuing the "what did AE delete from upstream" filter that found the gamma
+bug (s18), applied to `draw_util.cc` (102 removed lines):
+
+### 19.1 What upstream does vs what AE does
+
+Upstream `canary-git` aligns **both** the destination pitch and height, then
+feeds the aligned values to every tiled-address helper:
+
+```cpp
+const uint32_t copy_dest_pitch_aligned =
+    xe::align(rb_copy_dest_pitch.copy_dest_pitch,
+              texture_address::kStoragePitchHeightAlignmentBlocks);
+const uint32_t copy_dest_height_aligned =
+    xe::align(rb_copy_dest_pitch.copy_dest_height,
+              texture_address::kStoragePitchHeightAlignmentBlocks);
+...
+copy_dest_base_adjusted += texture_address::Tiled3D(
+    dest_base_x, dest_base_y, 0,
+    copy_dest_pitch_aligned, copy_dest_height_aligned, bpp_log2);
+texture_util::GetTiledAddressLowerBound3D(..., copy_dest_pitch_aligned,
+                                          copy_dest_height_aligned, ...);
+texture_util::GetTiledAddressUpperBound3D(..., copy_dest_pitch_aligned,
+                                          copy_dest_height_aligned, ...);
+```
+
+AE passes the **RAW register values** to all three:
+
+```cpp
+copy_dest_base_adjusted += texture_util::GetTiledOffset3D(
+    ..., rb_copy_dest_pitch.copy_dest_pitch,
+         rb_copy_dest_pitch.copy_dest_height, bpp_log2);
+```
+
+**The tiling maths derives every row's address from the pitch and height it is
+given.** Feeding raw values where the read side assumes aligned ones places rows
+at the wrong offsets in the destination surface. AE also dropped the
+`texture_address` module upstream added (AE has zero references to it; both
+canary-git and XenDroid have it).
+
+This is consistent with every unexplained addressing symptom on record:
+* the **32-row sawtooth** in the row-marker (s15.4) - 32 is exactly
+  `kTextureTileWidthHeight`, the alignment granularity;
+* **46 vs 64** - resolving 368/384 into a surface the read side binds as 512;
+* the vista occupying only the **top 213 of 568 rows** of its RT (s16.6).
+
+### 19.2 A partial toggle already existed, and was untested — now tested
+
+A previous session spotted the pitch half of this and added
+`debug.canary.resolve_aligned_pitch` (experiment, default OFF), but wired it
+only into a local `copy_dest_pitch_for_tiling` used by the 2D branch.
+
+**Tested this session: enabling it does NOT fix the orientation**
+(`scratchpad/aligned_pitch.png`). That is not a refutation of the theory,
+because the toggle is not upstream's behaviour:
+* it covers **pitch only** - `copy_dest_height` is still never aligned anywhere
+  in AE, and height is what the *vertical* addressing depends on;
+* it does not reach the **3D branch**, which still passes both raw values;
+* upstream aligns to `texture_address::kStoragePitchHeightAlignmentBlocks`,
+  while the toggle aligns to `kTextureTileWidthHeight` - these are not
+  necessarily the same constant.
+
+### 19.3 The fix to implement (specified, not yet applied)
+
+Restore upstream's version properly in `GetResolveInfo`:
+1. Compute `copy_dest_pitch_aligned` **and `copy_dest_height_aligned`** with
+   `xe::align(..., texture_address::kStoragePitchHeightAlignmentBlocks)`.
+2. Pass both to **all** of `GetTiledOffset3D`/`Tiled3D`,
+   `GetTiledAddressLowerBound3D`, `GetTiledAddressUpperBound3D`, and the
+   corresponding 2D calls in the `else` branch.
+3. That needs `texture_address.h` (the alignment constant and helpers) ported
+   from `canary-git` - AE lacks the module entirely.
+4. Keep it behind an experiment toggle covering the **whole** change (retire the
+   partial `resolve_aligned_pitch`), so it can be A/B'd in one flip.
+
+This is the strongest outstanding lead: it is a confirmed AE-vs-upstream
+regression, it sits exactly where the row-marker localised the problem, and its
+granularity (32) matches the measured sawtooth period exactly.
+
+### 19.4 Implemented and tested — real regression fixed, but NOT the flip
+
+Implemented upstream's behaviour in full, replacing the partial
+`resolve_aligned_pitch` experiment with **`debug.canary.resolve_aligned_storage`**
+(experiment, default OFF), in `draw_util.cc` `GetResolveInfo`:
+
+* align **both** pitch and height to 32
+  (`kStoragePitchHeightAlignmentBlocks` == `kTextureTileWidthHeight` == 32, so
+  upstream's `texture_address` module is **not** needed to match its behaviour);
+* pass both aligned values to **all six** helper calls - `GetTiledOffset3D`,
+  `GetTiledAddressLowerBound3D`, `GetTiledAddressUpperBound3D` and the three 2D
+  equivalents. The 3D branch had been passing raw values on every call.
+
+**Result: the vista is still upside down** (`scratchpad/aligned_storage.png`).
+
+The change is **not** a no-op - 28% of sampled pixels differ from the control
+(`prof_screen.png`), though the vista is a live animated scene so some of that
+is frame variance. It measurably alters resolve destination addressing without
+altering orientation.
+
+**Verdict:** a genuine AE-vs-upstream correctness regression, now restorable
+with one toggle - but the flip is a *different* defect. Three symptoms
+(32-row sawtooth, 46-vs-64, 213-of-568 rows) pointed here convincingly and this
+was still not it, which is worth remembering: destination-addressing granularity
+symptoms and the mirroring are separate problems.
+
+**Kept, default OFF.** Before it becomes the default it needs A/B on NFS Carbon
+and Geometry Wars, since `GetResolveInfo` is shared by every title.
+
+### 19.5 Running tally of AE-vs-upstream regressions found by the deletion filter
+
+The `diff canary-git AE | grep '^-'` filter has now produced two real defects in
+two files:
+
+| File | Regression | Status |
+|---|---|---|
+| `vulkan_render_target_cache.cc` | `gamma_render_target_as_srgb_` never assigned on `kHostRenderTargets` - the cvar was dead | **Fixed** (s18.2); sRGB itself is the wrong curve, keep cvar off |
+| `draw_util.cc` | raw instead of aligned pitch/height into the tiled-address helpers | **Fixed behind toggle** (s19.4); not the flip |
+
+Files not yet swept, by removed-line count:
+`vulkan_command_processor.cc` **901**, `vulkan_texture_cache.cc` **522**,
+`texture_cache.cc` **184**, `render_target_cache.cc` 10.
+
+`vulkan_texture_cache.cc` is the priority: it is the **read** side of the
+resolve round trip, the one part of the path the row-marker measurement (s15)
+did not clear by construction, and it is 522 removed lines unexamined.
+
+### 19.6 `vulkan_texture_cache.cc` sweep — one difference, probably not the flip
+
+Applied the deletion filter to the read side (522 removed lines). The one
+addressing-relevant difference:
+
+```cpp
+// upstream canary-git: always in blocks
+load_constants.guest_pitch_aligned =
+    level_guest_layout.row_pitch_bytes / bytes_per_block;
+
+// Canary AE: only converted for TILED textures
+uint32_t level_guest_pitch = level_guest_layout.row_pitch_bytes;
+if (texture_key.tiled) {
+  level_guest_pitch /= bytes_per_block;   // "Shaders expect pitch in blocks"
+  assert_zero(level_guest_pitch & (xenos::kTextureTileWidthHeight - 1));
+}
+load_constants.guest_pitch_aligned = level_guest_pitch;
+```
+
+For **linear** textures AE passes the pitch in **bytes** where upstream passes
+**blocks** - a unit mismatch on the read side. It may be a deliberate AE fix
+rather than a regression (the assert and comment suggest it was reasoned about).
+
+**Probably not the vista flip:** resolve destinations are tiled, so
+`texture_key.tiled` is true for the vista's texture and AE's path matches
+upstream exactly. Recorded rather than pursued; worth revisiting if a
+linear-texture bug shows up elsewhere.
+
+Remaining unswept: `vulkan_command_processor.cc` (901 removed lines) and
+`texture_cache.cc` (184).
+
+### 19.7 Session end state
+
+All experiment toggles OFF; `gamma_render_target_as_srgb` false;
+XDtester config restored. Screenshot at shipping defaults:
+`scratchpad/current_defaults.png` - **still inverted**.
+
+Two real AE-vs-upstream regressions were found and fixed this session (s18.2,
+s19.4); neither is the flip.
+
+### 19.8 NDC-Y now eliminated by MEASUREMENT, not by reading code
+
+`vulkan_command_processor.cc`'s 901 removed lines contain **nothing**
+orientation-related (only resolution-scale plumbing and a submission-retry
+flag), so the deletion filter is exhausted on the big files.
+
+Ran the `NDCYDRAW` probe — which exists in **both** builds with identical
+placement and format — in Canary AE and XDtester on the same game and device,
+and joined the two logs on vertex-shader hash:
+
+* Canary AE: 42 distinct (shader, Y-regime) pairs
+* XDtester: 40
+* **Shaders present in both with a differing `ndc_scale_y` or `extent_y`: ZERO.**
+
+Every shared shader gets `ndc_scale_y = -1, flipped = 1` in both builds
+(the one exception, `0A6D1DD7767FDF27`, is the pre-transformed 2D UI at
+`0.00024414062 / flipped=0` — identical in both).
+
+The doc previously listed "NDC scale/offset (identical)" as eliminated, but that
+came from reading code. **It is now a measured A/B**, which is a much stronger
+claim: the guest draws receive the same Y transform in the build that renders
+correctly and the build that renders inverted.
+
+XDtester logs one shader AE never does — `56FE9FEA13FD93F3`, `extent_y=512`
+(note: 512, the recurring number). Worth a look, but it may simply be a draw AE
+skips for unrelated reasons.
+
+**Implication:** with the vertex-stage Y transform now measured identical, and
+the resolve/dump/transfer paths measured or diffed identical, the inversion is
+looking less like a transform applied in the wrong direction and more like a
+difference in *which surface a draw lands in*. That is a different class of bug
+from everything tried so far.
+
+## 20. The guest-constant comparison (VSCONST) — AE side captured, XDtester side PENDING
+
+**Reasoning:** the GPU renders what it is given. NDC transform, translated
+SPIR-V, viewport maths, resolve, dump and transfer are now all *measured or
+diffed identical* to XDtester. What has never been compared is the DATA - the
+view/projection matrix the guest computes on the PowerPC side and uploads as
+float constants. A sign error there inverts the scene while leaving every
+GPU-side check identical, and it would not touch the 2D UI (pre-transformed,
+never passes through a guest matrix). It would also plausibly unify the vista
+with the character "ball", whose open lead is bone-matrix constants.
+
+**Probe:** `debug.canary.vsconst` (diagnostic, default OFF), added beside
+NDCYDRAW in BOTH trees with identical name and format so the logs join on vertex
+shader hash. Dumps c0-c7 as decimal and raw bits.
+
+* **Canary AE: captured, 37 shaders** ->
+  `scratchpad/vsconst_ae.txt`.
+* **XDtester: NOT captured.** Two problems to fix first:
+  1. `./gradlew :app:assembleDebug` reported success in 36s **without
+     recompiling native code** - `emulator-core/build/.../libe.so` was days old.
+     `:emulator-core:externalNativeBuildDebug` put VSCONST into
+     `app/build/intermediates/stripped_native_libs/...`, but the **installed
+     APK still has 0 VSCONST**, so packaging did not pick it up. Verify with
+     `unzip -p <installed base.apk> lib/arm64-v8a/libe.so | strings | grep -c VSCONST`
+     before trusting any run.
+  2. That run also logged **0 NDCYDRAW** in 9661 lines - the game never reached
+     the menu, so the library tap missed (same "first tap only selects" trap as
+     Canary AE, s15.5).
+
+**To finish (~15 min):** force a clean XDtester native build, confirm VSCONST in
+the *installed* APK, launch and confirm the vista is on screen, then
+`join` the two files on `vs=` and look for a sign difference in c0-c7 - most
+likely in the Y row of the view-projection matrix.
+
+If the constants are identical too, the guest maths is exonerated and the
+divergence is the guest-written register state already on record (XenDroid's
+guest writes PA_SC_WINDOW_SCISSOR_BR=512 and resolve vertices of 512; AE's
+writes 336-384, non-deterministically) - which would point at CPU/JIT or kernel,
+not the GPU backend at all.
+
+## 21. THE ORDERING HYPOTHESIS — 336 vs 512 cannot come from identical code
+
+User insight, and it reframes the strongest anomaly on record:
+
+> "Something is not identical. We have 336 and they have 512. That doesn't
+> happen with identical code... For example they generate it 4 in while we do
+> 25 in. Canary AE gives us that value at a later point."
+
+### 21.1 Why this is likely right
+
+Two facts that have been on record separately and were never combined:
+
+1. **XenDroid is STABLE at 512** - `win_br=(512,512)`, resolve vertices 512.
+2. **Canary AE is NON-DETERMINISTIC** - 336, 368, 384 across runs of the same
+   frame of the same game (s14.1, and the "values are non-deterministic" note
+   that killed the `license_mask` theory).
+
+A pure maths difference is deterministic. **Non-determinism against a stable
+reference is the signature of a timing/ordering difference, not a calculation
+difference.** Combined with the fact that the resolve vertices are read from
+GUEST MEMORY written by the guest CPU (s14.1), the chain is:
+
+  guest CPU computes a value -> writes registers/memory -> we sample it
+
+and we may be sampling at a **different point in that sequence** than XenDroid -
+reading state before the guest has finished producing it, or letting a draw
+consume a stale register.
+
+This also finally explains something never accounted for: why the numbers cluster
+just BELOW 512 (336/368/384 = 42/46/48 x 8). That looks like a value caught
+mid-convergence, not a wrong formula.
+
+### 21.2 The test (designed, NOT yet run)
+
+A sequence-numbered write trace, in **both** builds, identical format:
+
+* hook the guest register write path (`CommandProcessor::WriteRegister` /
+  `LogRegisterSet` - note the existing
+  `log_guest_driven_gpu_register_written_values` cvar is compiled out behind
+  `XE_ENABLE_GPU_REG_WRITE_LOGGING` and is far too noisy anyway);
+* filter to `PA_SC_WINDOW_SCISSOR_BR` (and `RB_SURFACE_INFO.surface_pitch`);
+* log `seq` (a global monotonic counter), the value, and the current
+  swap/frame index.
+
+Then answer, per build:
+* **Does AE ever write 512 at all?** If yes but LATER than the resolve consumes
+  it, the bug is ordering and the fix is where we sample, not what we compute.
+* **At what sequence position does each build first see 512?** The user's
+  "4 in vs 25 in" - if XenDroid reaches it early and we reach it late (or after
+  the draw), that is the crumb.
+
+### 21.3 Why this outranks everything still open
+
+It is the only hypothesis that explains **non-determinism**, which no
+calculation-based theory does - and every calculation-based theory tried so far
+(46-vs-64, aligned pitch/height, ROV, in-pass resolve, gamma, NDC-Y) has been
+eliminated by measurement.
+
+⚠️ Do not spend more time diffing GPU backend source. Sections 14-20 have
+established, by measurement rather than reading, that the GPU-side maths is
+identical. The remaining difference is in WHEN state is produced and consumed.
+
+## 22. MEASURED: the 512 path is non-deterministic IN THE GUEST
+
+Built `debug.canary.regtrace` (diagnostic, default OFF), two probes sharing one
+global monotonic guest-register-write counter (`g_ae_reg_write_seq`, defined in
+`command_processor.cc`):
+
+* **REGTRACE** in `CommandProcessor::WriteRegister` - every guest write to
+  `PA_SC_WINDOW_SCISSOR_TL/BR` and `RB_SURFACE_INFO`, with `seq`. All bulk write
+  paths (`WriteRegistersFromMem`, `WriteRegisterRangeFromRing`) funnel through
+  `WriteRegister`, so nothing is missed.
+* **RESOLVESEQ** in `GetResolveInfo` - the `seq` at the moment the resolve reads
+  its rectangle out of guest memory (vf0), plus the raw vertices and dest.
+
+### 22.1 Canary AE DOES produce 512 — the register path is not the difference
+
+Run 1, at the menu: **682 writes of `SCISSOR_BR raw=0x02000200 x=512 y=512`**,
+one per frame (seq gaps ~62,383). So the 512 exists in our guest too. The
+scissor register was never the divergence.
+
+### 22.2 ...but not every run — same game, same screen, ZERO 512s
+
+Run 2, identical build, identical menu, vista confirmed on screen and still
+inverted (`scratchpad/seqrun.png`), 160,317 REGTRACE lines captured:
+
+| value | run 1 | run 2 |
+|---|---|---|
+| `x=512 y=512` | **682** | **0** |
+| `x=1152 y=640` | 24,176 | 46,218 |
+| `x=1152 y=160` | 6,872 | 16,243 |
+
+**The guest either takes the 512 path or does not, run to run.** This is the
+non-determinism finally caught in the act, and it is in **guest behaviour**, not
+in our GPU code - our GPU code cannot make the guest stop issuing a register
+write.
+
+### 22.3 What this means
+
+A GPU-backend bug cannot explain a guest that behaves differently on identical
+input. The divergence is upstream of the GPU entirely: **CPU/JIT execution,
+thread timing, or kernel state**. That is consistent with everything sections
+14-21 eliminated by measurement on the GPU side, and it explains why two days of
+GPU work produced only unrelated regressions.
+
+It also fits the shape of the numbers: 336/368/384 clustering just below 512
+looks like a quantity the guest is still converging on when we sample it.
+
+### 22.4 Read points captured so far
+
+Canary AE main-scene resolve reads vf0 at seq 3421, 6719, 9976, 12590, 15204,
+17818, 20432, 23046 - a steady ~2,600-3,300 register writes apart, one per
+frame, and `vfaddr` advances every frame (0x0510C23C, 0x0512841C, ...), so the
+guest allocates a fresh vertex buffer each time. No staleness on that path.
+
+**Still needed:** the same REGTRACE/RESOLVESEQ pair in XDtester, to answer
+"when does XenDroid read them" against the same timeline. The probes are written
+to be copy-pasted; note the XDtester build traps in s20 (native code silently
+not rebuilt, and the library tap needing two presses).
+
+**Next, and it is no longer a GPU question:** find what makes the guest take the
+512 path in one run and not the next. Prime suspects are the vblank/timing path
+and thread scheduling - the same class of defect as the thread-start lost-wakeup
+race that was already found and fixed in this project.
+
+## 23. Guest constants compared — NOT mirrored. And the "upside down" premise is in doubt.
+
+### 23.1 VSCONST captured in BOTH builds
+
+Finished the symmetric guest-constant comparison (s20). Two blockers fixed:
+
+* **A real bug in XDtester's `xdt_debug.h`.** `DiagEnabled` used a single
+  `static thread_local CachedProp cache;` with a comment claiming "one cache
+  slot per call site". A function-local static is ONE object shared by every
+  call site, so NDCYDRAW and VSCONST clobbered each other's cached property and
+  whichever ran first in a 500 ms window decided the answer for both - which is
+  why enabling `debug.canary.vsconst` produced zero output from either. Now
+  keyed by the `prop_name` pointer (safe: every call site passes a distinct
+  literal). **Fixed in XDtester.**
+* The installed-APK check must use the real path
+  (`find /data/app -name base.apk -path "*xdtester*"`); a glob inside
+  `adb shell` silently fails and reports 0.
+
+Captured: **Canary AE 37 shaders, XDtester 44**, 37 in common.
+
+### 23.2 Result: the guest is NOT producing a mirrored transform
+
+* **29 of 37 shared shaders have BYTE-IDENTICAL c0-c7.**
+* The 8 that differ are all animated camera matrices - magnitudes match closely,
+  signs differ as the camera moves.
+* **Determinant of the view basis (c4,c5,c6) is +1.0000 in BOTH builds for all
+  36 measurable shaders.** A reflection would be -1. There is none.
+* The up-axis dominant component is POSITIVE in both, so the camera is not
+  rolled 180 degrees either (which would be a proper rotation and could
+  otherwise have hidden here).
+
+**The guest's matrices are fine.** Combined with s14-s22, that eliminates the
+transform as the cause at every stage: GPU-side maths, NDC, and now the guest's
+own constants.
+
+### 23.3 ⚠️ The premise itself now looks wrong
+
+If nothing anywhere applies a mirror, the image should not be mirrored - so the
+"upside down" description was tested directly:
+
+* **Vertical luminance profile, same region, both builds:**
+  AE `83 78 69 73 79 104 133 145` (rising),
+  XDtester `105 100 93 85 95 112 124 109` (rising).
+  **Both get brighter downward.** A vertical mirror would inverse that.
+* **Correlation of the vista region:** AE vs XDtester as-is **+0.131**;
+  AE flipped vertically vs XDtester **-0.194**. Flipping makes it *worse*, not
+  better. (Both are weak because the menu camera animates, so this is
+  suggestive rather than conclusive.)
+
+**Working conclusion: this is probably not a vertical mirror at all.** More
+likely the wrong REGION of the surface is being displayed - which fits the
+otherwise-unexplained s16.6 finding that the vista's scene occupies only the
+**top ~213 of 568 rows** of its render target. Sampling or compositing the wrong
+crop of a larger surface can read as "upside down" at a glance while leaving
+every transform in the pipeline provably correct.
+
+**Next:** stop treating this as an orientation bug. Determine which region of
+which surface the composite samples, in both builds - the same measure-don't-
+diff approach that produced s15 and s22.

@@ -1,0 +1,5 @@
+// DIAG(gpu/resolve): row-marker variant of resolve_full_32bpp.
+// Compiled alongside the real shader and selected at runtime by
+// debug.canary.resolve_row_marker. Default OFF - the stock shader is used.
+#define XE_RESOLVE_ROW_MARKER
+#include "resolve_full_32bpp.xesli"

@@ -46,6 +46,29 @@ xesl_entry_inputs_end_code_begin_compute
       XeResolveColorCopySourcePixelAddressIntsYHalfPixelOffsetFilling(
           resolve_info, pixel_index),
       pixel_0, pixel_1, pixel_2, pixel_3);
+  #ifdef XE_RESOLVE_ROW_MARKER
+    // DIAG(gpu/resolve): row-index marker for the Halo 3 upside-down vista.
+    //
+    // The resolve is orientation-preserving by construction - the EDRAM source
+    // and the destination are both indexed by the same pixel_index - so no flip
+    // can ORIGINATE here. That makes this the ideal place to inject a KNOWN
+    // orientation and find out where one is introduced downstream.
+    //
+    // Replaces the resolved colour with a vertical ramp keyed on the
+    // destination row: green at row 0, red at row 512. On screen,
+    //   green at the TOP    -> everything downstream preserves orientation,
+    //                          so the flip is UPSTREAM (host RT -> EDRAM dump);
+    //   green at the BOTTOM -> the flip is DOWNSTREAM (texture load / tiling).
+    // Either answer localises it in one run, which repeated source diffing has
+    // failed to do.
+    xesl_float4 xe_row_marker = xesl_float4(
+        float(pixel_index.y) * (1.0f / 512.0f),
+        1.0f - float(pixel_index.y) * (1.0f / 512.0f), 0.0f, 1.0f);
+    pixel_0 = xe_row_marker;
+    pixel_1 = xe_row_marker;
+    pixel_2 = xe_row_marker;
+    pixel_3 = xe_row_marker;
+  #endif  // XE_RESOLVE_ROW_MARKER
   xesl_uint4 packed = XePack32bpp4Pixels(pixel_0, pixel_1, pixel_2, pixel_3,
                                          resolve_info.dest_format);
   xesl_dont_flatten

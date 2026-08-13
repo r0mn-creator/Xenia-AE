@@ -29,6 +29,9 @@ DEFINE_bool(
 
 namespace xe {
 namespace gpu {
+
+// DIAG(gpu/regtrace): guest register-write sequence counter (command_processor.cc).
+extern std::atomic<uint64_t> g_ae_reg_write_seq;
 namespace draw_util {
 
 bool IsRasterizationPotentiallyDone(const RegisterFile& regs,
@@ -826,6 +829,27 @@ static inline void GetScissorTmpl(const RegisterFile& XE_RESTRICT regs,
   scissor_out.extent[0] = uint32_t(br_x - tl_x);
   scissor_out.extent[1] = uint32_t(br_y - tl_y);
 #endif
+  // EXPERIMENT (Halo 3 vista): force the shadow-cascade scissor to 512.
+  //
+  // XDtester shows the GUEST writes PA_SC_WINDOW_SCISSOR_BR=(512,512) under
+  // XenDroid, while under ours it writes ~336-384 (non-deterministic, decaying)
+  // - adaptive shadow quality reacting to our lower frame rate. This forces the
+  // square shadow-range scissor up to 512 to test empirically whether cascade
+  // size has ANY bearing on the vista inversion.
+  //
+  // NOT A FIX - it overrides guest intent. Toggle: debug.canary.force_shadow_512
+  // (experiment, default OFF). See docs/HALO3_VISTA_46_VS_64.md section 13.
+  if (XE_AE_EXPERIMENT_ENABLED("debug.canary.force_shadow_512")) {
+    uint32_t ex = scissor_out.extent[0], ey = scissor_out.extent[1];
+    if (ex == ey && ex >= 200 && ex < 512) {
+      scissor_out.extent[0] = 512;
+      scissor_out.extent[1] = 512;
+      if (XE_AE_DIAG_ENABLED("debug.canary.scissorlog")) {
+        XELOGI("FORCE512 raised shadow scissor {}x{} -> 512x512", ex, ey);
+      }
+    }
+  }
+
 }
 
 void GetScissor(const RegisterFile& XE_RESTRICT regs,
@@ -1116,6 +1140,43 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
     vertices_fixed[i] = ui::FloatToD3D11Fixed16p8(
         xenos::GpuSwap(vertices_guest[i], fetch.endian) + half_pixel_offset);
   }
+  // DIAG(gpu/regtrace): where in the guest write SEQUENCE is this resolve?
+  //
+  // REGTRACE proved Canary AE's guest DOES write a 512x512 scissor (682 times,
+  // once per frame) - so the 512 is produced here too, and the register path is
+  // not the difference. The resolve RECTANGLE, however, comes from guest MEMORY
+  // (vf0, written by the guest CPU) and comes out 384 where XenDroid gets 512.
+  //
+  // Registers travel the ordered ring buffer; the vertex data does not. So if
+  // we sample that memory at a different point in the guest's produce/consume
+  // sequence, we read a value that is stale or half-updated - which is exactly
+  // what a non-deterministic 336/368/384 against a stable 512 looks like.
+  //
+  // Logging the global register-write sequence number here places the resolve
+  // on the same timeline as the REGTRACE lines, so "do we consume before the
+  // guest finishes producing?" becomes a numeric comparison rather than a
+  // theory. See docs/HALO3_VISTA_46_VS_64.md section 21.
+  if (XE_AE_DIAG_ENABLED("debug.canary.regtrace")) {
+    static std::atomic<uint32_t> n{0};
+    // Filter to the vista's own resolve destination - the 46-vs-64 one. The
+    // main scene resolve (1152x640 -> 0x04E20000) fires far more often and
+    // would fill any cap before the interesting one appears.
+    const uint32_t probe_dest = regs[XE_GPU_REG_RB_COPY_DEST_BASE];
+    if (probe_dest == 0x04D20000u && n.fetch_add(1) < 40) {
+      XELOGI(
+          "RESOLVESEQ seq={} vfaddr=0x{:08X} v=({:.1f},{:.1f}) ({:.1f},{:.1f}) "
+          "({:.1f},{:.1f}) destbase=0x{:08X}",
+          g_ae_reg_write_seq.load(std::memory_order_relaxed),
+          fetch.address * uint32_t(sizeof(uint32_t)),
+          xenos::GpuSwap(vertices_guest[0], fetch.endian),
+          xenos::GpuSwap(vertices_guest[1], fetch.endian),
+          xenos::GpuSwap(vertices_guest[2], fetch.endian),
+          xenos::GpuSwap(vertices_guest[3], fetch.endian),
+          xenos::GpuSwap(vertices_guest[4], fetch.endian),
+          xenos::GpuSwap(vertices_guest[5], fetch.endian),
+          probe_dest);
+    }
+  }
   // Inclusive.
   int32_t x0 = std::min(std::min(vertices_fixed[0], vertices_fixed[2]),
                         vertices_fixed[4]);
@@ -1350,16 +1411,45 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
        (xenos::kTextureTileWidthHeight - 1)) >>
       xenos::kTextureTileWidthHeightLog2;
 
-  // XenDroid passes the ALIGNED destination pitch to the tiled-offset helpers;
-  // we passed the RAW register value. That pitch is what the tiling math uses
-  // to derive each row's address, so a mismatch places rows at wrong offsets in
-  // the destination surface. Toggle: debug.canary.resolve_aligned_pitch
-  // (experiment, default OFF). See docs/HALO3_VISTA_UPSIDE_DOWN.md.
+  // MAP(gpu/resolve): destination storage dimensions for the tiled addressing.
+  //
+  // Upstream canary aligns BOTH the destination pitch and height to 32 blocks
+  // and passes the aligned values to every tiled-address helper. This fork
+  // passed the RAW register values instead, and never aligned the height at
+  // all. The tiling maths derives each row's address from the pitch and height
+  // it is given, so feeding raw values where the read side assumes aligned ones
+  // places rows at wrong offsets in the destination surface.
+  //
+  // Upstream's constant is texture_address::kStoragePitchHeightAlignmentBlocks,
+  // which is 1 << 5 == 32 - the same value as xenos::kTextureTileWidthHeight,
+  // so the upstream `texture_address` module is not needed to match its
+  // behaviour here.
+  //
+  // Replaces the earlier debug.canary.resolve_aligned_pitch experiment, which
+  // was only a third of this change (pitch only, 2D branch only, and against a
+  // different constant) and was therefore never a valid test of it.
+  //
+  // Evidence this matters, from docs/HALO3_VISTA_46_VS_64.md: the row-marker
+  // sawtooth has a period of exactly 32 destination rows (s15.4), the resolve
+  // writes 368/384 into a surface the read side binds as 512 (the 46-vs-64
+  // record), and the vista occupies only the top 213 of its 568-row render
+  // target (s16.6). All three are destination-addressing granularity symptoms.
+  //
+  // Experiment, default OFF: this is shared by every title, so it must be
+  // A/B-able in one flip and re-tested on NFS Carbon and Geometry Wars before
+  // it becomes the default.
+  const bool resolve_aligned_storage =
+      XE_AE_EXPERIMENT_ENABLED("debug.canary.resolve_aligned_storage");
   const uint32_t copy_dest_pitch_for_tiling =
-      XE_AE_EXPERIMENT_ENABLED("debug.canary.resolve_aligned_pitch")
+      resolve_aligned_storage
           ? (copy_dest_pitch_aligned_div_32
              << xenos::kTextureTileWidthHeightLog2)
           : uint32_t(rb_copy_dest_pitch.copy_dest_pitch);
+  const uint32_t copy_dest_height_for_tiling =
+      resolve_aligned_storage
+          ? (info_out.copy_dest_coordinate_info.height_aligned_div_32
+             << xenos::kTextureTileWidthHeightLog2)
+          : uint32_t(rb_copy_dest_pitch.copy_dest_height);
   const FormatInfo& dest_format_info = *FormatInfo::Get(dest_format);
   if (is_depth || dest_format_info.type == FormatType::kResolvable) {
     uint32_t bpp_log2 = xe::log2_floor(dest_format_info.bits_per_pixel >> 3);
@@ -1384,20 +1474,19 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
       // 3-bit).
       copy_dest_base_adjusted += texture_util::GetTiledOffset3D(
           int32_t(dest_base_x), int32_t(dest_base_y), 0,
-          rb_copy_dest_pitch.copy_dest_pitch,
-          rb_copy_dest_pitch.copy_dest_height, bpp_log2);
+          copy_dest_pitch_for_tiling, copy_dest_height_for_tiling, bpp_log2);
       copy_dest_extent_start =
           rb_copy_dest_base +
           texture_util::GetTiledAddressLowerBound3D(
               uint32_t(x0), uint32_t(y0), rb_copy_dest_info.copy_dest_slice,
-              rb_copy_dest_pitch.copy_dest_pitch,
-              rb_copy_dest_pitch.copy_dest_height, bpp_log2);
+              copy_dest_pitch_for_tiling, copy_dest_height_for_tiling,
+              bpp_log2);
       copy_dest_extent_end =
           rb_copy_dest_base +
           texture_util::GetTiledAddressUpperBound3D(
               uint32_t(x1), uint32_t(y1), rb_copy_dest_info.copy_dest_slice + 1,
-              rb_copy_dest_pitch.copy_dest_pitch,
-              rb_copy_dest_pitch.copy_dest_height, bpp_log2);
+              copy_dest_pitch_for_tiling, copy_dest_height_for_tiling,
+              bpp_log2);
     } else {
       copy_dest_base_adjusted += texture_util::GetTiledOffset2D(
           int32_t(dest_base_x), int32_t(dest_base_y),

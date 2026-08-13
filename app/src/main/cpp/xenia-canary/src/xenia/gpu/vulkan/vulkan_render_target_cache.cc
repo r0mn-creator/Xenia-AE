@@ -15,6 +15,9 @@
 
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/ae_fix_toggle.h"  // TESTRIG(regression-bisect)
+// DIAG(gpu/rt-orientation): debug.canary.vista_rt_base selects the captured RT.
+#include <cstdlib>
+#include <sys/system_properties.h>
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -78,6 +81,9 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_16bpp_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_16bpp_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_32bpp_cs.h"
+// DIAG(gpu/resolve): row-marker variants, selected by debug.canary.resolve_row_marker.
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_32bpp_marker_cs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_fast_32bpp_1x2xmsaa_marker_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_32bpp_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_64bpp_cs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/resolve_full_64bpp_scaled_cs.h"
@@ -496,12 +502,48 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
                 resolve_copy_shader_code.unscaled_size_bytes &&
                 resolve_copy_shader_code.scaled &&
                 resolve_copy_shader_code.scaled_size_bytes);
-    VkPipeline resolve_copy_pipeline = ui::vulkan::util::CreateComputePipeline(
-        vulkan_device, resolve_copy_pipeline_layout_,
+    const uint32_t* resolve_copy_code =
         draw_resolution_scaled ? resolve_copy_shader_code.scaled
-                               : resolve_copy_shader_code.unscaled,
+                               : resolve_copy_shader_code.unscaled;
+    size_t resolve_copy_code_size =
         draw_resolution_scaled ? resolve_copy_shader_code.scaled_size_bytes
-                               : resolve_copy_shader_code.unscaled_size_bytes);
+                               : resolve_copy_shader_code.unscaled_size_bytes;
+    // DIAG(gpu/resolve): substitute the row-marker resolve shaders.
+    //
+    // Halo 3's menu vista renders vertically mirrored while the 2D UI over it
+    // does not. The viewport maths, NDC scale/offset, translated SPIR-V,
+    // tessellation winding and the fullscreen-pass Y direction have all been
+    // diffed against XenDroid (which renders it correctly on this same device
+    // and driver) and are identical, so source comparison has run out of road -
+    // see docs/HALO3_VISTA_46_VS_64.md section 14.
+    //
+    // These variants discard the resolved colour and write a vertical ramp
+    // keyed on the DESTINATION ROW instead, injecting a known orientation at a
+    // stage that is provably orientation-preserving (the EDRAM source and the
+    // destination are indexed by the same pixel_index). Reading the ramp's
+    // direction off the screen says which side of the resolve the flip is on.
+    //
+    // Only the two 32bpp colour paths are covered - between them they carry the
+    // vista, and which one is in play is itself part of what this reveals.
+    //
+    // Diagnostic only, default OFF, and NOT applied when resolution scaling is
+    // active (no scaled variants are compiled).
+    if (!draw_resolution_scaled &&
+        XE_AE_EXPERIMENT_ENABLED("debug.canary.resolve_row_marker")) {
+      if (i == size_t(draw_util::ResolveCopyShaderIndex::kFast32bpp1x2xMSAA)) {
+        resolve_copy_code = shaders::resolve_fast_32bpp_1x2xmsaa_marker_cs;
+        resolve_copy_code_size =
+            sizeof(shaders::resolve_fast_32bpp_1x2xmsaa_marker_cs);
+        XELOGI("ROWMARKER using marker shader for fast_32bpp_1x2xmsaa");
+      } else if (i == size_t(draw_util::ResolveCopyShaderIndex::kFull32bpp)) {
+        resolve_copy_code = shaders::resolve_full_32bpp_marker_cs;
+        resolve_copy_code_size = sizeof(shaders::resolve_full_32bpp_marker_cs);
+        XELOGI("ROWMARKER using marker shader for full_32bpp");
+      }
+    }
+    VkPipeline resolve_copy_pipeline = ui::vulkan::util::CreateComputePipeline(
+        vulkan_device, resolve_copy_pipeline_layout_, resolve_copy_code,
+        resolve_copy_code_size);
     if (resolve_copy_pipeline == VK_NULL_HANDLE) {
       XELOGE(
           "VulkanRenderTargetCache: Failed to create the resolve copy "
@@ -519,6 +561,27 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
 
   if (path_ == Path::kHostRenderTargets) {
     // Host render targets.
+
+    // 8_8_8_8_GAMMA render targets: honour the cvar on this path.
+    //
+    // The sRGB gamma path is fully implemented below (format selection in
+    // GetColorVulkanFormat, plus the transfer and framebuffer handling), but
+    // `gamma_render_target_as_srgb_` was only ever assigned `false` in the
+    // fragment-shader-interlock branch and never assigned at all here - so on
+    // kHostRenderTargets, which is the path this backend actually takes
+    // (render_target_path_vulkan defaults to host render targets), the member
+    // was permanently false and `cvars::gamma_render_target_as_srgb` was wired
+    // to nothing. Enabling the cvar could not have any effect.
+    //
+    // Piecewise linear gamma is not sRGB, so this is an approximation and stays
+    // opt-in (the cvar defaults to false); it trades a slightly different
+    // precision distribution for conceptually correct linear-space blending.
+    // Upstream's alternative, `gamma_render_target_as_unorm16`, is hardcoded
+    // false in its Vulkan backend behind a TODO ("when color space conversion
+    // is implemented in the ownership transfer and resolve dump shaders"), so
+    // porting it is a larger job than restoring this one assignment.
+    // See docs/HALO3_VISTA_46_VS_64.md section 18.
+    gamma_render_target_as_srgb_ = cvars::gamma_render_target_as_srgb;
 
     depth_float24_round_ = cvars::depth_float24_round;
 
@@ -6340,11 +6403,52 @@ void VulkanRenderTargetCache::TestrigCaptureVistaRtPostTransfer() {
     }
     auto* vrt = static_cast<VulkanRenderTarget*>(rts[i]);
     RenderTargetKey k = vrt->key();
-    // The vista's G-buffer color RT: tile 1216, 4x MSAA. Only capture on the
-    // draw where a transfer (the repaint) actually happened for it - otherwise
-    // we'd be sampling accumulated geometry, not the post-repaint state.
-    if (k.is_depth || k.base_tiles != 1216u ||
-        k.msaa_samples == xenos::MsaaSamples::k1X || transfers[i].empty()) {
+    if (k.is_depth || transfers[i].empty()) {
+      continue;
+    }
+    // DIAG(gpu/rt-orientation): enumerate every colour render target that gets
+    // a transfer, so the one actually holding the vista can be identified
+    // rather than assumed.
+    //
+    // This probe was originally hardcoded to base_tiles == 1216 because an
+    // earlier session believed that was the vista's G-buffer. The row profile
+    // proves it is not usable for orientation: RT 1216 comes back essentially
+    // black (band means "1 1 1 1 1 0 0 0"), matching the note in
+    // docs/HALO3_FINDINGS_CHECKLIST.md that it is a uniform near-black
+    // feedback-decay target. Assuming the target instead of measuring it cost a
+    // whole run, so the target is now selectable and every candidate is logged.
+    {
+      static std::atomic<uint32_t> seen_bases[16];
+      bool already_seen = false;
+      for (auto& slot : seen_bases) {
+        uint32_t v = slot.load(std::memory_order_relaxed);
+        if (v == k.base_tiles + 1u) {
+          already_seen = true;
+          break;
+        }
+        if (!v && slot.compare_exchange_strong(v, k.base_tiles + 1u)) {
+          break;
+        }
+      }
+      if (!already_seen) {
+        XELOGI(
+            "VISTA_RTCAND base_tiles={} fmt={} msaa={} pitch_tiles={} slot={}",
+            k.base_tiles, k.resource_format, uint32_t(k.msaa_samples),
+            k.pitch_tiles_at_32bpp, i);
+      }
+    }
+    // Which render target to capture. Default keeps the historical 1216 so the
+    // probe behaves as before unless deliberately pointed elsewhere.
+    uint32_t target_base = 1216u;
+    {
+      char buf[PROP_VALUE_MAX] = {};
+      if (__system_property_get("debug.canary.vista_rt_base", buf) > 0 &&
+          buf[0]) {
+        target_base = uint32_t(strtoul(buf, nullptr, 10));
+      }
+    }
+    if (k.base_tiles != target_base ||
+        k.msaa_samples == xenos::MsaaSamples::k1X) {
       continue;
     }
     static int cap_n = 0;

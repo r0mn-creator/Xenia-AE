@@ -725,7 +725,42 @@ void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index,
     }
   }
 }
+// DIAG(gpu/regtrace): global monotonic counter for guest register writes, so a
+// value can be located in the SEQUENCE and not just read.
+std::atomic<uint64_t> g_ae_reg_write_seq{0};
+
 void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  // DIAG(gpu/regtrace): sequence-numbered trace of the registers carrying the
+  // vista's size. See docs/HALO3_VISTA_46_VS_64.md section 21.
+  //
+  // Why sequence and not just value: XenDroid is STABLE at 512 while Canary AE
+  // is NON-DETERMINISTIC across runs of the same frame (336 / 368 / 384 =
+  // 42/46/48 x 8). A wrong formula is deterministic; non-determinism against a
+  // stable reference is the signature of a TIMING/ORDERING difference. The
+  // resolve rectangle is read from guest memory written by the guest CPU, so
+  // the chain is  guest computes -> writes registers/memory -> we sample it,
+  // and we may be sampling at a different point in that chain. Values
+  // clustering just BELOW 512 look like a quantity caught mid-convergence
+  // rather than a different calculation.
+  //
+  // Answers directly: does AE ever write 512 at all, and at what sequence
+  // position relative to the draw/resolve that consumes it?
+  {
+    uint64_t seq = g_ae_reg_write_seq.fetch_add(1, std::memory_order_relaxed);
+    if (XE_AE_DIAG_ENABLED("debug.canary.regtrace") &&
+        (index == XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR ||
+         index == XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL ||
+         index == XE_GPU_REG_RB_SURFACE_INFO)) {
+      const char* name = index == XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR
+                             ? "SCISSOR_BR"
+                             : (index == XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL
+                                    ? "SCISSOR_TL"
+                                    : "SURFACE_INFO");
+      XELOGI("REGTRACE seq={} {} raw=0x{:08X} x={} y={}", seq, name, value,
+             value & 0x7FFFu, (value >> 16) & 0x7FFFu);
+    }
+  }
+
   // CWRITE probe (2026-08-06): count writes landing in the bone-matrix
   // constant range. BONEC showed the REGISTER FILE holds only ~11 distinct
   // bone-matrix sets on Adreno vs 165 on RADV at matched sample count - so

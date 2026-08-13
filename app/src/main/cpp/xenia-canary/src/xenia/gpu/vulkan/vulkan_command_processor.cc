@@ -2783,6 +2783,57 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
+  // DIAG(gpu/guest-constants): dump the guest-computed vertex shader constants,
+  // once per distinct vertex shader.
+  //
+  // Rationale (docs/HALO3_VISTA_46_VS_64.md s20): the GPU renders what it is
+  // given. The NDC transform, translated SPIR-V, viewport maths, resolve, dump
+  // and transfer paths have now all been measured or diffed IDENTICAL to
+  // XenDroid, which renders the vista correctly on this same device. What has
+  // never been compared is the DATA - the view/projection matrix the guest
+  // computes on the PowerPC side and uploads as float constants. A sign error
+  // in the guest's own matrix inverts the scene while leaving every GPU-side
+  // check identical, and it would not touch the 2D UI, which is pre-transformed
+  // and never passes through a guest matrix.
+  //
+  // Keyed on the vertex shader hash so the two builds' logs join on shader
+  // identity, exactly like NDCYDRAW. c0-c7 covers the usual view-projection
+  // matrix slots; raw bits as well as decimal, because a sign flip or a
+  // denormal is clearer in hex.
+  //
+  // Property name and output format must stay IDENTICAL in XDtester or the logs
+  // will not diff.
+  if (XE_AE_DIAG_ENABLED("debug.canary.vsconst")) {
+    static std::atomic<uint64_t> vsconst_keys[64];
+    uint64_t vs_hash =
+        vertex_shader ? vertex_shader->ucode_data_hash() : uint64_t(0);
+    uint64_t key = vs_hash ? vs_hash : 1;
+    bool seen = false;
+    for (auto& slot : vsconst_keys) {
+      uint64_t v = slot.load(std::memory_order_relaxed);
+      if (v == key) {
+        seen = true;
+        break;
+      }
+      if (!v && slot.compare_exchange_strong(v, key)) break;
+    }
+    if (!seen) {
+      const uint32_t* creg = register_file_->values;
+      xe::StringBuffer vb;
+      vb.AppendFormat("VSCONST vs={:016X} ey={}", vs_hash,
+                      viewport_info.xy_extent[1]);
+      for (uint32_t c = 0; c <= 7; ++c) {
+        const uint32_t* cu =
+            &creg[XE_GPU_REG_SHADER_CONSTANT_000_X + (c << 2)];
+        const float* cf = reinterpret_cast<const float*>(cu);
+        vb.AppendFormat(
+            " c{}=({:.6g},{:.6g},{:.6g},{:.6g})[{:08X},{:08X},{:08X},{:08X}]",
+            c, cf[0], cf[1], cf[2], cf[3], cu[0], cu[1], cu[2], cu[3]);
+      }
+      XELOGI("{}", vb.buffer());
+    }
+  }
+
   // Update dynamic graphics pipeline state.
   UpdateDynamicState(viewport_info, primitive_polygonal,
                      normalized_depth_control, draw_resolution_scale_x,
@@ -4196,11 +4247,33 @@ void VulkanCommandProcessor::TestrigCaptureImageDeferred(
                          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                          current_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
   SubmitBarriers(true);
+  // DIAG(gpu/rt-orientation): capture a full-height COLUMN, not a corner crop.
+  //
+  // The 256x256 crop above only ever sees the top-left corner of a render
+  // target that is far larger, so it cannot show a whole-image vertical
+  // gradient - the first attempt came back flat with trailing zeros where the
+  // crop overran the content. A narrow full-height strip through the middle of
+  // the image gives the vertical luminance profile that actually answers
+  // whether the render target is mirrored, and 4 x height x 4 bytes fits the
+  // existing 256*256*4 buffer for any realistic render target height.
+  // Column mode is for luminance profiling; the 2D crop is for LOOKING at the
+  // image. Default to the 2D crop now that the raw dump exists - the vista's
+  // content sits in the top ~213 rows, so a 256x256 top-left crop contains all
+  // of it vertically. debug.canary.rtcap_column re-enables the strip.
+  const bool column_mode = XE_AE_DIAG_ENABLED("debug.canary.rtcap_column") &&
+                           height > 256u && (4u * height) <= (256u * 256u);
+  if (column_mode) {
+    w = 4u;
+    h = height;
+  }
   VkBufferImageCopy region = {};
   region.bufferRowLength = w;
   region.bufferImageHeight = h;
   region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   region.imageSubresource.layerCount = 1;
+  if (column_mode) {
+    region.imageOffset.x = int32_t(width / 2u);
+  }
   region.imageExtent.width = w;
   region.imageExtent.height = h;
   region.imageExtent.depth = 1;
@@ -4253,6 +4326,67 @@ void VulkanCommandProcessor::TestrigReadCapturedImage(const char* tag) {
         "smid=0x{:08X} slast=0x{:08X}",
         tag, g_halo3_cap_w, g_halo3_cap_h, nonzero, n, changes, p[0], p[n / 2],
         p[n - 1]);
+    // DIAG(gpu/rt-orientation): vertical luminance profile of the captured
+    // render target.
+    //
+    // docs/HALO3_VISTA_46_VS_64.md section 15 proved the mirroring is already
+    // present upstream of the resolve, and section 16 then showed every code
+    // path between the host RT and the resolve is identical to XenDroid's. The
+    // remaining question is whether the HOST RENDER TARGET ITSELF holds a
+    // mirrored image - and that is a measurement, not a diff.
+    //
+    // The vista is a sky-over-ground scene, so it has a strong monotonic
+    // vertical luminance gradient. Reporting mean luminance per row band makes
+    // the orientation readable directly:
+    //   bright bands FIRST (row 0 side)  -> sky at the top, RT is correct, and
+    //                                       the mirror is introduced later;
+    //   bright bands LAST                -> the host RT is already mirrored,
+    //                                       so the cause is in the guest draws
+    //                                       that produced it.
+    // Byte order does not matter here: every channel is summed, so the profile
+    // is a brightness curve regardless of the RT's component layout.
+    if (g_halo3_cap_h >= 8 && g_halo3_cap_w) {
+      constexpr uint32_t kBands = 16;
+      uint64_t band_sum[kBands] = {};
+      uint64_t band_px[kBands] = {};
+      for (uint32_t y = 0; y < g_halo3_cap_h; ++y) {
+        uint32_t band = y * kBands / g_halo3_cap_h;
+        if (band >= kBands) band = kBands - 1;
+        for (uint32_t x = 0; x < g_halo3_cap_w; ++x) {
+          uint32_t texel = p[y * g_halo3_cap_w + x];
+          band_sum[band] += (texel & 0xFFu) + ((texel >> 8) & 0xFFu) +
+                            ((texel >> 16) & 0xFFu);
+          ++band_px[band];
+        }
+      }
+      std::string profile;
+      for (uint32_t b = 0; b < kBands; ++b) {
+        profile += fmt::format(
+            "{} ", band_px[b] ? band_sum[b] / band_px[b] : uint64_t(0));
+      }
+      XELOGI("TESTRIG_ROWPROFILE {} h={} bands: {}", tag, g_halo3_cap_h,
+             profile);
+    }
+    // DIAG(gpu/rt-orientation): write the captured render target to a raw file
+    // so it can be LOOKED AT instead of inferred from statistics.
+    //
+    // The luminance-band profile was too coarse to settle orientation (s16.6).
+    // The user confirms the menu camera never rolls - sky is always up - so the
+    // image being mirrored is established; what is not established is WHERE it
+    // becomes mirrored. Seeing the host render target directly answers that
+    // outright: correct here means the flip is downstream (dump/resolve/texture
+    // load); mirrored here means it is in the draws that produced it.
+    {
+      FILE* f = fopen("/data/data/org.xeniaae.canary/cache/rtcap.raw", "wb");
+      if (f) {
+        fwrite(&g_halo3_cap_w, 4, 1, f);
+        fwrite(&g_halo3_cap_h, 4, 1, f);
+        fwrite(mapped, 1, bytes, f);
+        fclose(f);
+        XELOGI("TESTRIG_CAPIMG wrote rtcap.raw {}x{}", g_halo3_cap_w,
+               g_halo3_cap_h);
+      }
+    }
     dfn.vkUnmapMemory(device, g_halo3_cap_mem);
   }
 }

@@ -1,0 +1,4 @@
+// DIAG(gpu/resolve): row-marker variant of resolve_fast_32bpp_1x2xmsaa.
+// See resolve_full_32bpp_marker.cs.xesl.
+#define XE_RESOLVE_ROW_MARKER
+#include "resolve_fast_32bpp_1x2xmsaa.xesli"
