@@ -3277,6 +3277,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // calculate the range that includes the streams for the buffer barrier.
   uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+    // Ported from XenDroid: record the guest pages this memexport draw wrote,
+    // so a later fence/coherency request can drain only when the range it cares
+    // about actually holds export output.
+    MarkMemexportPagesWritten(memexport_range.base_address_dwords << 2,
+                              memexport_range.size_bytes);
     uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords
                                           << 2;
     // DEBUG(halo3-vtx): log memexport target addresses. If 0x0574CA80 (the

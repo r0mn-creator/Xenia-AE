@@ -199,6 +199,12 @@ class CommandProcessor {
   XE_NOINLINE
   void HandleSpecialRegisterWrite(uint32_t index, uint32_t value);
 
+  // Memexport await hooks - real implementations come from
+  // command_processor_memexport.inc, included into each backend's class body.
+  // No-ops here so backends that never reach guest RAM cost nothing.
+  void AwaitMemexportForFence() {}
+  void AwaitMemexportForCoherency(uint32_t base_bytes, uint32_t size_bytes) {}
+
   virtual void WriteRegister(uint32_t index, uint32_t value);
 
   // mem has big-endian register values

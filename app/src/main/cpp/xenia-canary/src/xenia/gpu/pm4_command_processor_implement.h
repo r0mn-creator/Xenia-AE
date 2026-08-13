@@ -635,6 +635,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_INTERRUPT(
   uint32_t cpu_mask = reader_.ReadAndSwap<uint32_t>();
   for (int n = 0; n < 6; n++) {
     if (cpu_mask & (1 << n)) {
+      COMMAND_PROCESSOR::AwaitMemexportForFence();
       graphics_system_->DispatchInterruptCallback(1, n);
     }
   }
@@ -725,6 +726,13 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
                              static_cast<xenos::Endian>(poll_reg_addr & 0x3));
     } else {
       if (poll_reg_addr == XE_GPU_REG_COHER_STATUS_HOST) {
+        // The guest is asking for a range to be made visible to it, so any
+        // memexport output landing there must have reached guest RAM first.
+        if (register_file_->values[XE_GPU_REG_COHER_STATUS_HOST]) {
+          COMMAND_PROCESSOR::AwaitMemexportForCoherency(
+              register_file_->values[XE_GPU_REG_COHER_BASE_HOST],
+              register_file_->values[XE_GPU_REG_COHER_SIZE_HOST]);
+        }
         MakeCoherent();
         value = value_ref;
       }
@@ -889,6 +897,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_SHD(
   uint32_t value = reader_.ReadAndSwap<uint32_t>();
   // Writeback initiator.
   COMMAND_PROCESSOR::WriteEventInitiator(initiator & 0x3F);
+  // The guest treats this fence as "the GPU is done", so export output it is
+  // about to read has to be in guest RAM first.
+  COMMAND_PROCESSOR::AwaitMemexportForFence();
   uint32_t data_value;
   if ((initiator >> 31) & 0x1) {
     // Write counter (GPU vblank counter?).

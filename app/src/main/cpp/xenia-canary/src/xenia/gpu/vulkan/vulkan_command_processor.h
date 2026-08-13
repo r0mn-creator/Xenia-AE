@@ -885,6 +885,10 @@ class VulkanCommandProcessor final : public CommandProcessor {
   VkBuffer memexport_readback_buffer_ = VK_NULL_HANDLE;
   VkDeviceMemory memexport_readback_buffer_memory_ = VK_NULL_HANDLE;
   uint32_t memexport_readback_buffer_size_ = 0;
+
+  // Ported from XenDroid: memexport page tracking + fence/coherency awaits.
+#include "../command_processor_memexport.inc"
+
 };
 
 }  // namespace vulkan
