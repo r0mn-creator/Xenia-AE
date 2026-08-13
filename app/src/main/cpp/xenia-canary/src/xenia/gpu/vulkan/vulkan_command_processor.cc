@@ -2360,6 +2360,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                        uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
+  // DIAG(gpu/drawentry): draws ENTERING IssueDraw, before any early-out.
+  // Paired with BONEDISTINCT (which sits later in the function) this separates
+  // "the guest issued fewer draws" from "we dropped them on the way".
+  if (XE_AE_DIAG_ENABLED("debug.canary.drawentry")) {
+    static std::atomic<uint32_t> entered{0};
+    uint32_t e = entered.fetch_add(1) + 1;
+    if ((e & 1023u) == 0) {
+      XELOGI("DRAWENTRY entered={} frame={}", e, frame_current_);
+    }
+  }
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -2482,6 +2492,31 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         primitive_processing_result.host_vertex_shader_type !=
             Shader::HostVertexShaderType::kPointListAsTriangleStrip &&
         !is_adaptive_triangle_tessellation) {
+      // DIAG(gpu/dropdraw): count the draws this fork silently discards.
+      //
+      // XenDroid accepts kVertex, kPointListAsTriangleStrip,
+      // kRectangleListAsTriangleStrip AND every domain type
+      // (Shader::IsHostVertexShaderTypeDomain); AE accepts only the first two
+      // plus adaptive-triangle tessellation and returns "handled" for the rest.
+      // Measured at the Halo 3 menu, AE issues ~175 draws/frame against
+      // XDtester's ~668 - so a large share of the scene may simply never be
+      // drawn, which would explain both the vista and the collapsed models.
+      if (XE_AE_DIAG_ENABLED("debug.canary.dropdraw")) {
+        static std::atomic<uint32_t> dropped[16];
+        static std::atomic<uint32_t> total{0};
+        uint32_t t = uint32_t(primitive_processing_result.host_vertex_shader_type);
+        if (t < 16) dropped[t].fetch_add(1);
+        uint32_t n = total.fetch_add(1) + 1;
+        if ((n & 1023u) == 0) {
+          xe::StringBuffer db;
+          db.AppendFormat("DROPDRAW total={} by_type:", n);
+          for (uint32_t i = 0; i < 16; ++i) {
+            uint32_t c = dropped[i].load();
+            if (c) db.AppendFormat(" t{}={}", i, c);
+          }
+          XELOGI("{}", db.buffer());
+        }
+      }
       return true;
     }
 
@@ -2803,6 +2838,49 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   //
   // Property name and output format must stay IDENTICAL in XDtester or the logs
   // will not diff.
+  // DIAG(gpu/bonedistinct): how many DISTINCT bone-matrix constant states do
+  // DRAWS actually observe?
+  //
+  // An earlier session recorded (see the CWRITE probe in command_processor.cc)
+  // that bone-matrix constant WRITES arrive in equal numbers on Adreno and RADV
+  // (434k vs 438k) yet draws observed only ~11 distinct states on Adreno versus
+  // ~165 on RADV. Writes arriving but draws not seeing them means writes and
+  // draws are not interleaving - the updates batch up and draws only ever
+  // observe the final state. Skinned geometry then renders every frame with one
+  // pose, which is exactly a collapsed "ball".
+  //
+  // This counts distinct states at DRAW time by hashing c144-c151, so the two
+  // builds can be compared directly. Same name and format in XDtester.
+  if (XE_AE_DIAG_ENABLED("debug.canary.bonedistinct")) {
+    const uint32_t* breg = register_file_->values;
+    uint64_t h = 1469598103934665603ull;
+    for (uint32_t c = 144; c <= 151; ++c) {
+      for (uint32_t k = 0; k < 4; ++k) {
+        h ^= breg[XE_GPU_REG_SHADER_CONSTANT_000_X + (c << 2) + k];
+        h *= 1099511628211ull;
+      }
+    }
+    static std::atomic<uint64_t> seen[512];
+    static std::atomic<uint32_t> distinct{0};
+    static std::atomic<uint32_t> draws{0};
+    bool found = false;
+    for (auto& slot : seen) {
+      uint64_t v = slot.load(std::memory_order_relaxed);
+      if (v == h) { found = true; break; }
+      if (!v && slot.compare_exchange_strong(v, h)) {
+        distinct.fetch_add(1);
+        found = true;
+        break;
+      }
+    }
+    (void)found;
+    uint32_t d = draws.fetch_add(1) + 1;
+    if ((d & 1023u) == 0) {
+      XELOGI("BONEDISTINCT draws={} distinct_bone_states={} frame={}", d,
+             distinct.load(), frame_current_);
+    }
+  }
+
   if (XE_AE_DIAG_ENABLED("debug.canary.vsconst")) {
     static std::atomic<uint64_t> vsconst_keys[64];
     uint64_t vs_hash =

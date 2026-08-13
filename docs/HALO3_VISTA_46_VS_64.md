@@ -1532,3 +1532,108 @@ the shared memory is host-mapped and resolution scaling is off, instead of the
 staging copy. AE already has the surrounding readback machinery, so this is a
 small addition on top of the section 25 mapping - not the hundreds of lines
 first estimated.
+
+## 26. ⭐ THE VISTA IS A CHEAP PROXY FOR THE BALL - use it
+
+User, and it changes how every future transplant should be tested:
+
+> "if the vista is upside down, there's a very good chance the character is a
+> ball."
+
+The two share a root cause. The vista renders at the **main menu**, ~45 seconds
+from launch, with no input needed beyond two taps. The ball needs held-A
+navigation through menus and a pre-rendered intro video, several minutes, and is
+easy to get wrong (see s24.2).
+
+**So: test the vista first. If it is still inverted, the transplant did not fix
+the ball either, and the expensive gameplay run can be skipped.** Only go
+in-game once a change actually straightens the vista.
+
+## 27. Transplant #3: UMA readback - IMAGE IMPROVED, ball unchanged
+
+`readback_resolve = "uma"` + `debug.canary.shared_memory_host_visible`
+(commits 9b43bb570, d92712f5f).
+
+**User verdict: "Still a ball but the image does look clearer."**
+
+So the UMA direct readback is a genuine image-quality win - real, keep it - but
+not the ball's cause. Reading resolve output straight from the host mapping with
+no staging copy visibly improves what reaches the screen.
+
+## 28. Transplant #4: memexport page tracking + fence/coherency awaits
+
+Commit f89c1a251. Ported `command_processor_memexport.inc` verbatim into
+`gpu/`, included into the Vulkan command processor's class body, with no-op
+defaults on the base class, plus `MarkMemexportPagesWritten` after each
+memexport range and the three pm4 hook points XenDroid uses:
+
+* before `DispatchInterruptCallback` (fence),
+* at the `COHER_STATUS_HOST` poll before `MakeCoherent` (coherency request),
+* after `WriteEventInitiator` in the fence writeback path.
+
+**Result: menu renders with no regression, vista STILL INVERTED.** By the
+section 26 heuristic the ball is unchanged, so the gameplay run was skipped.
+
+### 28.1 What remains untried from XenDroid
+
+* `vfetch` bounds/format handling differences (`spirv_shader_translator_fetch.cc`).
+* The **consumer-side routing** this page tracking was built to serve:
+  XenDroid uses `VertexFetchInMemexportRange` to route geometry draws that read
+  memexport output to the host-imported buffer. The tracking is now ported but
+  **nothing consumes it yet** - `VertexFetchInMemexportRange` has no call site in
+  AE. That is the natural next step and it is the half that actually changes
+  behaviour.
+
+## 29. ⭐ MEASURED: Canary AE's draws observe far fewer distinct bone poses
+
+`debug.canary.bonedistinct` (diagnostic, default OFF) - added to **both** builds
+with identical name and format. Hashes the bone-matrix constants (c144-c151) at
+DRAW time and counts distinct states, so write/draw interleaving is measurable
+rather than inferred.
+
+Same scene (Halo 3 main menu), same device, same driver:
+
+| | draws | distinct bone states |
+|---|---|---|
+| **Canary AE** | 163,840 | **142** |
+| **XDtester** | 971,776 | **>=512** (hit the probe's 512-slot cap) |
+
+**AE's count PLATEAUED at 142** - identical across three samples 1024 draws
+apart, so it is saturated, not still climbing. XDtester exceeded 512.
+
+This reproduces, against XenDroid rather than RADV, the pattern an earlier
+session recorded in the CWRITE probe comment: bone-matrix constant WRITES arrive
+in equal numbers (434k vs 438k) yet draws observe far fewer distinct states
+(~11 vs ~165 there). Writes arriving but draws not seeing them means **writes
+and draws are not interleaving** - updates batch up and draws only ever observe
+a small set of states.
+
+Skinned geometry drawn against a handful of poses instead of hundreds is exactly
+a collapsed "ball", and per section 26 it plausibly shares a cause with the
+inverted vista.
+
+**This is the most concrete ball-specific measurement in the investigation so
+far, and it points at the COMMAND PROCESSOR (write/draw ordering), not the
+GPU backend** - consistent with s22, where the guest itself was shown to behave
+non-deterministically run to run.
+
+### 29.1 Caveats before acting on it
+
+* XDtester also ran ~6x more draws in the same wall time (it is roughly twice
+  the frame rate), so the totals are not directly comparable; the meaningful
+  fact is that **AE saturates at 142 while XDtester does not saturate at all**.
+* The 512-slot table caps XDtester's true figure - raise it to get the real
+  number before quoting a ratio.
+
+### 29.2 Next
+
+Find why draws in AE observe so few distinct bone states. Candidates, in order:
+1. Constant updates batched between draws (command processor submits draws
+   without re-reading the register file, or coalesces them).
+2. The bone constants arriving via a path AE processes differently
+   (`WriteRegistersFromMem` / ring-buffer bulk writes).
+3. Draw submission deferring past the constant writes.
+
+The CWRITE probe in `command_processor.cc` already counts writes to the same
+register range; pair it with BONEDISTINCT in one run to see writes and observed
+states on the same timeline.
