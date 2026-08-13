@@ -8,6 +8,7 @@
  */
 
 #include "xenia/gpu/spirv_shader_translator.h"
+#include "xenia/base/ae_fix_toggle.h"
 
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
 #include "xenia/base/assert.h"
@@ -117,22 +118,28 @@ void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
 
   // Check if the address with the correct sign and exponent was written, and
   // that the index doesn't overflow the mantissa bits.
-  // all((eA_vector >> uvec4(30, 23, 23, 23)) == uvec4(0x1, 0x96, 0x96, 0x96))
+  // Ported from XenDroid: the Z lane takes ALL 12 bits of const_0x4b0 rather
+  // than only the top 9, so the constants this shader accepts match the ones
+  // draw_util::AddMemExportRanges derives its ranges from. With the old 9-bit
+  // check the shader could reject an export the CPU side had already allocated
+  // a range for, and the export was silently dropped - which is precisely the
+  // symptom the compute-path bypass below was added to work around.
+  // all((eA_vector >> uvec4(30, 23, 20, 23)) == uvec4(0x1, 0x96, 0x4B0, 0x96))
   spv::Id eA_vector = builder_->createUnaryOp(
       spv::OpBitcast, type_uint4_,
       builder_->createLoad(var_main_memexport_address_, spv::NoPrecision));
   id_vector_temp_.clear();
   id_vector_temp_.push_back(builder_->makeUintConstant(30));
   id_vector_temp_.push_back(builder_->makeUintConstant(23));
-  id_vector_temp_.push_back(id_vector_temp_.back());
-  id_vector_temp_.push_back(id_vector_temp_.back());
+  id_vector_temp_.push_back(builder_->makeUintConstant(20));
+  id_vector_temp_.push_back(builder_->makeUintConstant(23));
   spv::Id address_validation_shift =
       builder_->makeCompositeConstant(type_uint4_, id_vector_temp_);
   id_vector_temp_.clear();
   id_vector_temp_.push_back(builder_->makeUintConstant(0x1));
   id_vector_temp_.push_back(builder_->makeUintConstant(0x96));
-  id_vector_temp_.push_back(id_vector_temp_.back());
-  id_vector_temp_.push_back(id_vector_temp_.back());
+  id_vector_temp_.push_back(builder_->makeUintConstant(0x4B0));
+  id_vector_temp_.push_back(builder_->makeUintConstant(0x96));
   spv::Id address_validation_value =
       builder_->makeCompositeConstant(type_uint4_, id_vector_temp_);
   spv::Id address_valid_condition = builder_->createUnaryOp(
@@ -150,7 +157,12 @@ void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
   // the pre-marker at the same base did) - bypass it here to confirm the
   // validation is the sole remaining blocker, then investigate why the eA bits
   // differ in compute vs the graphics vertex path. Graphics path is unchanged.
-  if (IsSpirvComputeShader()) {
+  // The bypass is now OPT-IN. It existed because the old 9-bit Z check rejected
+  // valid compute-path exports; with the validation corrected above it should
+  // no longer be needed, and leaving it on would mask whether the fix works.
+  // debug.canary.memexport_bypass_validation restores it for A/B.
+  if (IsSpirvComputeShader() &&
+      XE_AE_EXPERIMENT_ENABLED("debug.canary.memexport_bypass_validation")) {
     address_valid_condition = builder_->makeBoolConstant(true);
   }
   SpirvBuilder::IfBuilder if_address_valid(
