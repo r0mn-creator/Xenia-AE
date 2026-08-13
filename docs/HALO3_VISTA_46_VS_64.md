@@ -1921,3 +1921,75 @@ Port the whole preemption subsystem first, in this order:
 
 Do NOT enable `park_memory_poll_loops` or `collapse_memory_delay_spins` before
 step 4 is done.
+
+## 35. ⭐⭐⭐ ROOT ARCHITECTURAL DIVERGENCE: cooperative fiber scheduler
+
+Tracing why s34's JIT passes wedged the guest led to the real difference.
+
+The park/collapse passes need a **preemption safepoint** to restart a parked
+loop. That safepoint (`OPCODE_CHECK_PREEMPT` -> `EmitPreemptCheck` -> tests
+`PPCContext::preempt_requested`) exists to serve something bigger: the flag is
+written by **`kernel/guest_scheduler.cc`**.
+
+| | Canary AE | XDtester |
+|---|---|---|
+| `guest_scheduler.{cc,h}` | **absent** | 1,626 + 360 lines |
+| `guest_scheduler` references | **0** | 61 |
+| `fiber` references (kernel) | 7 | 173 |
+| guest thread model | **1:1 host threads** (`xe::threading::Thread::Create`) | **cooperative fibers** |
+
+And it is ON by default in XenDroid's shipped config:
+```
+guest_scheduler = true            # Run guest threads as cooperative fibers driven by...
+guest_scheduler_quantum_us = 1000 # Cooperative-scheduler timeslice in microseconds
+fiber_reentry_longjmp = true
+```
+
+**XenDroid runs guest threads as cooperative fibers on its own scheduler with a
+1 ms quantum. Canary AE runs them as 1:1 host threads at the mercy of the Linux
+scheduler.**
+
+### 35.1 This is consistent with every measurement in this document
+
+* **Non-determinism** (s22: the 512x512 scissor path present in one run, absent
+  the next; s30/s31: 138 vs 88 draws/frame across runs, against XenDroid's
+  stable ~611-641). Host-thread scheduling is nondeterministic by nature; a
+  cooperative scheduler with a fixed quantum is not.
+* **~5x slower per unit of guest work** (s33) - AE at 15 FPS processing a third
+  of XenDroid's command stream at 24 FPS.
+* **The guest issuing 4.6-7x fewer draws** (s30/s31) - guest threads that do not
+  get scheduled coherently do not finish building frames.
+* **Why every GPU-side comparison came back identical** (s14-s23) - the renderer
+  was never the problem.
+
+It also fits this project's own history: the one previously-found real bug of
+this class was a **thread-start lost-wakeup race that hung every guest thread**
+([[project-xenia-ae-thread-start-lost-wakeup-fix]]).
+
+### 35.2 The decision this forces
+
+Porting the cooperative scheduler is not a transplant like the previous four. It
+is ~2,000 lines plus deep integration with `XThread`, waits, and the JIT
+(safepoints, fiber re-entry via `fiber_reentry_longjmp`). It changes how every
+guest thread runs.
+
+**Chain that must land together, in order:**
+1. `guest_scheduler.{cc,h}` + `XThread` integration (fibers instead of host
+   threads), `guest_scheduler`/`guest_scheduler_quantum_us` cvars.
+2. `PPCContext::preempt_requested` / `last_safepoint_pc`;
+   `backend::preempt_yield_handler`.
+3. HIR `OPCODE_CHECK_PREEMPT` + `HIRBuilder::CheckPreempt`;
+   a64 `EmitPreemptCheck` + `CHECK_PREEMPT` sequence.
+4. `PreemptCheckInjectionPass`.
+5. Only then enable `park_memory_poll_loops` /
+   `collapse_memory_delay_spins` (ported, default OFF, s34).
+
+⚠️ Steps 1-4 are a unit. Partial ports wedge the guest - that is exactly what
+s34 demonstrated.
+
+### 35.3 Recommended verification if attempted
+
+Re-run the symmetric probes after each step; they are all built and default OFF:
+`debug.canary.pm4total`, `pm4draw`, `drawentry`, `bonedistinct`. Success looks
+like AE's draws/frame and total packets/frame approaching XenDroid's, and the
+run-to-run variance collapsing. **The vista is the cheap visual proxy (s26).**
