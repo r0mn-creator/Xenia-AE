@@ -1482,3 +1482,53 @@ Synthetic taps and instantaneous keyevents do NOT drive the game.
 presses, x5, gets from the main menu into gameplay. Halo 3's level intro is a
 PRE-RENDERED VIDEO - frames from it contain no engine-rendered models and cannot
 be used to judge the ball. See memory `feedback-gamepad-input-held-presses`.
+
+## 25. Transplant #2: host-visible shared memory - landed, and it exposed a bigger gap
+
+Commit 9b43bb570, branch `xd-memexport-transplant`.
+
+**Ported** (`vulkan_shared_memory.cc/.h`): prefer a host-visible cached
+(-coherent) memory type for the shared-memory buffer, test the candidates
+against **this buffer's** `memoryTypeBits` (a whole-device test fails on Adreno,
+whose LAZILY_ALLOCATED type is not host-visible), and map it persistently.
+Unmaps on shutdown. Behind `debug.canary.shared_memory_host_visible`
+(experiment, default OFF).
+
+**Verified live on Odin 2 / Adreno 740 / Turnip:**
+```
+SHMHOSTVIS host-map decision: is_uma=false type_bits=0x7 device_local=0xf
+  host_visible=0x7 host_cached=0x6 host_coherent=0x3
+  -> host_visible=true coherent=true
+SHMHOSTVIS buffer host-mapped, coherent=1
+```
+The buffer now lives in cached-coherent memory the CPU can read directly.
+
+### 25.1 ⚠️ RETRACTED: "the Vulkan backend has no readback at all"
+
+**That claim was WRONG, and it was my own tooling error.** The grep that
+produced it ended in `head -8`, which truncated the Vulkan hits and left only
+`command_processor.*` and the D3D12 backend visible.
+
+Canary AE **does** have a Vulkan resolve readback path:
+`vulkan_command_processor.cc:4729` in `IssueCopy()` calls
+`GetReadbackResolveMode()`, checks destination accessibility, then uses a keyed
+ring of staging buffers (`readback_buffers_`, `MakeReadbackResolveKey` - the
+same helper name XenDroid uses) to copy device -> host and `memory::vastcpy`
+into guest RAM.
+
+Note also that `GetReadbackResolveMode()` maps **any unrecognised string to
+`kFast`**, and AE's config contains `readback_resolve = false` (a bool written
+into a string cvar), so readback is effectively **on** by default.
+
+The one thing genuinely missing is the **`kUma` mode**: reading the host-mapped
+shared memory directly instead of doing a device->host staging copy. That is
+what the section 25 mapping enables, and it is a bounded addition rather than a
+whole subsystem.
+
+### 25.2 Next transplant (the consumer side)
+
+Add `ReadbackResolveMode::kUma` to AE and take the direct host-mapped read when
+the shared memory is host-mapped and resolution scaling is off, instead of the
+staging copy. AE already has the surrounding readback machinery, so this is a
+small addition on top of the section 25 mapping - not the hundreds of lines
+first estimated.

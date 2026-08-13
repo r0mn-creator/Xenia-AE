@@ -255,6 +255,24 @@ bool VulkanSharedMemory::Initialize() {
   return true;
 }
 
+void VulkanSharedMemory::ReadHostMapped(uint32_t guest_address,
+                                        uint32_t length, void* dest) const {
+  if (host_mapped_data_ == nullptr || dest == nullptr || !length) {
+    return;
+  }
+  // The shared memory buffer is a 1:1 image of guest physical memory, so the
+  // guest address is the offset into the mapping.
+  if (uint64_t(guest_address) + length > uint64_t(kBufferSize)) {
+    return;
+  }
+  // Non-coherent memory needs the range invalidated before the CPU reads it;
+  // this build only maps coherent or cached types, and the Adreno path reports
+  // coherent=1, so a plain copy is correct there. Left explicit so a
+  // non-coherent device is a visible gap rather than silent corruption.
+  assert_true(host_mapped_coherent_);
+  std::memcpy(dest, host_mapped_data_ + guest_address, length);
+}
+
 void VulkanSharedMemory::Shutdown(bool from_destructor) {
   ResetTraceDownload();
 

@@ -4751,6 +4751,54 @@ bool VulkanCommandProcessor::IssueCopy() {
       return true;
     }
 
+    // Ported from XenDroid: UMA direct readback.
+    //
+    // The shared memory buffer is host-mapped (see the host-visible port in
+    // vulkan_shared_memory.cc), so the CPU can read the resolved bytes straight
+    // out of it - no device->host staging copy at all, and guest RAM and the
+    // GPU never diverge. This is the mechanism XenDroid credits for fixing
+    // Halo 3's collapsed skinned geometry.
+    //
+    // XenDroid's note is worth keeping: gating readback on an *imported* guest
+    // RAM buffer "disabled readback outright wherever guest RAM cannot be
+    // imported (no VK_EXT_external_memory_host, i.e. every Adreno)" - which is
+    // exactly this device, so the host-mapped route is the one that works here.
+    //
+    // Falls through to the existing staging path when the buffer did not land
+    // on a host-visible type, so enabling the mode can never make things worse
+    // than kFast.
+    if (readback_mode == ReadbackResolveMode::kUma &&
+        shared_memory_->IsHostMapped()) {
+      // Make the resolve's writes visible to the host, then drain so the CPU
+      // does not race the GPU writing the same region. Guest shader stages are
+      // included because in-pass resolves write shared memory from the fragment
+      // stage, not only from compute/transfer.
+      PushBufferMemoryBarrier(
+          shared_memory_->buffer(), 0, VK_WHOLE_SIZE,
+          guest_shader_pipeline_stages_ |
+              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+              VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_HOST_BIT,
+          VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+          VK_ACCESS_HOST_READ_BIT, VK_QUEUE_FAMILY_IGNORED,
+          VK_QUEUE_FAMILY_IGNORED, false);
+      SubmitBarriers(true);
+      if (!AwaitAllQueueOperationsCompletion()) {
+        XELOGE("UMAREAD resolve readback drain failed");
+        return true;
+      }
+      shared_memory_->ReadHostMapped(written_address, written_length,
+                                     memory_->TranslatePhysical(written_address));
+      {
+        static std::atomic<uint32_t> n{0};
+        if (n.fetch_add(1) < 8) {
+          XELOGI("UMAREAD direct 0x{:08X} len={}", written_address,
+                 written_length);
+        }
+      }
+      return true;
+    }
+
     // Create a key for this specific resolve operation
     uint64_t resolve_key =
         MakeReadbackResolveKey(written_address, written_length);

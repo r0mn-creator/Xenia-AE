@@ -42,7 +42,8 @@ enum class GPUSetting { ClearMemoryPageState, ReadbackMemexport };
 enum class ReadbackResolveMode {
   kDisabled,  // No readback (none)
   kFast,      // Delayed sync, 1 frame behind (fast)
-  kFull       // Immediate sync with GPU stall (full)
+  kFull,      // Immediate sync with GPU stall (full)
+  kUma        // Read host-mapped shared memory directly, no device->host copy
 };
 
 void SaveGPUSetting(GPUSetting setting, uint64_t value);

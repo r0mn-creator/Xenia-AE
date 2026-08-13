@@ -87,6 +87,12 @@ class VulkanSharedMemory : public SharedMemory {
   uint8_t* host_mapped_data() const { return host_mapped_data_; }
   bool host_mapped_coherent() const { return host_mapped_coherent_; }
 
+  // Copies [guest_address, +length) straight out of the host mapping into
+  // `dest`. Only valid when IsHostMapped(). Caller is responsible for having
+  // made the GPU's writes visible to the host first.
+  void ReadHostMapped(uint32_t guest_address, uint32_t length,
+                      void* dest) const;
+
  private:
   // Single for non-sparse, every allocation so far for sparse.
   std::vector<VkDeviceMemory> buffer_memory_;

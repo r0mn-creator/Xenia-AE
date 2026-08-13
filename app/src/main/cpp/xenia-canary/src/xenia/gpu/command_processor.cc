@@ -107,6 +107,12 @@ ReadbackResolveMode GetReadbackResolveMode() {
     return ReadbackResolveMode::kFull;
   } else if (mode == "none") {
     return ReadbackResolveMode::kDisabled;
+  } else if (mode == "uma") {
+    // Ported from XenDroid: read the host-mapped shared memory buffer directly,
+    // with no device->host staging copy, so guest RAM and the GPU never
+    // diverge. Requires the shared memory buffer to actually be host-mapped
+    // (debug.canary.shared_memory_host_visible); falls back to kFast if not.
+    return ReadbackResolveMode::kUma;
   } else {
     // Default to "fast" for any unrecognized value
     return ReadbackResolveMode::kFast;
