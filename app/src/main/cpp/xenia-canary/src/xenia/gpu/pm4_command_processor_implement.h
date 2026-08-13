@@ -266,6 +266,19 @@ void COMMAND_PROCESSOR::DisassembleCurrentPacket() XE_RESTRICT {
   logger.submit('d');
 }
 bool COMMAND_PROCESSOR::ExecutePacket() {
+  // DIAG(gpu/pm4total): TOTAL PM4 packets parsed, alongside PM4DRAW.
+  //
+  // Discriminates "the guest is doing less work overall" from "the guest is
+  // specifically culling draws". If total packets scale with draws (~7x fewer,
+  // docs s31) the guest's whole command stream is thinner; if totals match
+  // XenDroid while draws do not, it is culling geometry specifically.
+  if (XE_AE_DIAG_ENABLED("debug.canary.pm4total")) {
+    static std::atomic<uint32_t> total{0};
+    uint32_t n = total.fetch_add(1) + 1;
+    if ((n & 8191u) == 0) {
+      XELOGI("PM4TOTAL packets={}", n);
+    }
+  }
 #if XE_ENABLE_PM4_DISASM == 1
   if (cvars::disassemble_pm4 && logging::ShouldLog(LogLevel::Debug)) {
     COMMAND_PROCESSOR::DisassembleCurrentPacket();

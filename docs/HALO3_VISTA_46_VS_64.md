@@ -1757,3 +1757,59 @@ The XDtester side of PM4DRAW needs `#include "xenia/base/xdt_debug.h"` in
 `pm4_command_processor_implement.h` (build failed on the undeclared macro). Not
 needed for the conclusion above - AE's packet/entry equality carries it - but
 add it if XenDroid's own packet count is ever wanted.
+
+## 32. Occlusion queries: a REAL missing feature, but not the draw deficit
+
+Chasing s31 ("the guest submits ~7x fewer draws"), the obvious mechanism is
+visibility culling: a game that is told nothing is visible stops asking for
+draws. Halo 3 uses ZPD (Z Pass Done) occlusion queries heavily.
+
+### 32.1 Canary AE does not implement occlusion queries at all
+
+| symbol (Vulkan backend) | Canary AE | XDtester |
+|---|---|---|
+| `vkCmdBeginQuery` | **0** | 4 |
+| `vkCmdEndQuery` | **0** | 6 |
+| `QueryPool` | **0** | 98 |
+| `zpd` / `ZPD` (whole GPU dir) | 13 | 867 |
+
+XenDroid has a dedicated **938-line `vulkan_zpd_query_pool.{cc,h}`** doing real
+Vulkan occlusion queries: `VkQueryPool`, `vkCmdCopyQueryPoolResults` into a
+persistent buffer, deferral when no render pass is open, segment splitting at
+pass boundaries, `VK_EXT_host_query_reset`. **AE has no such file.**
+
+Instead AE (and upstream Xenia) FAKES the result in
+`ExecutePacketType3_EVENT_WRITE_ZPD`:
+
+```cpp
+samples = samples <= lower_threshold ? upper_threshold : samples - 1;
+```
+
+The reported "pixels visible" count simply **sawtooths between 80 and 100**
+(`query_occlusion_sample_lower/upper_threshold`), decrementing once per ZPD
+event. The cvar help even says "Setting this to 0 means everything is reported
+as occluded".
+
+### 32.2 Tested - and it is NOT the draw deficit
+
+Set both thresholds to 1,000,000 so the guest is always told a huge number of
+samples passed (i.e. "everything is visible"), config only, no rebuild:
+
+| | draws/frame | vista |
+|---|---|---|
+| default (80/100 sawtooth) | 88 | inverted |
+| forced "all visible" (1e6) | **94** | **inverted, unchanged** |
+
+No meaningful change in draw volume and no visual change
+(`scratchpad/occl_high.png`). **The fake occlusion counts are not what is
+suppressing the draws.**
+
+### 32.3 Still worth fixing, separately
+
+The missing occlusion query implementation is a genuine feature gap against
+XenDroid and will matter for titles that gate visible effects on query results
+(lens flares, god rays, LOD). It is just not the cause of Halo 3's missing
+draws. **Do not re-test it for the vista.**
+
+The s31 conclusion stands: the draws are absent from the ring buffer, and the
+cause is upstream of the GPU - JIT, kernel or timing.
