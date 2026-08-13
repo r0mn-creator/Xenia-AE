@@ -1,3 +1,17 @@
+// ============================================================================
+// AEX STEP 1 IN PROGRESS - this file is intentionally compiled to nothing.
+//
+// The cooperative scheduler's host-side dependencies are not all in place yet
+// (KernelState::guest_scheduler, XThread::HasPendingUserApc / OnQuantumEnd,
+// XObject::RecentCooperativeSignals, and the xthread.cc / xobject.cc
+// implementations). Rather than leave the AEX branch unbuildable while that
+// lands, the body is gated off.
+//
+// Define XE_AEX_GUEST_SCHEDULER_READY once those exist to compile it in.
+// See docs/AEX_OVERHAUL.md.
+// ============================================================================
+#if defined(XE_AEX_GUEST_SCHEDULER_READY)
+
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -1624,3 +1638,5 @@ void GuestScheduler::WatchdogLoop() {
 
 }  // namespace kernel
 }  // namespace xe
+
+#endif  // XE_AEX_GUEST_SCHEDULER_READY
