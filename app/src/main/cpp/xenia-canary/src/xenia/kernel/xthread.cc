@@ -8,6 +8,7 @@
  */
 
 #include "xenia/kernel/xthread.h"
+#include "xenia/kernel/guest_scheduler.h"
 
 #if !XE_PLATFORM_WIN32
 #include <pthread.h>
@@ -408,6 +409,42 @@ X_STATUS XThread::Create() {
 
   // Always retain when starting - the thread owns itself until exited.
   RetainHandle();
+
+  // ===== Cooperative fiber path (ported from XenDroid) =====
+  // docs/AEX_OVERHAUL.md step 1. The guest thread runs on a fiber the scheduler
+  // multiplexes onto a dispatch host thread instead of owning a host OS thread.
+  // The scheduler binds our TLS (SetCurrentThread) before switching to this
+  // fiber, so the entry does not repeat it. Host-routine threads (XHostThread)
+  // stay real host threads - they run host loops and blocking calls, and their
+  // thread() is used elsewhere.
+  //
+  // Inert unless cvars::guest_scheduler is set, which defaults false.
+  if (GuestScheduler::enabled() && is_guest_thread()) {
+    fiber_exit_event_ = xe::threading::Event::CreateManualResetEvent(false);
+    xe::threading::Fiber::CreationParameters fiber_params;
+    fiber_params.stack_size = 16_MiB;
+    fiber_ = xe::threading::Fiber::Create(fiber_params, [this]() {
+      // Terminated before the first dispatch.
+      kernel_state()->guest_scheduler()->ExitIfTerminated();
+      running_ = true;
+      // Never returns: Execute() ends in Exit(), which hands us to the
+      // scheduler and yields to the dispatcher forever.
+      Execute();
+    });
+    if (!fiber_) {
+      XELOGE("CreateThread failed (fiber)");
+      return X_STATUS_NO_MEMORY;
+    }
+    // Held until the scheduler reclaims the exited fiber, so a guest handle
+    // release cannot free the stack out from under a running thread.
+    Retain();
+    if (thread_name_.empty()) {
+      set_name(fmt::format("XThread{:04X}", thread_id_));
+    }
+    kernel_state()->guest_scheduler()->EnsureStarted();
+    kernel_state()->guest_scheduler()->MarkReady(this);
+    return X_STATUS_SUCCESS;
+  }
 
   xe::threading::Thread::CreationParameters params;
 

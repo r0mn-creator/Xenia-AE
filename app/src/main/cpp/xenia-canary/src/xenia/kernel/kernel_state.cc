@@ -66,6 +66,11 @@ KernelState::KernelState(Emulator* emulator)
   processor_ = emulator->processor();
   file_system_ = emulator->file_system();
   xam_state_ = std::make_unique<xam::XamState>(emulator, this);
+  // Cooperative guest scheduler (ported from XenDroid, docs/AEX_OVERHAUL.md).
+  // Constructed unconditionally; GuestScheduler::enabled() gates whether guest
+  // threads actually run as fibers, and that reads cvars::guest_scheduler which
+  // defaults false.
+  guest_scheduler_ = std::make_unique<GuestScheduler>(this);
   smc_ = std::make_unique<SystemManagementController>();
 
   InitializeKernelGuestGlobals();
@@ -86,6 +91,11 @@ KernelState::KernelState(Emulator* emulator)
 }
 
 KernelState::~KernelState() {
+  // Reclaiming leftover fibers releases handles, so run this while the object
+  // table is still alive.
+  if (guest_scheduler_) {
+    guest_scheduler_->Shutdown();
+  }
   SetExecutableModule(nullptr);
 
   if (dispatch_thread_running_) {
