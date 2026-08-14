@@ -309,3 +309,54 @@ would do the same. Port all of it, then flip `guest_scheduler`.
 on **`GuestScheduler::enabled()`**, never on the pointer alone - a pointer-only
 check calls into a scheduler that was never started. `WakeCooperativeWaiters`
 has been corrected; apply the same rule to every new call site.
+
+---
+
+## Wait paths WIRED (2026-08-14) - scheduler now asserts during kernel init
+
+`XObject::Wait` and `XObject::WaitMultiple` take a cooperative poll-yield path
+when `GuestScheduler::enabled()` **and** the caller is fiber-backed
+(`XThread::GetCurrentFiberThread()`). Wake side wired into `XEvent::Set/Pulse`,
+`XSemaphore::ReleaseSemaphore`, `XMutant::ReleaseMutant`, always **after** the
+host primitive is signalled.
+
+### Crash found and fixed by actually running it
+
+`WakeCooperativeWaiters()` ran `RecordCooperativeSignal()` **unconditionally**.
+That walks `thread_state()->context()->lr`, which is not valid for host threads,
+so once the wake side was wired the emulator **died on launch with the scheduler
+OFF**. The whole body is now scheduler-gated and the record is null-checked.
+
+⚠️ Lesson: anything called from a hot kernel path must be gated on
+`GuestScheduler::enabled()` **first thing**, before touching any thread state.
+
+### Current status with `guest_scheduler = true`
+
+The scheduler is now genuinely exercised - and asserts (SIGTRAP / SI_TKILL)
+during **kernel init**, with the log ending at:
+
+```
+Setup: Initializing Kernel...
+FindProfiles: Adding profile ... to profile list
+ProfileManager: Found 1 Profiles
+LoadAccount: Loading Acc<cut>
+```
+
+That is the point where the first guest threads are created, i.e. the **fiber
+creation path in `XThread::Create`** is being hit for the first time. This is
+progress: previously the scheduler started and everything silently stalled;
+now it runs far enough to fail at a specific, findable place.
+
+### Next debugging step
+
+Get the assert's identity - run with logcat capturing the abort message, or add
+a log line either side of the fiber `Create()`/`EnsureStarted()`/`MarkReady()`
+sequence in `XThread::Create` to see which one trips. Prime suspects:
+1. `EnsureStarted()` being called before the scheduler's CPUs/dispatch threads
+   are ready.
+2. `MarkReady()` on a thread whose `SchedulerLinks` were never initialised for
+   the queue it is being pushed onto.
+3. An assert inside `GuestScheduler` about the global critical region being held
+   at a switch point (`is_held_by_current_thread`).
+
+**`guest_scheduler` is back to false and AEX renders the Halo 3 menu normally.**
