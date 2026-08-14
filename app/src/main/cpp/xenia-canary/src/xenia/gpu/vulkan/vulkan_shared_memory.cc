@@ -20,6 +20,8 @@
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
 
+DECLARE_string(vulkan_lib_path);
+
 DEFINE_bool(vulkan_sparse_shared_memory, true,
             "Enable sparse binding for shared memory emulation. Disabling it "
             "increases video memory usage - a 512 MB buffer is created - but "
@@ -66,7 +68,31 @@ bool VulkanSharedMemory::Initialize() {
   buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   buffer_create_info.queueFamilyIndexCount = 0;
   buffer_create_info.pQueueFamilyIndices = nullptr;
-  if (cvars::vulkan_sparse_shared_memory &&
+  // Sparse shared memory BLACK-SCREENS with a custom (Turnip) driver.
+  //
+  // Symptom, which is very distinctive: with the stock Qualcomm driver the game
+  // renders; load a custom driver via the per-game driver UI and the screen goes
+  // completely black while the emulator keeps running normally - high FPS, log
+  // full of texture loads and resolves, no errors at all. Sparse binding
+  // behaves differently on Turnip than on the stock driver.
+  //
+  // This was invisible for a long time because long-lived configs carry an old
+  // `defaults_date` and never applied the migration that turned
+  // vulkan_sparse_shared_memory on. Only NEW installs get it - so a new user who
+  // adds a custom driver gets a black screen and no diagnostic.
+  //
+  // Forcing it off whenever a custom driver is selected cannot regress
+  // stock-driver users, who keep sparse exactly as before.
+  // See docs/AEX_OVERHAUL.md.
+  const bool using_custom_driver =
+      !cvars::vulkan_lib_path.empty() && cvars::vulkan_lib_path != "default";
+  if (using_custom_driver && cvars::vulkan_sparse_shared_memory) {
+    XELOGW(
+        "Shared memory: disabling sparse binding because a custom Vulkan "
+        "driver is in use (vulkan_sparse_shared_memory is not compatible with "
+        "Turnip and would present a black screen)");
+  }
+  if (cvars::vulkan_sparse_shared_memory && !using_custom_driver &&
       vulkan_device->properties().sparseResidencyBuffer) {
     if (dfn.vkCreateBuffer(device, &buffer_create_info, nullptr, &buffer_) ==
         VK_SUCCESS) {
