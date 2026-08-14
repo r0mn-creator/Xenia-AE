@@ -627,8 +627,14 @@ void XObject::AbandonCooperativeWait(XThread* thread) {
 void XObject::WakeCooperativeWaiters() {
   cooperative_signal_epoch_.fetch_add(1);
   RecordCooperativeSignal(this);
-  if (auto* sched = kernel_state()->guest_scheduler()) {
-    sched->WakeForSignal(this, CooperativeWakeTarget());
+  // Must test GuestScheduler::enabled(), NOT just the pointer. KernelState
+  // constructs the scheduler unconditionally, so guest_scheduler() is always
+  // non-null; a pointer-only check would call into a scheduler that was never
+  // started as soon as the wake side is wired up.
+  if (GuestScheduler::enabled()) {
+    if (auto* sched = kernel_state()->guest_scheduler()) {
+      sched->WakeForSignal(this, CooperativeWakeTarget());
+    }
   }
 }
 
