@@ -60,12 +60,16 @@ void XEvent::InitializeNative(void* native_ptr, X_DISPATCH_HEADER* header) {
 int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
   set_priority_increment(priority_increment);
   event_->Set();
+  // Wake cooperative waiters AFTER the host primitive is signalled, never
+  // before (ported from XenDroid). No-op unless the scheduler is enabled.
+  WakeCooperativeWaiters();
   return 1;
 }
 
 int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
   set_priority_increment(priority_increment);
   event_->Pulse();
+  WakeCooperativeWaiters();
   return 1;
 }
 

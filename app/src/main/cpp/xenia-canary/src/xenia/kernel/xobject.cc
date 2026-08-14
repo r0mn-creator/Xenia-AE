@@ -192,6 +192,77 @@ uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
   }
 }
 
+// ===== Cooperative wait helpers (ported from XenDroid) =====
+// docs/AEX_OVERHAUL.md, "Step 1, final piece".
+//
+// ⚠️ CURRENTLY UNUSED ON PURPOSE. These are landed inert so the remaining work
+// is only *wiring* XObject::Wait / WaitMultiple / SignalAndWait to them, rather
+// than writing and wiring at the same time. Nothing calls them yet, so they
+// cannot change behaviour - the host-thread wait path is untouched.
+
+// Runs on every cooperative wait exit, so it is also where the diagnostic wait
+// shape is dropped. Unconditional: a thread that never waits again must not
+// keep reporting a stale handle set.
+[[maybe_unused]] static void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
+  if (auto* self = XThread::GetCurrentThread()) {
+    self->clear_cooperative_wait_shape();
+  }
+  if (!kthread) {
+    return;
+  }
+  kthread->thread_state = KTHREAD_STATE_RUNNING;
+  kthread->wait_result = result;
+}
+
+// Drives the cooperative poll-yield loop for a fiber-backed waiter. Repeatedly
+// runs |poll| (a zero-timeout acquire returning the terminal X_STATUS on
+// success / abandon / failure, or std::nullopt while not yet signaled),
+// yielding via BlockCurrentThread between attempts, until it resolves, an
+// alertable user APC is pending, or |deadline_ms| (absolute host uptime,
+// 0 = infinite) elapses. Polling the host primitive preserves its exact acquire
+// semantics; only the blocking becomes cooperative. |wait_object| is the single
+// object waited on, null for a multi-wait.
+//
+// ⚠️ ORDERING IS LOad-BEARING: the signal epoch is sampled BEFORE polling. A
+// signal landing after a failed poll then changes the epoch, so the re-poll is
+// not skipped and the wake is not lost. Sampling after the poll reintroduces
+// exactly that race.
+template <typename PollFn>
+[[maybe_unused]] static X_STATUS CooperativeWait(GuestScheduler* scheduler,
+                                                 X_KTHREAD* kthread,
+                                                 XObject* wait_object,
+                                                 bool alertable,
+                                                 uint64_t deadline_ms,
+                                                 PollFn&& poll) {
+  while (true) {
+    // Alertable waits return on a queued user APC (the cooperative equivalent
+    // of a host alertable-wait wake); the caller then runs xeProcessUserApcs.
+    if (alertable) {
+      auto* self = XThread::GetCurrentThread();
+      if (self && self->HasPendingUserApc()) {
+        WaitExit(kthread, X_STATUS_USER_APC);
+        return X_STATUS_USER_APC;
+      }
+    }
+    uint32_t wait_epoch = 0;
+    if (wait_object) {
+      wait_epoch = wait_object->cooperative_signal_epoch();
+    } else if (auto* self = XThread::GetCurrentThread()) {
+      wait_epoch = self->cooperative_wait_set_epoch();
+    }
+    std::optional<X_STATUS> resolved = poll();
+    if (resolved) {
+      WaitExit(kthread, *resolved);
+      return *resolved;
+    }
+    if (deadline_ms != 0 && Clock::QueryHostUptimeMillis() >= deadline_ms) {
+      WaitExit(kthread, X_STATUS_TIMEOUT);
+      return X_STATUS_TIMEOUT;
+    }
+    scheduler->BlockCurrentThread(deadline_ms, wait_epoch, alertable);
+  }
+}
+
 X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                        uint32_t alertable, uint64_t* opt_timeout) {
   auto wait_handle = GetWaitHandle();
@@ -204,6 +275,51 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
       opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
+
+  // ===== Cooperative path (ported from XenDroid) =====
+  // A fiber-backed guest thread must not block its dispatch host thread, so the
+  // host wait is replaced by a zero-timeout poll plus a yield to the scheduler.
+  // Polling the same host primitive preserves its exact acquire semantics; only
+  // the blocking becomes cooperative.
+  //
+  // Gated on GuestScheduler::enabled() (NOT the pointer - KernelState always
+  // constructs one) and on the thread actually being fiber-backed, so this is
+  // inert under the host-thread model.
+  if (GuestScheduler::enabled()) {
+    if (auto* self = XThread::GetCurrentFiberThread()) {
+      auto* scheduler = kernel_state()->guest_scheduler();
+      auto* kthread = self->guest_object<X_KTHREAD>();
+      uint64_t deadline_ms =
+          (timeout_ms == std::chrono::milliseconds::max())
+              ? 0
+              : Clock::QueryHostUptimeMillis() +
+                    static_cast<uint64_t>(timeout_ms.count());
+      const uint32_t handle_value = handle();
+      self->set_cooperative_wait_shape(
+          XThread::CooperativeWaitKind::kSingle, &handle_value, 1);
+      EnterCooperativeWait(self);
+      X_STATUS status = CooperativeWait(
+          scheduler, kthread, this, alertable != 0, deadline_ms,
+          [&]() -> std::optional<X_STATUS> {
+            auto poll = xe::threading::Wait(wait_handle, false,
+                                            std::chrono::milliseconds(0));
+            switch (poll) {
+              case xe::threading::WaitResult::kSuccess:
+                self->BoostOnWake(priority_increment());
+                WaitCallback();
+                return X_STATUS_SUCCESS;
+              case xe::threading::WaitResult::kTimeout:
+                return std::nullopt;  // not signaled yet - keep waiting
+              case xe::threading::WaitResult::kAbandoned:
+              case xe::threading::WaitResult::kFailed:
+              default:
+                return X_STATUS_ABANDONED_WAIT_0;
+            }
+          });
+      LeaveCooperativeWait(self);
+      return status;
+    }
+  }
 
   auto result =
       xe::threading::Wait(wait_handle, alertable ? true : false, timeout_ms);
@@ -281,6 +397,69 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
       opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
+
+  // ===== Cooperative path (ported from XenDroid) =====
+  // Same shape as XObject::Wait: poll all handles with zero timeout and yield
+  // to the scheduler instead of blocking the dispatch host thread. The wait set
+  // is registered on the thread so the scheduler can gate re-polls on the
+  // summed signal epoch of the whole set. Inert unless the scheduler is on and
+  // the caller is fiber-backed.
+  if (GuestScheduler::enabled() && count > 0 && count <= 64) {
+    if (auto* self = XThread::GetCurrentFiberThread()) {
+      // WaitMultiple is static - take the kernel state from an object.
+      auto* scheduler = objects[0]->kernel_state()->guest_scheduler();
+      auto* kthread = self->guest_object<X_KTHREAD>();
+      uint64_t deadline_ms =
+          (timeout_ms == std::chrono::milliseconds::max())
+              ? 0
+              : Clock::QueryHostUptimeMillis() +
+                    static_cast<uint64_t>(timeout_ms.count());
+      uint32_t handle_values[64];
+      for (uint32_t i = 0; i < count; ++i) {
+        handle_values[i] = objects[i]->handle();
+      }
+      self->set_cooperative_wait_shape(
+          wait_type ? XThread::CooperativeWaitKind::kMultiAny
+                    : XThread::CooperativeWaitKind::kMultiAll,
+          handle_values, count, objects);
+      X_STATUS coop_status = CooperativeWait(
+          scheduler, kthread, nullptr, alertable != 0, deadline_ms,
+          [&]() -> std::optional<X_STATUS> {
+            if (wait_type) {
+              auto r = xe::threading::WaitAny(wait_handles, count, false,
+                                              std::chrono::milliseconds(0));
+              switch (r.first) {
+                case xe::threading::WaitResult::kSuccess:
+                  objects[r.second]->WaitCallback();
+                  self->BoostOnWake(objects[r.second]->priority_increment());
+                  return X_STATUS(r.second);
+                case xe::threading::WaitResult::kTimeout:
+                  return std::nullopt;
+                case xe::threading::WaitResult::kAbandoned:
+                  return X_STATUS(X_STATUS_ABANDONED_WAIT_0 + r.second);
+                default:
+                  return X_STATUS_UNSUCCESSFUL;
+              }
+            }
+            auto r = xe::threading::WaitAll(wait_handles, count, false,
+                                            std::chrono::milliseconds(0));
+            switch (r) {
+              case xe::threading::WaitResult::kSuccess:
+                for (uint32_t i = 0; i < count; ++i) {
+                  objects[i]->WaitCallback();
+                }
+                return X_STATUS_SUCCESS;
+              case xe::threading::WaitResult::kTimeout:
+                return std::nullopt;
+              case xe::threading::WaitResult::kAbandoned:
+                return X_STATUS_ABANDONED_WAIT_0;
+              default:
+                return X_STATUS_UNSUCCESSFUL;
+            }
+          });
+      return coop_status;
+    }
+  }
 
   X_STATUS status;
   uint32_t boost_increment = 0;
@@ -486,77 +665,6 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
   return object_ref<XObject>(result);
 }
 
-// ===== Cooperative wait helpers (ported from XenDroid) =====
-// docs/AEX_OVERHAUL.md, "Step 1, final piece".
-//
-// ⚠️ CURRENTLY UNUSED ON PURPOSE. These are landed inert so the remaining work
-// is only *wiring* XObject::Wait / WaitMultiple / SignalAndWait to them, rather
-// than writing and wiring at the same time. Nothing calls them yet, so they
-// cannot change behaviour - the host-thread wait path is untouched.
-
-// Runs on every cooperative wait exit, so it is also where the diagnostic wait
-// shape is dropped. Unconditional: a thread that never waits again must not
-// keep reporting a stale handle set.
-[[maybe_unused]] static void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
-  if (auto* self = XThread::GetCurrentThread()) {
-    self->clear_cooperative_wait_shape();
-  }
-  if (!kthread) {
-    return;
-  }
-  kthread->thread_state = KTHREAD_STATE_RUNNING;
-  kthread->wait_result = result;
-}
-
-// Drives the cooperative poll-yield loop for a fiber-backed waiter. Repeatedly
-// runs |poll| (a zero-timeout acquire returning the terminal X_STATUS on
-// success / abandon / failure, or std::nullopt while not yet signaled),
-// yielding via BlockCurrentThread between attempts, until it resolves, an
-// alertable user APC is pending, or |deadline_ms| (absolute host uptime,
-// 0 = infinite) elapses. Polling the host primitive preserves its exact acquire
-// semantics; only the blocking becomes cooperative. |wait_object| is the single
-// object waited on, null for a multi-wait.
-//
-// ⚠️ ORDERING IS LOad-BEARING: the signal epoch is sampled BEFORE polling. A
-// signal landing after a failed poll then changes the epoch, so the re-poll is
-// not skipped and the wake is not lost. Sampling after the poll reintroduces
-// exactly that race.
-template <typename PollFn>
-[[maybe_unused]] static X_STATUS CooperativeWait(GuestScheduler* scheduler,
-                                                 X_KTHREAD* kthread,
-                                                 XObject* wait_object,
-                                                 bool alertable,
-                                                 uint64_t deadline_ms,
-                                                 PollFn&& poll) {
-  while (true) {
-    // Alertable waits return on a queued user APC (the cooperative equivalent
-    // of a host alertable-wait wake); the caller then runs xeProcessUserApcs.
-    if (alertable) {
-      auto* self = XThread::GetCurrentThread();
-      if (self && self->HasPendingUserApc()) {
-        WaitExit(kthread, X_STATUS_USER_APC);
-        return X_STATUS_USER_APC;
-      }
-    }
-    uint32_t wait_epoch = 0;
-    if (wait_object) {
-      wait_epoch = wait_object->cooperative_signal_epoch();
-    } else if (auto* self = XThread::GetCurrentThread()) {
-      wait_epoch = self->cooperative_wait_set_epoch();
-    }
-    std::optional<X_STATUS> resolved = poll();
-    if (resolved) {
-      WaitExit(kthread, *resolved);
-      return *resolved;
-    }
-    if (deadline_ms != 0 && Clock::QueryHostUptimeMillis() >= deadline_ms) {
-      WaitExit(kthread, X_STATUS_TIMEOUT);
-      return X_STATUS_TIMEOUT;
-    }
-    scheduler->BlockCurrentThread(deadline_ms, wait_epoch, alertable);
-  }
-}
-
 // ===== Cooperative guest scheduler support (ported from XenDroid) =====
 // docs/AEX_OVERHAUL.md step 1. Inert unless cvars::guest_scheduler is set.
 namespace {
@@ -573,7 +681,8 @@ void XObject::RecordCooperativeSignal(XObject* object) {
   rec.uptime_ms = uint32_t(Clock::QueryGuestUptimeMillis());
   if (auto* thread = XThread::GetCurrentThread()) {
     rec.signaler_thread = thread->handle();
-    if (auto* state = thread->thread_state()) {
+    auto* state = thread->thread_state();
+    if (state && state->context()) {
       rec.signaler_lr = uint32_t(state->context()->lr);
     }
   } else {
@@ -625,6 +734,14 @@ void XObject::AbandonCooperativeWait(XThread* thread) {
 }
 
 void XObject::WakeCooperativeWaiters() {
+  // ENTIRE body is scheduler-only. This is called from every event set/pulse,
+  // semaphore release and mutant release, so under the host-thread model it
+  // must cost nothing and touch nothing: RecordCooperativeSignal walks
+  // thread_state()->context(), which is not valid for host threads and crashed
+  // the emulator on launch when this ran unconditionally.
+  if (!GuestScheduler::enabled()) {
+    return;
+  }
   cooperative_signal_epoch_.fetch_add(1);
   RecordCooperativeSignal(this);
   // Must test GuestScheduler::enabled(), NOT just the pointer. KernelState

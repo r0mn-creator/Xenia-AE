@@ -47,6 +47,10 @@ bool XSemaphore::ReleaseSemaphore(int32_t release_count,
   if (out_previous_count) {
     *out_previous_count = previous_count;
   }
+  if (success) {
+    // After the release, never before (ported from XenDroid).
+    WakeCooperativeWaiters();
+  }
   return success;
 }
 

@@ -50,6 +50,8 @@ X_STATUS XMutant::ReleaseMutant(uint32_t priority_increment, bool abandon,
   // TODO(benvanik): abandoning.
   assert_false(abandon);
   if (mutant_->Release()) {
+    // After the release, never before (ported from XenDroid).
+    WakeCooperativeWaiters();
     return X_STATUS_SUCCESS;
   } else {
     return X_STATUS_MUTANT_NOT_OWNED;
