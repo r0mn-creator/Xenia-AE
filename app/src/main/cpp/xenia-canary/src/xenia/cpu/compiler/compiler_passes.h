@@ -11,6 +11,7 @@
 #define XENIA_CPU_COMPILER_COMPILER_PASSES_H_
 
 #include "xenia/cpu/compiler/passes/conditional_group_pass.h"
+#include "xenia/cpu/compiler/passes/preempt_check_injection_pass.h"
 #include "xenia/cpu/compiler/passes/delay_countdown_collapse_pass.h"
 #include "xenia/cpu/compiler/passes/memory_poll_park_pass.h"
 #include "xenia/cpu/compiler/passes/conditional_group_subpass.h"

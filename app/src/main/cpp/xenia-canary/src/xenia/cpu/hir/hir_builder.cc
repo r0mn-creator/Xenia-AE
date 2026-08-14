@@ -121,6 +121,7 @@ Instr* HIRBuilder::AllocateInstruction() {
   if (result) {
     return result;
   }
+
   return arena()->Alloc<Instr>();
 }
 
@@ -1364,6 +1365,12 @@ Instr* HIRBuilder::SpinBackoff(uint32_t units) {
   i->src1.offset = units;
   i->src2.value = i->src3.value = NULL;
   return i;
+}
+
+// Cooperative-scheduler safepoint (ported from XenDroid). Emitted at loop heads
+// by PreemptCheckInjectionPass; lowers to a flag test plus a cold-path yield.
+Instr* HIRBuilder::CheckPreempt() {
+  return AppendInstr(OPCODE_CHECK_PREEMPT_info, 0);
 }
 
 void HIRBuilder::SetRoundingMode(Value* value) {

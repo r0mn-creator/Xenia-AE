@@ -153,6 +153,10 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
                                   uint32_t alignment = 0);
   Xbyak_aarch64::Label& NewCachedLabel();
 
+  // Cooperative-scheduler safepoint (ported from XenDroid): tests the context's
+  // preempt_requested flag and yields the fiber on the cold path.
+  void EmitPreemptCheck(uint32_t guest_address = 0);
+
   // Get or create a xbyak_aarch64 label for a HIR label ID.
   Xbyak_aarch64::Label& GetLabel(uint32_t label_id);
 

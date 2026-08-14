@@ -232,6 +232,12 @@ DEFINE_OPCODE(
     0)
 
 DEFINE_OPCODE(
+    OPCODE_CHECK_PREEMPT,
+    "check_preempt",
+    OPCODE_SIG_X,
+    OPCODE_FLAG_VOLATILE)
+
+DEFINE_OPCODE(
     OPCODE_LOAD_MMIO,
     "load_mmio",
     OPCODE_SIG_V_O_O,

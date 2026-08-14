@@ -83,6 +83,8 @@ class HIRBuilder {
   void MergeAdjacentBlocks(Block* left, Block* right);
 
   Instr* AllocateInstruction();
+  // Cooperative-scheduler safepoint (ported from XenDroid).
+  Instr* CheckPreempt();
 
   Value* AllocateValue();
   Value::Use* AllocateUse();

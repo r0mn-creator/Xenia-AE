@@ -54,6 +54,12 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
 
   // Merge blocks early. This will let us use more context in other passes.
   // The CFG is required for simplification and dirtied by it.
+  // Ported from XenDroid: inject cooperative-scheduler safepoints at loop heads
+  // so a compute-bound guest fiber yields instead of monopolising its dispatch
+  // CPU. Without these the scheduler runs but never switches - the watchdog
+  // reports last_safepoint=00000000. cvar-gated, no-ops when the scheduler is
+  // off.
+  compiler_->AddPass(std::make_unique<passes::PreemptCheckInjectionPass>());
   compiler_->AddPass(std::make_unique<passes::ControlFlowAnalysisPass>());
   compiler_->AddPass(std::make_unique<passes::ControlFlowSimplificationPass>());
 

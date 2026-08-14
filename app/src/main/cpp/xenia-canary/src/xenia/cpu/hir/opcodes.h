@@ -294,6 +294,9 @@ enum Opcode {
   // src1.offset carries the collapsed trip count ("units") so the backend can
   // scale the wait. Emitted by SpinLoopBackoffPass; see a64_seq_memory.cc.
   OPCODE_SPIN_BACKOFF,
+  // Cooperative-scheduler safepoint: tests the context's preempt_requested flag
+  // and yields the fiber if raised. No guest-visible effects.
+  OPCODE_CHECK_PREEMPT,
   OPCODE_RESERVED_LOAD,
   OPCODE_RESERVED_STORE,
 
