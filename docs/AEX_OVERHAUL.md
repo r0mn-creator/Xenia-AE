@@ -247,3 +247,57 @@ custom `vulkan_lib_path` is set.
 
 None of the AEX scheduler work was implicated. The one real code bug found while
 chasing this was the PPCContext field-offset hazard, fixed separately.
+
+---
+
+## Step 1, final piece: the wait paths (DESIGNED, NOT YET PORTED)
+
+Everything else in step 1 is done. `guest_scheduler=true` starts the scheduler
+("GuestScheduler: preemption slice = 1000 us (19197 ticks)"), the process stays
+alive with the frame limiter running, and the screen is **black** - guest
+threads are fibers that park on waits, but the wait code still calls the
+host-thread blocking path, so nothing wakes them.
+
+### What has to be ported, as ONE unit
+
+From XenDroid's `xobject.cc`:
+
+1. **`WaitExit(kthread, result)`** - writes `thread_state = KTHREAD_STATE_RUNNING`
+   and `wait_result` back into the guest `X_KTHREAD` on every exit path.
+2. **`template <PollFn> CooperativeWait(scheduler, kthread, wait_object,
+   alertable, deadline_ms, poll)`** - the poll-yield loop. Order matters:
+   * check `HasPendingUserApc()` first when alertable -> `X_STATUS_USER_APC`;
+   * **sample the epoch BEFORE polling** (`cooperative_signal_epoch()` for a
+     single object, `cooperative_wait_set_epoch()` for a multi-wait) so a signal
+     landing after a failed poll is not skipped - this is the subtle part;
+   * run `poll()` (a zero-timeout acquire returning the terminal status, or
+     nullopt); polling the host primitive preserves exact acquire semantics and
+     only the *blocking* becomes cooperative;
+   * deadline check against `Clock::QueryHostUptimeMillis()`;
+   * else `scheduler->BlockCurrentThread(deadline_ms, wait_epoch, alertable)`.
+3. **`SignalObjectCooperatively(object)`** - the KeSetEvent / KeReleaseSemaphore
+   / KeReleaseMutant switch.
+4. Route **`XObject::Wait`**, **`WaitMultiple`**, **`SignalAndWait`** through it
+   when `kernel_state()->guest_scheduler()` is active, calling
+   `EnterCooperativeWait`/`LeaveCooperativeWait` around the park for FIFO
+   fairness (semaphores) and `set_cooperative_wait_shape()` for the diagnostics.
+5. **Wake side**: `WakeCooperativeWaiters()` after the host primitive is
+   signalled - never before - in `xevent`, `xmutant`, `xsemaphore`,
+   `xiocompletion`, `xfile`, `xsocket`.
+
+### Why it must land together
+
+⚠️ Twice today a partial port of a coupled unit produced a **silent wedge**, not
+an error: the JIT park passes without their preemption dependency (s34), and the
+scheduler enabled without these wait paths. Routing *some* waits and not others
+would do the same. Port all of it, then flip `guest_scheduler`.
+
+### State to resume from
+
+* Branch `canary-aex`, `guest_scheduler` **false** in config and cvar default.
+* AEX builds, installs as `org.xeniaae.aex`, runs Halo 3 with Turnip R8.
+* Fiber path + KernelState lifecycle are in and verified inert.
+* Probes are built and default OFF: `pm4total`, `pm4draw`, `drawentry`,
+  `bonedistinct` - XDtester has the same names/formats for line-for-line diffs.
+* Success = AEX's draws/frame and packets/frame approaching XenDroid's
+  (~611-641 vs our ~88-138) and run-to-run variance collapsing.
