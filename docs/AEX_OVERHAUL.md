@@ -169,7 +169,7 @@ enablement wedges the guest.
 
 ---
 
-## ⚠️ OPEN: AEX black screen (2026-08-13)
+## ✅ RESOLVED: AEX black screen was a CONFIG DEFAULT, not code (2026-08-13)
 
 With Turnip R8 installed via the driver UI, **AEX renders but presents black**.
 Canary AE with the same driver on the same device shows the menu.
@@ -215,3 +215,35 @@ new XObject virtuals, and `threading.h`'s new `Fiber` declaration.
 ⚠️ Note AEX's config is **fresh** and may differ from Canary AE's long-lived one
 (e.g. `readback_resolve` defaults to `"none"` here vs the `false` -> kFast that
 Canary AE's config yields). Diff the two TOMLs before assuming a code cause.
+
+
+### Resolution
+
+**`vulkan_sparse_shared_memory` black-screens with a custom driver.**
+
+| cvar | Canary AE | fresh AEX config |
+|---|---|---|
+| `vulkan_sparse_shared_memory` | **false** | **true** |
+| `headless` | false | true |
+| `defaults_date` | 2020123113 | 2026040912 |
+
+Canary AE's config dates from 2020 and therefore **never applied newer cvar
+default migrations**. AEX's config is fresh, so it took the current defaults -
+including `vulkan_sparse_shared_memory = true`.
+
+Setting it to `false` (matching Canary AE) made AEX render the Halo 3 menu with
+Turnip R8 immediately. That also explains the exact symptom pattern the user
+spotted:
+
+* **stock driver -> navy menu renders** (sparse works on the Qualcomm driver)
+* **custom driver -> black** (sparse binding differs on Turnip)
+
+⚠️ **This is a real bug for END USERS, not just AEX.** Any *new* install gets a
+fresh config with `vulkan_sparse_shared_memory = true`, so a new user who
+installs a custom driver gets a black screen. Existing users are shielded only
+by their stale `defaults_date`. **This should be fixed in Xenia AE and Canary AE
+too** - either default it false on Android/Adreno, or force it off whenever a
+custom `vulkan_lib_path` is set.
+
+None of the AEX scheduler work was implicated. The one real code bug found while
+chasing this was the PPCContext field-offset hazard, fixed separately.
