@@ -126,7 +126,12 @@ Some kernel export called from guest `0x82589EC4` blocks on a host primitive
 instead of yielding. `XObject::Wait`/`WaitMultiple` and `XThread::Delay` are
 routed; this is something else.
 
-1. **Disassemble/identify guest `0x82589EC4`** and see which import it calls —
+⚠️ `log_all_kernel_calls = true` produces **no output** - it is gated behind
+`logging::ShouldLog(LogLevel::Debug)`, and the shipped log level is Info. Either
+raise the log level or use one of the probes below instead. (Tried; do not
+repeat.)
+
+1. **Disassemble/identify guest `0x82589EC4`**1. **Disassemble/identify guest `0x82589EC4`** and see which import it calls —
    that names the export directly. (`xe::cpu` has a disassembler; or grep the
    log's import table dump for the nearest address.)
 2. Or **probe the host blocking primitives**: log on entry/exit of
