@@ -439,6 +439,14 @@ class XThread : public XObject, public cpu::Thread {
   // drained on the next quantum expiry via CheckQuantumAndDecay().
   // If increment is 0 or the thread has boost disabled, the priority is
   // simply restored to base_priority.
+  // Ported from XenDroid for the cooperative guest scheduler
+  // (docs/AEX_OVERHAUL.md step 1).
+  // True if a user APC is pending, which gates alertable re-polls.
+  bool HasPendingUserApc();
+  // Called by the scheduler when a fiber's timeslice expires: applies the
+  // Xenon quantum-end priority decay.
+  void OnQuantumEnd();
+
   void BoostOnWake(int32_t increment);
 
   // Xbox thread IDs:
@@ -601,6 +609,11 @@ class XThread : public XObject, public cpu::Thread {
     pending_mutant_acquires_.push_back(mutant);
   }
   void SetCurrentThread();
+  // Ported from XenDroid: the cooperative scheduler must be able to set the
+  // current-thread TLS to an arbitrary fiber's thread, or clear it (nullptr),
+  // from the dispatch thread. The instance form above is kept for the existing
+  // "adopt myself" call sites.
+  static void SetCurrentThread(XThread* thread);
 
  protected:
   // ===== Cooperative scheduler state (ported from XenDroid) =====

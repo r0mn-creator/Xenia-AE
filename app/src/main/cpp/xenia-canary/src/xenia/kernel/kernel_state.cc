@@ -10,6 +10,7 @@
 #include <ranges>
 
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/guest_scheduler.h"
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/ae_fix_toggle.h"  // TESTRIG(overlapped)

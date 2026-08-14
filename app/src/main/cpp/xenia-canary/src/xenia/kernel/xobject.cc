@@ -8,6 +8,9 @@
  */
 
 #include "xenia/kernel/xobject.h"
+#include "xenia/kernel/guest_scheduler.h"
+#include <vector>
+#include <mutex>
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/kernel/kernel_state.h"
@@ -480,6 +483,81 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     global_critical_region::mutex().unlock();
   }
   return object_ref<XObject>(result);
+}
+
+// ===== Cooperative guest scheduler support (ported from XenDroid) =====
+// docs/AEX_OVERHAUL.md step 1. Inert unless cvars::guest_scheduler is set.
+namespace {
+constexpr size_t kSignalRingSize = 256;
+std::mutex g_signal_ring_lock;
+uint64_t g_signal_ring_seq = 0;
+XObject::SignalRecord g_signal_ring[kSignalRingSize] = {};
+}  // namespace
+
+void XObject::RecordCooperativeSignal(XObject* object) {
+  SignalRecord rec = {};
+  rec.handle = object->handle();
+  rec.type = static_cast<uint8_t>(object->type());
+  rec.uptime_ms = uint32_t(Clock::QueryGuestUptimeMillis());
+  if (auto* thread = XThread::GetCurrentThread()) {
+    rec.signaler_thread = thread->handle();
+    if (auto* state = thread->thread_state()) {
+      rec.signaler_lr = uint32_t(state->context()->lr);
+    }
+  } else {
+    rec.signaler_thread = 0xFFFFFFFF;  // host-side signaller
+  }
+  std::lock_guard<std::mutex> lock(g_signal_ring_lock);
+  rec.seq = ++g_signal_ring_seq;
+  g_signal_ring[(rec.seq - 1) % kSignalRingSize] = rec;
+}
+
+std::vector<XObject::SignalRecord> XObject::RecentCooperativeSignals(
+    size_t max) {
+  std::vector<SignalRecord> out;
+  std::lock_guard<std::mutex> lock(g_signal_ring_lock);
+  uint64_t total = g_signal_ring_seq;
+  size_t have = size_t(total < kSignalRingSize ? total : kSignalRingSize);
+  size_t want = have < max ? have : max;
+  out.reserve(want);
+  for (size_t i = have - want; i < have; ++i) {
+    out.push_back(g_signal_ring[(total - have + i) % kSignalRingSize]);
+  }
+  return out;
+}
+
+void XObject::EnterCooperativeWait(XThread* thread) {
+  if (!thread) {
+    return;
+  }
+  thread->set_cooperative_wait_object(this);
+}
+
+void XObject::LeaveCooperativeWait(XThread* thread) {
+  if (!thread) {
+    return;
+  }
+  thread->set_cooperative_wait_object(nullptr);
+}
+
+void XObject::AbandonCooperativeWait(XThread* thread) {
+  if (!thread) {
+    return;
+  }
+  if (XObject* object = thread->cooperative_wait_object()) {
+    object->LeaveCooperativeWait(thread);
+  }
+  // A terminated fiber exits inside the wait, skipping WaitExit, so the gate
+  // pointers into its abandoned wait frame are dropped here.
+  thread->clear_cooperative_wait_shape();
+}
+
+void XObject::WakeCooperativeWaiters() {
+  cooperative_signal_epoch_.fetch_add(1);
+  RecordCooperativeSignal(this);
+  if (auto* sched = kernel_state()->guest_scheduler()) {
+    sched->WakeForSignal(this, CooperativeWakeTarget());
+  }
 }
 
 }  // namespace kernel

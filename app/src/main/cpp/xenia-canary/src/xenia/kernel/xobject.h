@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 #include "xenia/base/threading.h"
 #include "xenia/kernel/kernel.h"
@@ -277,6 +278,11 @@ class XObject {
   uint32_t guest_object_ptr_ = 0;
   bool allocated_guest_object_ = false;
  public:
+  // Which single thread a signal can wake, or null when any watcher may
+  // proceed (events) and every watcher's CPU must be woken.
+  virtual XThread* CooperativeWakeTarget() { return nullptr; }
+  virtual bool CooperativeMayAcquire(XThread* thread) { return true; }
+
   // ===== Cooperative guest scheduler (ported from XenDroid) =====
   // docs/AEX_OVERHAUL.md step 1. Inert unless cvars::guest_scheduler is set.
 
@@ -296,6 +302,24 @@ class XObject {
   void LeaveCooperativeWait(XThread* thread);
   // Releases whatever registration |thread| still holds, if any. Called when a
   // thread is torn down without returning through its wait.
+  // Ring of the most recent cooperative wakes, dumped by the scheduler's
+  // no-progress report. A wedge is diagnosed by pairing what the parked fibers
+  // wait on against what was last signalled.
+  struct SignalRecord {
+    uint64_t seq;
+    uint32_t handle;
+    uint32_t signaler_thread;
+    uint32_t signaler_lr;
+    uint32_t uptime_ms;
+    uint8_t type;
+  };
+  static void RecordCooperativeSignal(XObject* object);
+  // Oldest-first, at most |max| entries.
+  static std::vector<SignalRecord> RecentCooperativeSignals(size_t max);
+  // Bumps the epoch, then wakes the dispatch threads. Call after the host
+  // primitive is signaled, never before.
+  void WakeCooperativeWaiters();
+
   static void AbandonCooperativeWait(XThread* thread);
 
  private:

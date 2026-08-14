@@ -1,16 +1,12 @@
 // ============================================================================
-// AEX STEP 1 IN PROGRESS - this file is intentionally compiled to nothing.
+// AEX: cooperative guest scheduler, ported from XenDroid.
 //
-// The cooperative scheduler's host-side dependencies are not all in place yet
-// (KernelState::guest_scheduler, XThread::HasPendingUserApc / OnQuantumEnd,
-// XObject::RecentCooperativeSignals, and the xthread.cc / xobject.cc
-// implementations). Rather than leave the AEX branch unbuildable while that
-// lands, the body is gated off.
-//
-// Define XE_AEX_GUEST_SCHEDULER_READY once those exist to compile it in.
-// See docs/AEX_OVERHAUL.md.
+// This file now COMPILES AND LINKS. It is still inert at runtime: nothing
+// constructs a GuestScheduler unless cvars::guest_scheduler is set, which
+// defaults to false. The remaining work is the XThread fiber path (running
+// guest threads on fibers instead of host threads) and the wait-path call
+// sites - see docs/AEX_OVERHAUL.md.
 // ============================================================================
-#if defined(XE_AEX_GUEST_SCHEDULER_READY)
 
 /**
  ******************************************************************************
@@ -1639,4 +1635,3 @@ void GuestScheduler::WatchdogLoop() {
 }  // namespace kernel
 }  // namespace xe
 
-#endif  // XE_AEX_GUEST_SCHEDULER_READY

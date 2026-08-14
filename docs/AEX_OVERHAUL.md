@@ -110,25 +110,37 @@ do not bother with the expensive in-game ball test.
 ⚠️ **Two deliberate simplifications** to record so they are not mistaken for
 faithful ports: `PreciseSleep` (no WFE path) and `GetFrameNumber` (static 0).
 
-### ⚠️ DOES NOT BUILD YET - remaining step 1 work
+### ✅ guest_scheduler.cc now COMPILES AND LINKS
 
+Everything the scheduler needs from the host side is in, and AEX builds clean:
 
-`guest_scheduler.cc` still needs these host-side integrations:
+* `XThread`: `HasPendingUserApc`, `OnQuantumEnd` (written in this fork's idiom -
+  it has no `PublishPriority`, so priority is published by assigning `priority_`
+  and mirroring into the guest `X_KTHREAD`), `GetCurrentFiberThread`,
+  `ReclaimExited`, and a **static** `SetCurrentThread(XThread*)` overload
+  alongside the existing instance form.
+* `XObject`: the signal ring (`SignalRecord`, `RecordCooperativeSignal`,
+  `RecentCooperativeSignals`), `Enter`/`Leave`/`AbandonCooperativeWait`,
+  `WakeCooperativeWaiters`, `CooperativeWakeTarget`/`CooperativeMayAcquire`.
+* `KernelState::guest_scheduler()` + member.
 
-1. **`XThread`** (`kernel/xthread.{h,cc}`) - the big one:
-   * `SchedulerLinks` struct (ready/blocked list links, quantum deadline,
-     wait-gating epoch/deadline, `CooperativeWaitKind` + wait handles/objects,
-     IRQL and lock preempt-defer counters) and `scheduler_links()`.
-   * `std::unique_ptr<threading::Fiber> fiber_` + `fiber()`, the fiber path in
-     `Create()`, `ReclaimExited()`, `fiber_exit_event_`.
-   * `static XThread* GetCurrentFiberThread()`.
-   * `set_cooperative_wait_shape()` / clear helpers.
-2. **`XObject`** - `AbandonCooperativeWait`, `cooperative_signal_epoch()`,
-   `Enter/LeaveCooperativeWait`.
-3. **`KernelState`** - a `guest_scheduler()` accessor plus construction and
-   shutdown.
-4. Wait-path call sites: `xboxkrnl_threading.cc`, `xevent`, `xmutant`, `xfile`,
-   `xsocket`, `xiocompletion`, `xobject`.
+**Verified on device: AEX boots and reaches the Halo 3 menu with the scheduler
+linked in, no regression.** It is inert - nothing constructs a `GuestScheduler`
+and `cvars::guest_scheduler` defaults false.
+
+### ⚠️ Remaining step 1 work (the behaviour half)
+
+Compiling is not running. Still to do:
+
+1. **The XThread fiber path** - `Create()` must build a `threading::Fiber` and
+   register with the scheduler instead of spawning a host thread when
+   `cvars::guest_scheduler` is set. This is the actual behaviour change.
+2. **KernelState lifecycle** - construct the scheduler when the cvar is set,
+   `EnsureStarted()`, and `Shutdown()`.
+3. **Wait-path call sites** - `xboxkrnl_threading.cc`, `xevent`, `xmutant`,
+   `xfile`, `xsocket`, `xiocompletion`, `xobject` must route through
+   `BlockCurrentThread`/`WakeCooperativeWaiters` when the scheduler is active.
+4. Register `preempt_yield_handler` / `spin_backoff_yield_handler` (step 2-3).
 
 ### How to resume
 
