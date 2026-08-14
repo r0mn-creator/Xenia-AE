@@ -595,8 +595,13 @@ X_STATUS XThread::Terminate(int exit_code) {
 }
 
 void XThread::Execute() {
+  // thread_ is NULL on the cooperative fiber path (the guest thread runs on
+  // fiber_ instead of its own host thread), so system_id() must not be
+  // dereferenced unconditionally.
   XELOGKERNEL("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X})",
-              thread_id_, handle(), thread_name_, thread_->system_id());
+              thread_id_, handle(), thread_name_,
+              thread_ ? thread_->system_id() : uint32_t(0));
+  XELOGI("EXECSEQ tid={:08X} entered Execute", thread_id_);
   // Let the kernel know we are starting.
   kernel_state()->OnThreadExecute(this);
 
@@ -622,6 +627,8 @@ void XThread::Execute() {
     want_exit_code = true;
   }
 
+  XELOGI("EXECSEQ tid={:08X} about to enter guest addr={:08X}", thread_id_,
+         address);
   // Set up reentry mechanism for fiber-based stack switching.
   // When Reenter() is called (e.g., by KeSetCurrentStackPointers), it
   // unwinds back here to re-enter at a new guest address.
@@ -1179,6 +1186,41 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
   }
 
   timeout_ms = Clock::ScaleGuestDurationMillis(timeout_ms);
+
+  // ===== Cooperative delay (ported from XenDroid) =====
+  // A fiber MUST NOT host-sleep: it would block its dispatch thread and every
+  // other fiber queued behind it. Startup sleeps constantly during module and
+  // content load, so with the scheduler on this is where the main fiber got
+  // stuck in host code before ever executing a guest instruction - no JIT
+  // compilation, and safepoints (which only exist in JIT'd guest code) could
+  // never preempt it.
+  //
+  // Yield to the scheduler until the deadline instead. Inert unless the
+  // scheduler is on and this thread is fiber-backed.
+  if (GuestScheduler::enabled() && XThread::GetCurrentFiberThread() == this) {
+    auto* scheduler = kernel_state()->guest_scheduler();
+    const uint64_t deadline_ms =
+        timeout_ms ? Clock::QueryHostUptimeMillis() + timeout_ms : 0;
+    set_cooperative_wait_shape(CooperativeWaitKind::kDelay, nullptr, 0);
+    while (true) {
+      if (alertable && HasPendingUserApc()) {
+        clear_cooperative_wait_shape();
+        return X_STATUS_USER_APC;
+      }
+      if (deadline_ms == 0 || Clock::QueryHostUptimeMillis() >= deadline_ms) {
+        break;
+      }
+      // No object to gate on, so epoch 0: the scheduler re-polls on its timer.
+      scheduler->BlockCurrentThread(deadline_ms, 0, alertable != 0);
+    }
+    clear_cooperative_wait_shape();
+    // A zero-length delay is a yield: give a co-resident fiber a turn.
+    if (deadline_ms == 0) {
+      scheduler->YieldCurrentThread(false);
+    }
+    return X_STATUS_SUCCESS;
+  }
+
   if (alertable) {
     auto result =
         xe::threading::AlertableSleep(std::chrono::milliseconds(timeout_ms));
