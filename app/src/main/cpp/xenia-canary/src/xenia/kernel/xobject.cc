@@ -294,7 +294,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
               ? 0
               : Clock::QueryHostUptimeMillis() +
                     static_cast<uint64_t>(timeout_ms.count());
-      const uint32_t handle_value = handle();
+      const uint32_t handle_value = handles().empty() ? 0 : handle();
       self->set_cooperative_wait_shape(
           XThread::CooperativeWaitKind::kSingle, &handle_value, 1);
       EnterCooperativeWait(self);
@@ -416,7 +416,8 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                     static_cast<uint64_t>(timeout_ms.count());
       uint32_t handle_values[64];
       for (uint32_t i = 0; i < count; ++i) {
-        handle_values[i] = objects[i]->handle();
+        handle_values[i] =
+            objects[i]->handles().empty() ? 0 : objects[i]->handle();
       }
       self->set_cooperative_wait_shape(
           wait_type ? XThread::CooperativeWaitKind::kMultiAny
@@ -676,11 +677,19 @@ XObject::SignalRecord g_signal_ring[kSignalRingSize] = {};
 
 void XObject::RecordCooperativeSignal(XObject* object) {
   SignalRecord rec = {};
-  rec.handle = object->handle();
+  // handle() is handles_[0] with NO bounds check - an object signalled before a
+  // handle is assigned (kernel objects during account/profile load) would index
+  // an empty vector. This crashed the emulator during kernel init.
+  rec.handle = object->handles().empty() ? 0 : object->handle();
   rec.type = static_cast<uint8_t>(object->type());
   rec.uptime_ms = uint32_t(Clock::QueryGuestUptimeMillis());
-  if (auto* thread = XThread::GetCurrentThread()) {
-    rec.signaler_thread = thread->handle();
+  // ⚠️ XThread::GetCurrentThread() ASSERTS on a non-guest thread. Signals come
+  // from host threads too (kernel init, the audio and I/O workers), so it must
+  // be guarded by IsInThread() - calling it unguarded aborted the emulator
+  // during account loading.
+  if (XThread::IsInThread()) {
+    auto* thread = XThread::GetCurrentThread();
+    rec.signaler_thread = thread->handles().empty() ? 0 : thread->handle();
     auto* state = thread->thread_state();
     if (state && state->context()) {
       rec.signaler_lr = uint32_t(state->context()->lr);

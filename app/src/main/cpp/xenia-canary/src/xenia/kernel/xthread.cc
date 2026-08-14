@@ -435,14 +435,18 @@ X_STATUS XThread::Create() {
       XELOGE("CreateThread failed (fiber)");
       return X_STATUS_NO_MEMORY;
     }
+    XELOGI("FIBERSEQ tid={:08X} fiber created ok", thread_id_);
     // Held until the scheduler reclaims the exited fiber, so a guest handle
     // release cannot free the stack out from under a running thread.
     Retain();
     if (thread_name_.empty()) {
       set_name(fmt::format("XThread{:04X}", thread_id_));
     }
+    XELOGI("FIBERSEQ tid={:08X} before EnsureStarted", thread_id_);
     kernel_state()->guest_scheduler()->EnsureStarted();
+    XELOGI("FIBERSEQ tid={:08X} before MarkReady", thread_id_);
     kernel_state()->guest_scheduler()->MarkReady(this);
+    XELOGI("FIBERSEQ tid={:08X} MarkReady ok", thread_id_);
     return X_STATUS_SUCCESS;
   }
 
