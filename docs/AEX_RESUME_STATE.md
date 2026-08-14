@@ -56,19 +56,35 @@ fires normally with the scheduler off). Watchdog shows
 code before executing a single guest instruction.** Safepoints exist only inside
 JIT'd guest code, so they cannot preempt it.
 
-## ▶️ NEXT ACTION (one probe)
+## ▶️ NEXT ACTION
 
-The wired wait paths are `XObject::Wait` and `XObject::WaitMultiple`. **Startup
-blocks somewhere else first.** Unwired suspects, in order:
+**Two fixes just landed** (`XThread::Delay` host-slept, blocking the whole
+dispatch thread; `XThread::Execute` deref'd `thread_->system_id()` which is NULL
+on the fiber path). Guest code now executes under the scheduler.
 
-1. `KeDelayExecutionThread` / the delay path (`CooperativeWaitKind::kDelay`)
-2. `XFile` / `XIoCompletion` I/O waits (module + content load)
-3. other `xboxkrnl_threading.cc` wait shims
+Current state with `guest_scheduler=true`:
 
-**Do this:** put a log probe on the host `xe::threading::Wait` / `WaitAny` /
-`Sleep` call sites in those files, run with `guest_scheduler=true`, and see
-which one the main fiber enters and never leaves. That names the shim to route
-through `CooperativeWait`.
+```
+CPU 0 running tid=7 'MAIN_THREAD' lr=82589EC4   <- real guest code
+       ready  tid=6 'Main XThread' lr=8219832C
+       blocked tid=8 'ASYNC_IO' on semaphore wait=single[1] gated=1
+CPU 1-5 idle
+```
+
+**The cooperative WAIT path is proven working** — ASYNC_IO parks correctly on a
+semaphore. JIT compilation runs. But **CPU 0 never switches**: MAIN_THREAD holds
+it with `preempt_requested=1` while tid=6 sits ready *on the same CPU* and CPUs
+1–5 idle. So the injected safepoints are not preempting.
+
+**Do next:**
+1. Lower the `PREEMPTINJECT` log threshold (currently every 1024 functions, so
+   it never fires with few compiles) and confirm the pass **emits** checks.
+2. If checks are emitted, verify `EmitPreemptCheck`'s tail path is reached —
+   the flag load/`cbnz` may be correct while the tail block that calls
+   `preempt_yield_handler` is never linked in.
+3. Also worth checking: threads are all landing on CPU 0 (`DispatchCpuOf`),
+   leaving 1–5 idle. Even without preemption, spreading them would let tid=6
+   run.
 
 ## How to test (exact, these cost hours to learn)
 
