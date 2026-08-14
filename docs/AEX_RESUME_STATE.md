@@ -102,25 +102,46 @@ but **the hot loop the guest is actually spinning in carries no check**. Early
 functions got checks (`checks_emitted` 4→9 over 5 functions); the loop at
 `lr=82589EC4` did not.
 
-### ▶️ NEXT ACTION
+### ⭐⭐ DECISIVE: the stuck fiber is NOT in guest code
 
-`PreemptCheckInjectionPass` finds loop heads by scanning for branches to
-**already-seen blocks** (blocks are in guest address order, so back-edges point
-backwards). That misses loops built from **calls** or an **indirect branch**
-(`bcctr` → `CallIndirect`), which is very likely what `82589EC4` is.
+Added `preempt_check_every_block` (cvar, default false) which injects a
+safepoint into **every HIR block**, not just detected loop heads — the blunt
+test of "the hot loop has no check".
 
-Fix options, cheapest first:
-1. **Inject at every function entry unconditionally** — the pass already seeds
-   `check_blocks` with `first_block()`; verify that is actually emitting, since
-   a call-based spin loop would then hit a check on each iteration.
-2. **Also inject before `CallIndirect`/`Call`**, so a loop whose back-edge is a
-   call still yields.
-3. Disassemble around guest `0x82589EC4` (`lr` in the watchdog) to see the loop
-   shape and confirm which case it is.
+**Result: no change whatsoever.** Same watchdog, same address:
+`MAIN_THREAD lr=82589EC4 preempt_requested=1`, tid=6 ready on the same CPU,
+CPUs 1–5 idle.
 
-Also still open and independently useful: **all threads land on CPU 0** while
-CPUs 1–5 idle. Spreading them via `DispatchCpuOf` would let tid=6 run even
-without preemption.
+If the fiber were executing guest code, a check in every block would fire
+within microseconds. It does not. Therefore:
+
+**tid=7 MAIN_THREAD is blocked inside a HOST function called from guest code.**
+`lr=82589EC4` is stale — it is the last guest call site before entering the
+host, not where the thread is. Safepoints exist only in JIT'd guest code and can
+never preempt this.
+
+### ▶️ NEXT ACTION — find the unrouted host wait
+
+Some kernel export called from guest `0x82589EC4` blocks on a host primitive
+instead of yielding. `XObject::Wait`/`WaitMultiple` and `XThread::Delay` are
+routed; this is something else.
+
+1. **Disassemble/identify guest `0x82589EC4`** and see which import it calls —
+   that names the export directly. (`xe::cpu` has a disassembler; or grep the
+   log's import table dump for the nearest address.)
+2. Or **probe the host blocking primitives**: log on entry/exit of
+   `xe::threading::Wait`, `WaitAny`, `WaitAll`, `Sleep`, `AlertableSleep` and
+   any `Fence::Wait`, run with the scheduler on, and see which call the main
+   fiber enters and never leaves.
+3. Strong suspects: `XIoCompletion`/`XFile` I/O waits, `XamContent*` /
+   `XamUserRead*` startup calls, and any `Fence` wait inside the audio or
+   content setup.
+
+Then route that path through `CooperativeWait` the same way
+`XObject::Wait` was.
+
+Also still open: **all threads land on CPU 0** while CPUs 1–5 idle
+(`DispatchCpuOf`).
 
 ## How to test (exact, these cost hours to learn)
 

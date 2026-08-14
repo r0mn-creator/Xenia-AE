@@ -20,6 +20,12 @@ DECLARE_bool(guest_scheduler);
 
 #include "xenia/base/logging.h"
 
+DEFINE_bool(preempt_check_every_block, false,
+            "AEX diagnostic: inject a cooperative-scheduler safepoint into "
+            "EVERY HIR block rather than only detected loop heads. Heavy, but "
+            "proves whether a spinning guest loop simply lacks a check.",
+            "CPU");
+
 namespace xe {
 namespace cpu {
 namespace compiler {
@@ -79,6 +85,23 @@ bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
       }
     }
   }
+  // DIAG/ESCAPE HATCH (aex): inject into EVERY block.
+  //
+  // Back-edge detection scans for branches to already-seen blocks, which misses
+  // loops whose cycle is formed by a call or an indirect branch (bcctr ->
+  // CallIndirect). Measured symptom: the preempt handler is entered ~6 times
+  // and then never again while the guest spins at one address forever.
+  //
+  // This is deliberately heavy-handed - it is the decisive test of "the hot
+  // loop has no check". If fibers start switching with this on, the theory is
+  // confirmed and the detection can then be narrowed properly.
+  if (cvars::preempt_check_every_block) {
+    for (auto block = builder->first_block(); block != nullptr;
+         block = block->next) {
+      check_blocks.insert(block);
+    }
+  }
+
   for (auto block : check_blocks) {
     // A block holding only fake instructions falls through, so the check
     // lands in the first real successor, still on every cycle through it.
