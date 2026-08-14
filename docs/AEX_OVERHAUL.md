@@ -410,3 +410,34 @@ records it under `cvars::log_safepoint_pc`, deliberately not ported. Do not read
 that field as evidence about safepoints.
 
 `guest_scheduler` is back to false; AEX renders the Halo 3 menu normally.
+
+### Blocker refined: the main fiber never reaches guest code
+
+⚠️ **Retract the previous "the injection pass never runs" claim** - that was a
+stale APK. With `guest_scheduler=false` the probes fire normally:
+`PREEMPTRUN call=0 guest_scheduler=0 first_block=1` and `CFAPASSRUN call=0`.
+
+With `guest_scheduler=true`, **none** of the pass probes fire - not even
+`CFAPASSRUN`, which works with the scheduler off. So **no JIT compilation
+happens at all**. Together with the watchdog showing
+`Running tid=6 'Main XThread' lr=00000000 preempt_requested=1`, the picture is:
+
+**the main fiber is stuck in HOST code before it ever executes a single guest
+instruction.** Safepoints only exist inside JIT'd guest code, so they can never
+preempt it - which is why raising `preempt_requested` changes nothing.
+
+### The actual remaining work
+
+The wait paths that are still NOT routed are the ones module load and startup
+use:
+
+* **`KeDelayExecutionThread` / the delay path** - a sleeping fiber must yield,
+  not block its dispatch thread (`CooperativeWaitKind::kDelay` exists for this).
+* **`XFile` / `XIoCompletion` I/O waits** - file reads during module and
+  content load.
+* **`xboxkrnl_threading.cc`** wait shims generally.
+
+`XObject::Wait` / `WaitMultiple` are wired, but startup blocks somewhere else
+first. **Find it by putting a probe on the host `xe::threading::Wait` call sites
+in those files, run with the scheduler on, and see which one the main fiber
+enters and never leaves.** That names the exact shim to route next.

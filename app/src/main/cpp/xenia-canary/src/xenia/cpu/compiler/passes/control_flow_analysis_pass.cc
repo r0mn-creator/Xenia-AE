@@ -14,6 +14,10 @@
 #include "xenia/cpu/compiler/compiler.h"
 #include "xenia/cpu/processor.h"
 
+#include <atomic>
+
+#include "xenia/base/logging.h"
+
 namespace xe {
 namespace cpu {
 namespace compiler {
@@ -30,6 +34,15 @@ ControlFlowAnalysisPass::ControlFlowAnalysisPass() : CompilerPass() {}
 ControlFlowAnalysisPass::~ControlFlowAnalysisPass() {}
 
 bool ControlFlowAnalysisPass::Run(HIRBuilder* builder) {
+  // DIAG(aex/preempt): does the pass pipeline run at all for this title?
+  // Splits "my pass is special" from "no passes run here".
+  {
+    static std::atomic<uint32_t> n{0};
+    uint32_t c = n.fetch_add(1);
+    if (c < 3) {
+      XELOGI("CFAPASSRUN call={}", c);
+    }
+  }
   // Reset edges for all blocks. Needed to be re-runnable.
   // Note that this wastes a bunch of arena memory, so we shouldn't
   // re-run too often.
