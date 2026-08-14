@@ -88,21 +88,39 @@ it with `preempt_requested=1` while tid=6 sits ready *on the same CPU* and CPUs
 So: checks exist, the register is right, the flag is set - and the fiber still
 never yields.
 
-**Do next (two remaining hypotheses):**
+### ⭐ HYPOTHESIS 1 ELIMINATED, HYPOTHESIS 2 CONFIRMED
 
-1. **The yield handler defers.** `PreemptCurrentFiber` declines to switch when
-   the guest holds the global critical region (`preempt_defers_lock`) or IRQL
-   >= 2. `irql=0` rules out the second; the first is plausible during startup.
-   **Log on entry to `PreemptCurrentFiber` and see whether it is entered and
-   declining, and check `preempt_defers_lock` in `SchedulerLinks`.**
-2. **The spin loop has no detected back-edge.** The pass injects at loop heads
-   found by scanning for branches to already-seen blocks; a loop built from
-   calls or an indirect branch (`bcctr` -> CallIndirect) may not be caught, so
-   the hot loop carries no check. Compare the watchdog guest address
-   (`lr=82589EC4`) against the functions the pass reported.
+Instrumented `PreemptCurrentFiber` (guest_scheduler.cc:78):
 
-Also still true: **all threads land on CPU 0** while CPUs 1-5 idle. Even with
-preemption working, spreading them via `DispatchCpuOf` would let tid=6 run.
+* It **IS entered** — `PREEMPTHANDLER entry #0..#5`.
+* It **does NOT decline** — no "holds global critical region" message ever.
+* But it is entered **only ~6 times total**, then never again, while the
+  watchdog keeps showing `MAIN_THREAD ... lr=82589EC4 preempt_requested=1`.
+
+So the mechanism works end to end — safepoint fires, handler runs, no defer —
+but **the hot loop the guest is actually spinning in carries no check**. Early
+functions got checks (`checks_emitted` 4→9 over 5 functions); the loop at
+`lr=82589EC4` did not.
+
+### ▶️ NEXT ACTION
+
+`PreemptCheckInjectionPass` finds loop heads by scanning for branches to
+**already-seen blocks** (blocks are in guest address order, so back-edges point
+backwards). That misses loops built from **calls** or an **indirect branch**
+(`bcctr` → `CallIndirect`), which is very likely what `82589EC4` is.
+
+Fix options, cheapest first:
+1. **Inject at every function entry unconditionally** — the pass already seeds
+   `check_blocks` with `first_block()`; verify that is actually emitting, since
+   a call-based spin loop would then hit a check on each iteration.
+2. **Also inject before `CallIndirect`/`Call`**, so a loop whose back-edge is a
+   call still yields.
+3. Disassemble around guest `0x82589EC4` (`lr` in the watchdog) to see the loop
+   shape and confirm which case it is.
+
+Also still open and independently useful: **all threads land on CPU 0** while
+CPUs 1–5 idle. Spreading them via `DispatchCpuOf` would let tid=6 run even
+without preemption.
 
 ## How to test (exact, these cost hours to learn)
 

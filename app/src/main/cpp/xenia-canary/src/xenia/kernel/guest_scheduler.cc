@@ -76,8 +76,23 @@ static constexpr uint32_t kLockPreemptDeferReport = 65536;
 // JIT safepoint handler. The cold path cleared the flag, so the deferred
 // cases re-set it to retry at the next safepoint.
 static void PreemptCurrentFiber(void* /*raw_context*/) {
+  // DIAG(aex/preempt): is the safepoint reaching this handler at all, and if so
+  // which path does it take? Checks are proven emitted and the flag is raised,
+  // yet CPU 0 never switches - so either this is never entered (no check on the
+  // hot loop) or it is entered and declines.
+  {
+    static std::atomic<uint32_t> n{0};
+    uint32_t c = n.fetch_add(1);
+    if (c < 6) {
+      XELOGI("PREEMPTHANDLER entry #{}", c);
+    }
+  }
   XThread* self = XThread::GetCurrentFiberThread();
   if (!self) {
+    static std::atomic<uint32_t> nf{0};
+    if (nf.fetch_add(1) < 3) {
+      XELOGI("PREEMPTHANDLER no fiber thread - returning");
+    }
     return;
   }
   auto* context = self->thread_state()->context();
@@ -87,6 +102,12 @@ static void PreemptCurrentFiber(void* /*raw_context*/) {
   // fiber stuck here instead - it means guest code is spinning under the global
   // lock, which the lock's own holder has to resolve.
   if (xe::global_critical_region::is_held_by_current_thread()) {
+    {
+      static std::atomic<uint32_t> nl{0};
+      if (nl.fetch_add(1) < 3) {
+        XELOGI("PREEMPTHANDLER declining - holds global critical region");
+      }
+    }
     context->preempt_requested = 1;
     if (++links.preempt_defers_lock == kLockPreemptDeferReport) {
       XELOGW(
