@@ -10,6 +10,7 @@
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/guest_scheduler.h"
 #include <vector>
+#include <optional>
 #include <mutex>
 
 #include "xenia/base/byte_stream.h"
@@ -483,6 +484,77 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     global_critical_region::mutex().unlock();
   }
   return object_ref<XObject>(result);
+}
+
+// ===== Cooperative wait helpers (ported from XenDroid) =====
+// docs/AEX_OVERHAUL.md, "Step 1, final piece".
+//
+// ⚠️ CURRENTLY UNUSED ON PURPOSE. These are landed inert so the remaining work
+// is only *wiring* XObject::Wait / WaitMultiple / SignalAndWait to them, rather
+// than writing and wiring at the same time. Nothing calls them yet, so they
+// cannot change behaviour - the host-thread wait path is untouched.
+
+// Runs on every cooperative wait exit, so it is also where the diagnostic wait
+// shape is dropped. Unconditional: a thread that never waits again must not
+// keep reporting a stale handle set.
+[[maybe_unused]] static void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
+  if (auto* self = XThread::GetCurrentThread()) {
+    self->clear_cooperative_wait_shape();
+  }
+  if (!kthread) {
+    return;
+  }
+  kthread->thread_state = KTHREAD_STATE_RUNNING;
+  kthread->wait_result = result;
+}
+
+// Drives the cooperative poll-yield loop for a fiber-backed waiter. Repeatedly
+// runs |poll| (a zero-timeout acquire returning the terminal X_STATUS on
+// success / abandon / failure, or std::nullopt while not yet signaled),
+// yielding via BlockCurrentThread between attempts, until it resolves, an
+// alertable user APC is pending, or |deadline_ms| (absolute host uptime,
+// 0 = infinite) elapses. Polling the host primitive preserves its exact acquire
+// semantics; only the blocking becomes cooperative. |wait_object| is the single
+// object waited on, null for a multi-wait.
+//
+// ⚠️ ORDERING IS LOad-BEARING: the signal epoch is sampled BEFORE polling. A
+// signal landing after a failed poll then changes the epoch, so the re-poll is
+// not skipped and the wake is not lost. Sampling after the poll reintroduces
+// exactly that race.
+template <typename PollFn>
+[[maybe_unused]] static X_STATUS CooperativeWait(GuestScheduler* scheduler,
+                                                 X_KTHREAD* kthread,
+                                                 XObject* wait_object,
+                                                 bool alertable,
+                                                 uint64_t deadline_ms,
+                                                 PollFn&& poll) {
+  while (true) {
+    // Alertable waits return on a queued user APC (the cooperative equivalent
+    // of a host alertable-wait wake); the caller then runs xeProcessUserApcs.
+    if (alertable) {
+      auto* self = XThread::GetCurrentThread();
+      if (self && self->HasPendingUserApc()) {
+        WaitExit(kthread, X_STATUS_USER_APC);
+        return X_STATUS_USER_APC;
+      }
+    }
+    uint32_t wait_epoch = 0;
+    if (wait_object) {
+      wait_epoch = wait_object->cooperative_signal_epoch();
+    } else if (auto* self = XThread::GetCurrentThread()) {
+      wait_epoch = self->cooperative_wait_set_epoch();
+    }
+    std::optional<X_STATUS> resolved = poll();
+    if (resolved) {
+      WaitExit(kthread, *resolved);
+      return *resolved;
+    }
+    if (deadline_ms != 0 && Clock::QueryHostUptimeMillis() >= deadline_ms) {
+      WaitExit(kthread, X_STATUS_TIMEOUT);
+      return X_STATUS_TIMEOUT;
+    }
+    scheduler->BlockCurrentThread(deadline_ms, wait_epoch, alertable);
+  }
 }
 
 // ===== Cooperative guest scheduler support (ported from XenDroid) =====
