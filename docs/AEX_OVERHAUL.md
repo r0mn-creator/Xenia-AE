@@ -301,3 +301,11 @@ would do the same. Port all of it, then flip `guest_scheduler`.
   `bonedistinct` - XDtester has the same names/formats for line-for-line diffs.
 * Success = AEX's draws/frame and packets/frame approaching XenDroid's
   (~611-641 vs our ~88-138) and run-to-run variance collapsing.
+
+### Landmine removed (read before wiring the wake side)
+
+`KernelState` constructs the `GuestScheduler` **unconditionally**, so
+`kernel_state()->guest_scheduler()` is always non-null. Guard cooperative paths
+on **`GuestScheduler::enabled()`**, never on the pointer alone - a pointer-only
+check calls into a scheduler that was never started. `WakeCooperativeWaiters`
+has been corrected; apply the same rule to every new call site.
