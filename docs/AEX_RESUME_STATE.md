@@ -76,15 +76,33 @@ semaphore. JIT compilation runs. But **CPU 0 never switches**: MAIN_THREAD holds
 it with `preempt_requested=1` while tid=6 sits ready *on the same CPU* and CPUs
 1–5 idle. So the injected safepoints are not preempting.
 
-**Do next:**
-1. Lower the `PREEMPTINJECT` log threshold (currently every 1024 functions, so
-   it never fires with few compiles) and confirm the pass **emits** checks.
-2. If checks are emitted, verify `EmitPreemptCheck`'s tail path is reached —
-   the flag load/`cbnz` may be correct while the tail block that calls
-   `preempt_yield_handler` is never linked in.
-3. Also worth checking: threads are all landing on CPU 0 (`DispatchCpuOf`),
-   leaving 1–5 idle. Even without preemption, spreading them would let tid=6
-   run.
+### Verified since (narrowing the preemption failure)
+
+* **Safepoints ARE emitted.** `PREEMPTINJECT functions=1 checks_emitted=4 ...
+  functions=5 checks_emitted=9` - the pass runs and injects at loop heads.
+* **The context register is correct.** `EmitPreemptCheck` reads the flag off
+  `x20`; both this fork and XenDroid document "Context register = x20"
+  (`a64_emitter.h:128`). Not a register-convention bug.
+* **The flag is raised** - watchdog shows `preempt_requested=1`, `irql=0`.
+
+So: checks exist, the register is right, the flag is set - and the fiber still
+never yields.
+
+**Do next (two remaining hypotheses):**
+
+1. **The yield handler defers.** `PreemptCurrentFiber` declines to switch when
+   the guest holds the global critical region (`preempt_defers_lock`) or IRQL
+   >= 2. `irql=0` rules out the second; the first is plausible during startup.
+   **Log on entry to `PreemptCurrentFiber` and see whether it is entered and
+   declining, and check `preempt_defers_lock` in `SchedulerLinks`.**
+2. **The spin loop has no detected back-edge.** The pass injects at loop heads
+   found by scanning for branches to already-seen blocks; a loop built from
+   calls or an indirect branch (`bcctr` -> CallIndirect) may not be caught, so
+   the hot loop carries no check. Compare the watchdog guest address
+   (`lr=82589EC4`) against the functions the pass reported.
+
+Also still true: **all threads land on CPU 0** while CPUs 1-5 idle. Even with
+preemption working, spreading them via `DispatchCpuOf` would let tid=6 run.
 
 ## How to test (exact, these cost hours to learn)
 
