@@ -430,19 +430,6 @@ typedef struct alignas(64) PPCContext_s {
   ThreadState* thread_state;
   uint8_t* virtual_membase;
 
-  // Ported from XenDroid (cooperative guest scheduler, docs/AEX_OVERHAUL.md).
-  // Nonzero asks the running fiber to yield at its next JIT safepoint. Other
-  // host threads write it as a single byte store, raced reads are benign. Not
-  // std::atomic because this struct lives in raw memory no constructor runs
-  // over.
-  uint8_t preempt_requested;
-
-  // Guest address of the last JIT safepoint this fiber executed, recorded only
-  // when log_safepoint_pc is on. A wedged fiber's link register names the last
-  // call it made, often nowhere near the loop it is stuck in; this names a
-  // block it provably reached.
-  uint32_t last_safepoint_pc;
-
   template <typename T = uint8_t*>
   inline T TranslateVirtual(uint32_t guest_address) XE_RESTRICT const {
     static_assert(std::is_pointer_v<T>);
@@ -486,6 +473,22 @@ typedef struct alignas(64) PPCContext_s {
   static std::string GetRegisterName(PPCRegister reg);
   std::string GetStringFromValue(PPCRegister reg) const;
   void SetValueFromString(PPCRegister reg, std::string value);
+
+  // ===== Cooperative guest scheduler (ported from XenDroid) =====
+  // AT THE END ON PURPOSE. These were first inserted next to thread_state,
+  // which shifted the offset of every field after it - the JIT addresses this
+  // struct by offset off x20, and the result was a black screen with the guest
+  // running but rendering nothing. Appending keeps every pre-existing offset
+  // untouched. See docs/AEX_OVERHAUL.md.
+  //
+  // Nonzero asks the running fiber to yield at its next JIT safepoint. Other
+  // host threads write it as a single byte store; raced reads are benign. Not
+  // std::atomic because this struct lives in raw memory no constructor runs
+  // over.
+  uint8_t preempt_requested;
+  // Guest address of the last JIT safepoint this fiber executed, recorded only
+  // when safepoint logging is on.
+  uint32_t last_safepoint_pc;
 
   void SetRegFromString(const char* name, const char* value);
   bool CompareRegWithString(const char* name, const char* value,
