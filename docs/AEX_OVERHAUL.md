@@ -166,3 +166,52 @@ CooperativeWait`, the fiber path in `Create()`), plus the wait-path call sites.
 **Keep `guest_scheduler` default OFF until steps 1-4 are all in.** AEX must boot
 identically to Canary AE until the whole chain lands - s34 proved partial
 enablement wedges the guest.
+
+---
+
+## ⚠️ OPEN: AEX black screen (2026-08-13)
+
+With Turnip R8 installed via the driver UI, **AEX renders but presents black**.
+Canary AE with the same driver on the same device shows the menu.
+
+### What is ruled out
+
+* **Not the driver.** `vulkan_lib_path` resolves to
+  `.../Turnip_v26.0.0_R8/vulkan.ad07xx.so` and the device enumerates as
+  "Turnip Adreno (TM) 740". R7 was tried first and also black - consistent with
+  the standing rule that *newest is not best*, but R8 is what Canary AE uses.
+* **Not the guest failing to run.** The log shows the guest actively producing
+  GPU work: **36,277 LOADDEST** lines and **943** resolve/memexport lines, at
+  the same 1152x640 render targets Canary AE uses.
+* **Not shader compilation.** `cache/pipelines_4D5307E6.bin` exists and the
+  screen stays black well past the point Canary AE reaches the menu.
+* **Not the PPCContext layout** (though that WAS a real bug - see below).
+
+So the emulation is running and the **presentation** is black.
+
+### One real bug found and fixed on the way
+
+`preempt_requested` / `last_safepoint_pc` were first added next to
+`thread_state`, in the middle of `PPCContext`. **The JIT addresses that struct
+by offset off x20**, so inserting mid-struct shifted every later field. Now
+appended at the end. This was a genuine defect independent of the scheduler and
+must never be reintroduced - if new context fields are ever needed, append them.
+
+### How to isolate it next
+
+AEX = `xd-memexport-transplant` + the scheduler foundation. Bisect the
+foundation commits on a scratch branch, testing the Halo 3 menu after each:
+
+* `06375414b` fiber foundation (boost_context, Fiber, PPCContext fields,
+  backend handlers, mutex helper, cvars)
+* `bbbdf4d86` XThread/XObject plumbing + base helpers
+* `efc5f25a4` scheduler compiles/links + XThread/XObject implementations
+* `<this>` PPCContext fields moved to end
+
+Prime suspects, in order: the XThread member additions (`fiber_`,
+`scheduler_links_`, `cooperative_wait_object_`, `fiber_exit_event_`), the two
+new XObject virtuals, and `threading.h`'s new `Fiber` declaration.
+
+⚠️ Note AEX's config is **fresh** and may differ from Canary AE's long-lived one
+(e.g. `readback_resolve` defaults to `"none"` here vs the `false` -> kFast that
+Canary AE's config yields). Diff the two TOMLs before assuming a code cause.
