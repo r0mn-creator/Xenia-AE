@@ -115,7 +115,7 @@ bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
   {
     static std::atomic<uint32_t> logged{0};
     uint32_t n = g_aex_preempt_fns.fetch_add(1) + 1;
-    if ((n & 1023u) == 0 && logged.fetch_add(1) < 8) {
+    if (logged.fetch_add(1) < 12) {
       XELOGI("PREEMPTINJECT functions={} checks_emitted={}", n,
              g_aex_preempt_checks.load());
     }
