@@ -16,10 +16,18 @@
 
 DECLARE_bool(guest_scheduler);
 
+#include <atomic>
+
+#include "xenia/base/logging.h"
+
 namespace xe {
 namespace cpu {
 namespace compiler {
 namespace passes {
+
+// DIAG(aex/preempt) counters.
+static std::atomic<uint32_t> g_aex_preempt_fns{0};
+static std::atomic<uint32_t> g_aex_preempt_checks{0};
 
 using namespace xe::cpu::hir;
 
@@ -28,6 +36,16 @@ PreemptCheckInjectionPass::PreemptCheckInjectionPass() : CompilerPass() {}
 PreemptCheckInjectionPass::~PreemptCheckInjectionPass() {}
 
 bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
+  // DIAG(aex/preempt): does this pass run at all, and what does it see?
+  {
+    static std::atomic<uint32_t> n{0};
+    uint32_t c = n.fetch_add(1);
+    if (c < 3) {
+      XELOGI("PREEMPTRUN call={} guest_scheduler={} first_block={}", c,
+             cvars::guest_scheduler ? 1 : 0,
+             builder->first_block() ? 1 : 0);
+    }
+  }
   // The bool return is pass success, not whether anything changed, and Compile
   // aborts the whole function on false.
   //
@@ -82,11 +100,24 @@ bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
             }
           }
           Instr* check = builder->CheckPreempt();
+          g_aex_preempt_checks.fetch_add(1);
           check->src1.offset = guest_address;
           check->MoveBefore(first);
         }
         break;
       }
+    }
+  }
+  // DIAG(aex/preempt): is this pass actually injecting safepoints? The
+  // scheduler dispatches but never switches fibers, and the watchdog's
+  // last_safepoint is always 0 here (log_safepoint_pc was not ported), so it
+  // cannot answer this.
+  {
+    static std::atomic<uint32_t> logged{0};
+    uint32_t n = g_aex_preempt_fns.fetch_add(1) + 1;
+    if ((n & 1023u) == 0 && logged.fetch_add(1) < 8) {
+      XELOGI("PREEMPTINJECT functions={} checks_emitted={}", n,
+             g_aex_preempt_checks.load());
     }
   }
   return true;

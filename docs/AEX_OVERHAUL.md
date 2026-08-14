@@ -360,3 +360,53 @@ sequence in `XThread::Create` to see which one trips. Prime suspects:
    at a switch point (`is_held_by_current_thread`).
 
 **`guest_scheduler` is back to false and AEX renders the Halo 3 menu normally.**
+
+---
+
+## Steps 2-4 landed; blocker is now precisely located (2026-08-14)
+
+Ported ~150 targeted lines (NOT a wholesale copy): `OPCODE_CHECK_PREEMPT`,
+`HIRBuilder::CheckPreempt`, `A64Emitter::EmitPreemptCheck`, the a64
+`CHECK_PREEMPT` sequence, and `PreemptCheckInjectionPass` registered in the
+`PPCTranslator` constructor.
+
+### What the watchdog now proves
+
+```
+CPU 0 running tid=00000006 'Main XThread' preempt_requested=1
+GuestScheduler: CPU 0 has not switched fibers in 2000 watchdog ticks
+```
+
+**`preempt_requested=1`** - the scheduler's quantum timer IS raising the flag.
+The fiber simply never tests it, so it never yields and every other CPU starves.
+
+### The remaining defect: the injection pass never runs
+
+`PreemptCheckInjectionPass::Run()` is **never called**. Proven:
+* a probe at the very first line of `Run()` (before any early return) produces
+  **no output at all**;
+* the probe strings ARE in the shipped binary (`strings libe.so | grep
+  PREEMPTRUN` = 1), and the object file exists, so this is not a stale build;
+* the pass IS registered - `ppc_translator.cc:62`, unconditionally, in the
+  `PPCTranslator` constructor.
+
+So the pass is compiled, linked and registered, yet its `Run` never executes.
+**That is the next thing to solve.** Candidates:
+1. `Compiler::Run` may skip passes it does not recognise, or iterate a list the
+   constructor-added pass is not in (check how `AddPass` stores them and whether
+   anything filters by pass name/type).
+2. This fork may not route Halo 3's translation through `PPCTranslator` at all -
+   confirm by putting the same probe in `ControlFlowAnalysisPass::Run`, which is
+   registered on the very next line. **If that probe is also silent, the whole
+   pass pipeline is bypassed and the problem is upstream of this pass.**
+
+That second check is the cheapest next experiment and cleanly splits "my pass is
+special" from "no passes run here".
+
+### Diagnostic trap recorded
+
+`last_safepoint` in the watchdog is **always 0** in this port - XenDroid only
+records it under `cvars::log_safepoint_pc`, deliberately not ported. Do not read
+that field as evidence about safepoints.
+
+`guest_scheduler` is back to false; AEX renders the Halo 3 menu normally.
