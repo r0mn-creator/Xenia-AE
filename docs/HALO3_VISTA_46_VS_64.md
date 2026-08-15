@@ -2211,3 +2211,86 @@ rather than anywhere in the GPU backend.
 
 **Verify that first** - it is a local, offline check and it either opens the CPU
 axis or closes it.
+
+---
+
+## 39. ⭐⭐⭐⭐ MEASURED: THE GUEST COMPUTES A MIRRORED CAMERA. IT IS A CPU BUG.
+
+**2026-08-15. This overturns section 23.2 and moves the vista out of the GPU
+backend entirely.**
+
+### 39.1 Closing 23.2's hole
+
+Section 23.2 concluded from VSCONST that "the guest is NOT producing a mirrored
+transform". That probe **dedupes on the vertex-shader hash alone**, so it logs
+each shader exactly once - whichever constants happened to be live on that
+shader's first ever draw. Every later draw with different constants was never
+sampled. The conclusion was never actually tested.
+
+New probe `debug.canary.vsconst_states` (in **both** trees, identical name and
+format) dedupes on **(shader hash, hash of c0..c7)**, so it captures every
+distinct transform a shader draws with. 256-entry table with an overflow guard -
+without the guard an unmatched key finds no free slot either and every draw
+logs, which produced 583k lines on the first attempt.
+
+### 39.2 The result
+
+Both builds at the Halo 3 main menu, same device, same driver. Taking c3.x - a
+distinctive camera basis component with magnitude ~0.995:
+
+| build | samples | c3.x POSITIVE | c3.x NEGATIVE | mean abs |
+|---|---|---|---|---|
+| **XDtester** | 254 | **254** | **0** | 0.994675 |
+| **Canary AEX** | 255 | 34 | **221** | 0.995737 |
+
+Per-shader, on shaders present in both, the pattern is a **sign flip at matching
+magnitude** rather than a different value. For `488D9488AB7ED7D8`:
+
+```
+c0  AEX=( 0.0914172, -1.40483,  0.0777927, ...)
+c0  XD =(-0.0910121, -1.40483,  0.0782452, ...)
+c1  AEX=(0.227969, -0.123224, -2.49314, ...)
+c1  XD =(0.227827, +0.1241,    +2.49311, ...)
+c3  AEX=(-0.993814, -0.0684036, -0.0874919, ...)
+c3  XD =(+0.993838, -0.0681431, -0.0874273, ...)
+```
+
+Magnitudes agree to 4-5 significant figures while several components carry
+opposite signs. **A panning camera would change magnitudes; this keeps them and
+flips signs.** That is a mirrored basis, not a sampling artifact.
+
+### 39.3 What it means
+
+**The guest itself computes a mirrored camera.** The mirror is present in the
+constants the PowerPC code uploads, before a single GPU stage runs - which is
+exactly why sections 14-38 found every GPU stage identical to the build that
+renders correctly. The vista is a **CPU-side emulation defect**, not a render
+bug.
+
+This retires the entire Y-sign search space in the GPU backend, and explains why
+~25 hypotheses there all failed.
+
+### 39.4 Not yet found
+
+A first diff of the a64 backend (`a64_sequences.cc`, `a64_seq_vector.cc`)
+against XenDroid shows only cosmetic differences - brace style, a scratch
+register choice, comment wording - and identical `fnmsub`/`fnmadd` handling. So
+the divergence is not a one-line opcode sign error in the obvious place.
+
+Candidates, in order:
+1. **XenDroid's four JIT optimisation passes that AE lacks**
+   ([[project-xendroid-comparison]]) - a miscompile in an AE pass would produce
+   exactly this: correct magnitudes, wrong signs.
+2. FPSCR / rounding-mode or denormal handling around the camera maths.
+3. Kernel-side float helpers.
+
+### 39.5 How to reproduce the measurement
+
+```
+setprop debug.canary.vsconst_states 1     # both builds
+# AEX  library tile (488,525), two taps ~3s apart after ~12s
+# XDtester tile (494,360), same
+grep -a VSCONSTSTATE <log>                # 257 lines incl. the "table full" line
+```
+Then compare the sign of c3.x across states. Fast, and it discriminates in one
+run per build.
