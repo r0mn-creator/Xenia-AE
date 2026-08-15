@@ -2452,3 +2452,44 @@ camera appears, are the strongest remaining thread: they are the same shaders
 `ndcy_draw` flags as `extent_y=8192, flipped=0`, and XenDroid does not draw them
 at that point. Determine what those three draws are (a pre-pass? a clear?) and
 why AEX issues them first - the camera negation appears on the very next state.
+
+### 40.6 Third bisection round - two more real bugs fixed, vista unchanged
+
+| tried | histogram | vista |
+|---|---|---|
+| `dcbz` 32 -> 128 bytes (`3d461e5e5`) | **34/221, bit-identical** | unchanged |
+| `saverest_fast = 0` | **34/221, bit-identical** | unchanged |
+| EVENT_WRITE_ZPD addressing + A-only sentinel (`5e3d6cef4`) | **34/221, bit-identical** | unchanged |
+
+⭐ **That three independent, genuine CPU/GPU-side fixes move the histogram by
+exactly zero is itself a strong signal:** the camera constants are completely
+insensitive to the dcbz semantics, the save/restore helper path, and the
+occlusion-query writeback. Whatever produces them is not reached through any of
+those.
+
+### 40.7 Honest assessment of the approach
+
+Bisecting emulator subsystems has now produced three real bug fixes and zero
+movement on the vista across roughly a dozen device runs. The technique has
+stopped paying: each round costs a build plus a 2-3 minute run and returns the
+same 34/221.
+
+**The next technique should be guest-level, not emulator-level.** The divergence
+is at a known point (section 40.1: first camera state, shader
+`E05650CA89E232AF`, state index ~33-36, everything before bit-identical). The
+question is what PowerPC code writes those constants and what it read to compute
+them. Options, cheapest first:
+
+1. **Trace the guest writes to the constant memory.** The values reach the GPU
+   as SET_CONSTANT/SET_SHADER_CONSTANTS PM4 payloads assembled by D3D from a
+   guest matrix. Find the guest address that matrix lives at, set a write watch
+   on it, and capture the guest LR of the writer in both builds. That names the
+   guest function, and the two builds can then be compared instruction by
+   instruction at a known call site.
+2. **Use the desktop oracle as a third data point.** `xenia_canary` at
+   `/home/roman/xeniatest/oracle` is upstream on x86. Running the same probe
+   there says whether upstream-on-x86 produces the positive or negative camera,
+   which separates "AE fork regression" from "a64 backend" - a distinction none
+   of the tests so far can make.
+
+Option 2 is cheap and should be done first; it is a local, offline run.
