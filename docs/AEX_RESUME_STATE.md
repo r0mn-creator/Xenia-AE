@@ -120,11 +120,44 @@ within microseconds. It does not. Therefore:
 host, not where the thread is. Safepoints exist only in JIT'd guest code and can
 never preempt this.
 
-### ▶️ NEXT ACTION — find the unrouted host wait
+### ⭐⭐⭐ FOUND (2026-08-14): the unrouted wait is the guest SPINLOCK
 
-Some kernel export called from guest `0x82589EC4` blocks on a host primitive
-instead of yielding. `XObject::Wait`/`WaitMultiple` and `XThread::Delay` are
-routed; this is something else.
+`xeKeKfAcquireSpinLock` (`xboxkrnl_threading.cc`) retried its CAS with
+`xe::threading::Sleep(0)` / `MaybeYield()` — **host-thread** yields. Under the
+fiber scheduler that sleeps the *dispatch thread the lock holder is queued on*,
+so the holder can never run and the CAS never succeeds.
+
+Every observation fits: the loop is host C++ (so a safepoint in every HIR block
+correctly changed nothing), `lr=82589EC4` is the stale guest call site that
+called `KfAcquireSpinLock`, and tid=6 ready **on the same CPU** is the starved
+holder. Found by source-diffing against XenDroid with no device attached.
+
+**Root cause class: the scheduler ENGINE was fully ported (`guest_scheduler.h`
+is byte-identical to XenDroid's) but its CALL SITES were not.**
+
+Fixed in `2faeb88b0` along with the rest of the missing call sites:
+`xboxkrnl_threading` (spinlock/NtYieldExecution/APC wake), `xfile` (5×
+`RunBlockingHostCall`), `xiocompletion`, `a64_seq_memory`, XMA, xam UI/NUI,
+the `CooperativeWaiterFifo` + Begin/End overrides on XEvent/XSemaphore/XMutant,
+the `cooperative_pulse_epoch` lost-wakeup fix and `alertable` pass-through in
+`XObject::Wait`, and the **completely missing fiber paths in `XThread::Exit`
+and `XThread::Terminate`** (they would have killed the shared dispatch thread).
+
+⚠️ **Untested on device** — the Odin 2 was not connected. `guest_scheduler`
+still defaults false, so the change is inert until the cvar is flipped.
+
+**Known gaps, deliberate:** `xsocket.cc` (XenDroid rewrote it on asio, 956 vs
+our 370 lines; no networking in Halo 3 offline) and their
+`WaitEnter`/`AcquireStatus`/`GetWaitHandleForCurrentThread` wait-system
+refactor (touches the host-thread path too).
+
+### ▶️ NEXT ACTION — retest on the Odin with `guest_scheduler=true`
+
+Install, launch Halo 3, and read the watchdog: does CPU 0 **switch**, and do
+CPUs 1–5 pick up threads? Then the vista at the main menu (~45 s), then the
+PM4 probes vs XDtester.
+
+If it still wedges, the remaining unrouted-wait candidates below are unchanged:
 
 ⚠️ `log_all_kernel_calls = true` produces **no output** - it is gated behind
 `logging::ShouldLog(LogLevel::Debug)`, and the shipped log level is Info. Either
@@ -146,7 +179,8 @@ Then route that path through `CooperativeWait` the same way
 `XObject::Wait` was.
 
 Also still open: **all threads land on CPU 0** while CPUs 1–5 idle
-(`DispatchCpuOf`).
+(`DispatchCpuOf`). This may well have been a *symptom* of the spinlock wedge —
+recheck it after the retest before investigating separately.
 
 ## How to test (exact, these cost hours to learn)
 
