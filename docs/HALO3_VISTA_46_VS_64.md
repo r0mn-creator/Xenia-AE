@@ -1993,3 +1993,72 @@ Re-run the symmetric probes after each step; they are all built and default OFF:
 `debug.canary.pm4total`, `pm4draw`, `drawentry`, `bonedistinct`. Success looks
 like AE's draws/frame and total packets/frame approaching XenDroid's, and the
 run-to-run variance collapsing. **The vista is the cheap visual proxy (s26).**
+
+---
+
+## 36. ⭐⭐⭐ DECISIVE: the flip is at DRAW time — the dump is innocent
+
+**Date 2026-08-15. Branch `canary-aex`. This resolves the section 16.5 vs 23.2
+contradiction, in favour of 16.5.**
+
+### 36.1 The instrument
+
+New probe `debug.canary.dump_row_marker` (diagnostic, default OFF), the
+companion to `resolve_row_marker` but **one stage earlier**. Built directly into
+the SPIR-V that `GetDumpPipeline` generates: right after the dump shader loads
+its source texel from the host render target, the colour is replaced with a
+ramp keyed on `source_pixel_y`, the row **in the host render target**.
+
+Same ramp convention as the resolve marker so the two readouts compare
+directly: **green at row 0, red at row 512**.
+
+Colour targets only, float components only (`!key.is_depth && !source_is_uint`).
+Logs `DUMPMARKER injected into dump pipeline (...)` per pipeline so the probe
+can report that it fired — it fired 4 times in the run below.
+
+### 36.2 Result: green at the TOP
+
+Measured, not eyeballed — column x=960 of `scratchpad/dump_marker_result.png`:
+
+| screen y | R | G |
+|---|---|---|
+| 60 | 8 | **25** |
+| 330 | 14 | 18 |
+| 510 | 17 | 12 |
+| 690 | 21 | 7 |
+| 960 | **28** | 2 |
+
+Green falls monotonically 25 -> 1 top to bottom; red rises monotonically 8 -> 28.
+Green is high at row 0, so **host render target row 0 lands at the TOP of the
+screen.**
+
+### 36.3 What this establishes
+
+The whole chain **host RT -> EDRAM dump -> resolve -> texture load -> tiling ->
+composite** is orientation-preserving, end to end. Combined with the earlier
+resolve-marker result (which cleared everything from the resolve destination
+onward), there is now no stage left downstream of the draw that mirrors.
+
+**Therefore the host render target's CONTENT is already mirrored, and the flip
+is introduced at DRAW time.** Section 16.5 predicted exactly this; section 36
+measures it.
+
+### 36.4 What this means for section 23.2
+
+Section 23.2 concluded from VSCONST that "the guest is NOT producing a mirrored
+transform". That conclusion and this measurement cannot both be right. Either
+the guest constants do encode the mirror and the VSCONST comparison missed it,
+or **the mirror is introduced by our own draw-time Y handling** — the viewport
+Y/height computation or the NDC-Y conversion in the SPIR-V shader translator.
+
+Note the previously "cleared" checks in 16.3 covered the **transfer/dump**
+shaders' `pixels_to_ndc_y` and `VulkanCommandProcessor::SetViewport`. The guest
+**draw** path's NDC-Y conversion lives in `SpirvShaderTranslator`, which is a
+different place and has not been given the same treatment.
+
+### 36.5 Next
+
+Compare, for the vista draws specifically and at runtime (values, not source):
+`draw_util::GetHostViewportInfo` output (y, height, and its sign) and the
+`SpirvShaderTranslator` NDC-Y conversion, AE vs XenDroid. The search space is
+now one stage wide, which it has never been before.

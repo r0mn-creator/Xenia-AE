@@ -6145,6 +6145,52 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
       spv::NoPrecision, builder.makeVectorType(source_component_type, 4), false,
       true, false, false, false, source_texture_parameters,
       spv::ImageOperandsMaskNone);
+
+  // DIAG(gpu/dump): source-row marker for the Halo 3 upside-down vista.
+  //
+  // Companion to debug.canary.resolve_row_marker, one stage EARLIER. That probe
+  // injected a known orientation at the resolve and proved everything from the
+  // resolve destination onward preserves it. This one injects at the host
+  // render target -> EDRAM dump instead, keyed on the SOURCE row in the host
+  // render target, which splits the contradiction the investigation is stuck
+  // on (doc sections 16.5 vs 23.2):
+  //
+  //   green at the TOP    -> the dump preserves orientation too, so the host RT
+  //                          CONTENT is already mirrored and the flip happens at
+  //                          DRAW time (section 23.2's "guest transform is not
+  //                          mirrored" would then be wrong);
+  //   green at the BOTTOM -> the dump itself mirrors, so section 16.5's diff of
+  //                          this stage missed something.
+  //
+  // Same ramp convention as the resolve marker so the two readouts compare
+  // directly: green at row 0, red at row 512.
+  //
+  // Colour targets only (a depth dump repacks through a different path), and
+  // only for float components - a uint render target would need the ramp packed
+  // as integers and the vista is not one. Diagnostic, default OFF.
+  if (!key.is_depth && !source_is_uint &&
+      XE_AE_EXPERIMENT_ENABLED("debug.canary.dump_row_marker")) {
+    spv::Id marker_y_float =
+        builder.createUnaryOp(spv::OpConvertUToF, type_float, source_pixel_y);
+    spv::Id marker_ramp =
+        builder.createBinOp(spv::OpFMul, type_float, marker_y_float,
+                            builder.makeFloatConstant(1.0f / 512.0f));
+    spv::Id marker_ramp_inv =
+        builder.createBinOp(spv::OpFSub, type_float,
+                            builder.makeFloatConstant(1.0f), marker_ramp);
+    id_vector_temp.clear();
+    id_vector_temp.push_back(marker_ramp);      // red   = y / 512
+    id_vector_temp.push_back(marker_ramp_inv);  // green = 1 - y / 512
+    id_vector_temp.push_back(builder.makeFloatConstant(0.0f));
+    id_vector_temp.push_back(builder.makeFloatConstant(1.0f));
+    source_vec4 = builder.createCompositeConstruct(
+        builder.makeVectorType(source_component_type, 4), id_vector_temp);
+    XELOGI(
+        "DUMPMARKER injected into dump pipeline (msaa={} format={} "
+        "source_is_uint=0)",
+        uint32_t(key.msaa_samples), uint32_t(key.GetColorFormat()));
+  }
+
   if (key.is_depth) {
     source_texture_parameters.sampler =
         builder.createLoad(source_stencil_texture, spv::NoPrecision);
