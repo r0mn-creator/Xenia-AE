@@ -2143,3 +2143,71 @@ compare: `debug.canary.vista_rt_base` (already built,
 `vulkan_render_target_cache.cc:6491`) and `debug.canary.halo3_vista_probe`
 (`vulkan_command_processor.cc:2643`). If AE's base differs from XD's, that names
 the wrong-RT directly. If they match, count the draws targeting that RT in each.
+
+---
+
+## 38. The scheduler is NOT the vista fix, and neither is UMA readback
+
+**2026-08-15, continuing sections 36-37.**
+
+### 38.1 ⭐⭐ XenDroid renders the vista CORRECTLY with guest_scheduler=false
+
+Set `guest_scheduler = false` in XDtester and gave it real time. It walks the
+Bungie intro at 32.6 FPS, reaches the main menu, and renders the vista **right
+side up at 16.9 FPS** — a frame rate comparable to Canary AE's ~15.
+
+⚠️ **RETRACTION.** An earlier run the same day was scored as "XenDroid also gets
+stuck at the title screen, so the scheduler is load-bearing". That was giving up
+after ~90 s. It was slow, never stuck. **"Stuck" and "slow" look identical if
+you stop watching too early** — and screenshots of equal file size over a short
+window are not evidence of a hang.
+
+**Consequence: finishing AEX's cooperative-scheduler port will NOT un-flip the
+vista.** The vista is a defect in non-scheduler code, and XenDroid's correct
+rendering without the scheduler means the difference is portable GPU/emulation
+code, not the threading model. (This says nothing either way about the ball.)
+
+### 38.2 Config diff: only FOUR real divergences
+
+Applying the technique that solved NFS Carbon — diff the config against a fork
+that works, before suspecting code. Shared cvars, values compared:
+
+| cvar | AEX | XDtester |
+|---|---|---|
+| `collapse_ctr_spin_loops` | false | true |
+| `collapse_memory_delay_spins` | false | true |
+| `park_memory_poll_loops` | false | true |
+| `readback_resolve` | **none** | **uma** |
+
+The first three are the JIT spin passes deliberately defaulted OFF here (they
+regress without preemption, section 34). That left one.
+
+### 38.3 readback_resolve=uma tested — NOT the fix
+
+`ReadbackResolveMode::kUma` is already ported and was recorded as the mechanism
+behind XenDroid's ball fix, but AEX's config had it at `none`. Set it to `uma`
+plus `debug.canary.shared_memory_host_visible=1` (it silently falls back to
+kFast without the host-mapped buffer).
+
+**Result: the image changed substantially but is still wrong** — the vista
+becomes a close-up rocky texture rather than the landscape, and the frame rate
+drops to ~5.5-7.9 FPS. Reverted to `none`.
+
+So the vista is not explained by any remaining config divergence.
+
+### 38.4 Where that leaves it
+
+Everything GPU-side has now been measured identical to the build that renders
+correctly: the dump/resolve/composite chain (36, 37.3), the NDC-Y regime per
+shader (37.2), the render target path, and now the configuration (38.2). The
+scene is the same scene, vertically mirrored, with the 2D UI upright.
+
+The untested axis is the **CPU side**. `docs/` records that the desktop RADV
+oracle - the same AE lineage built for x86 - renders Halo 3 cleanly. If that
+includes an upright vista, then the same emulator code produces a correct camera
+on an x86 JIT and a mirrored one on the a64 JIT, which would place the mirror in
+guest-side float maths (a camera up-vector built from sin/cos, for instance)
+rather than anywhere in the GPU backend.
+
+**Verify that first** - it is a local, offline check and it either opens the CPU
+axis or closes it.

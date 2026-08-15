@@ -2912,6 +2912,89 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
+  // DIAG(gpu/guest-constants): every DISTINCT constant state each vertex shader
+  // draws with - not just the first one.
+  //
+  // debug.canary.vsconst above dedupes on the shader hash ALONE, so it logs one
+  // sample per shader: whichever constants happened to be live on that shader's
+  // very first draw. Section 23.2 concluded from it that "the guest is NOT
+  // producing a mirrored transform" - but a shader used by both a reflection
+  // pass and the main pass would have had only one of the two sampled, and every
+  // later draw with different constants was never logged. Section 37 measured
+  // that the two builds must be drawing different CONTENT (identical NDC-Y,
+  // both chains orientation-preserving), which requires exactly such a hole.
+  //
+  // Halo 3's menu vista sits over water. A reflection pass mirrors the camera
+  // about the water plane, which IS a negated view matrix. If the vista draw
+  // observes the reflection pass's constants - the same "draws don't observe
+  // constant updates" defect that collapses the bone matrices into a ball
+  // (debug.canary.bonedistinct) - the scene renders inverted while every
+  // GPU-side transform stays identical to XenDroid. That is the hypothesis this
+  // probe tests.
+  //
+  // Dedupes on (shader hash, hash of c0..c7) so the output is bounded but shows
+  // EVERY distinct transform a shader draws with, with a per-shader count.
+  //
+  // Property name and output format must stay IDENTICAL in XDtester or the logs
+  // will not diff.
+  if (XE_AE_DIAG_ENABLED("debug.canary.vsconst_states")) {
+    const uint32_t* creg = register_file_->values;
+    uint64_t vs_hash =
+        vertex_shader ? vertex_shader->ucode_data_hash() : uint64_t(0);
+    uint64_t ch = 1469598103934665603ull;
+    for (uint32_t c = 0; c <= 7; ++c) {
+      const uint32_t* cu = &creg[XE_GPU_REG_SHADER_CONSTANT_000_X + (c << 2)];
+      for (uint32_t k = 0; k < 4; ++k) {
+        ch ^= cu[k];
+        ch *= 1099511628211ull;
+      }
+    }
+    uint64_t key = vs_hash ^ (ch * 31u);
+    if (!key) key = 1;
+    static std::atomic<uint64_t> vsconst_state_keys[256];
+    static std::atomic<uint32_t> vsconst_state_count{0};
+    static std::atomic<bool> vsconst_state_full{false};
+    // Once the table fills, an unmatched key finds no free slot either, so
+    // without this guard every subsequent draw would log - 51k lines in the
+    // first run that had it. Stop at capacity and say so once.
+    bool seen = vsconst_state_full.load(std::memory_order_relaxed);
+    if (!seen) {
+      bool stored = false;
+      for (auto& slot : vsconst_state_keys) {
+        uint64_t v = slot.load(std::memory_order_relaxed);
+        if (v == key) {
+          seen = true;
+          break;
+        }
+        if (!v && slot.compare_exchange_strong(v, key)) {
+          stored = true;
+          break;
+        }
+      }
+      if (!seen && !stored) {
+        if (!vsconst_state_full.exchange(true)) {
+          XELOGI("VSCONSTSTATE table full at {} states - not logging more",
+                 vsconst_state_count.load());
+        }
+        seen = true;
+      }
+    }
+    if (!seen) {
+      uint32_t n = vsconst_state_count.fetch_add(1) + 1;
+      xe::StringBuffer vb;
+      vb.AppendFormat("VSCONSTSTATE n={} vs={:016X} chash={:016X} ey={}", n,
+                      vs_hash, ch, viewport_info.xy_extent[1]);
+      for (uint32_t c = 0; c <= 7; ++c) {
+        const uint32_t* cu =
+            &creg[XE_GPU_REG_SHADER_CONSTANT_000_X + (c << 2)];
+        const float* cf = reinterpret_cast<const float*>(cu);
+        vb.AppendFormat(" c{}=({:.6g},{:.6g},{:.6g},{:.6g})", c, cf[0], cf[1],
+                        cf[2], cf[3]);
+      }
+      XELOGI("{}", vb.buffer());
+    }
+  }
+
   // Update dynamic graphics pipeline state.
   UpdateDynamicState(viewport_info, primitive_polygonal,
                      normalized_depth_control, draw_resolution_scale_x,
