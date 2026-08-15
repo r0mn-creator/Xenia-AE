@@ -2062,3 +2062,84 @@ Compare, for the vista draws specifically and at runtime (values, not source):
 `draw_util::GetHostViewportInfo` output (y, height, and its sign) and the
 `SpirvShaderTranslator` NDC-Y conversion, AE vs XenDroid. The search space is
 now one stage wide, which it has never been before.
+
+---
+
+## 37. ⭐⭐⭐ IT IS NOT A FLIP — the two builds DRAW DIFFERENT CONTENT
+
+**2026-08-15, same session as section 36. This supersedes the framing the whole
+document has used since section 14.**
+
+### 37.1 The oracle, captured in its correct state
+
+`scratchpad/xd_vista_correct.png` — XDtester, Halo 3 main menu, vista **right
+side up**: ground at the bottom, sky at the top, wreck and menu overlay all
+correct, 16.8 FPS. Same device, same game, same Turnip driver as AEX. Every
+comparison below is against this.
+
+### 37.2 NDC-Y is IDENTICAL between the two builds
+
+`debug.canary.ndcy_draw` in both (the probe already existed in both trees, same
+name and format). 43 vertex shaders appear in both logs.
+
+* **Every shared shader has the same `flipped` flag and the same
+  `ndc_scale_y`.** 40 are `ndc_scale_y=-1, flipped=1`; the same 3 are
+  `ndc_scale_y=0.00024414062 (1/4096), flipped=0, extent_y=8192` in both.
+* XD logged one extra shader (`0455646B0C370966`), simply having got further.
+* One numeric difference in the entire dataset: shader `D020A6D8A05BD5CC` has
+  `extent_y=343` in AEX and `extent_y=512` in XD. An extent, not a sign.
+
+So the viewport maths is not the difference, and the claim in `draw_util.cc`
+that "ndc_scale[1] ... is the ONLY thing that can flip Y" does not locate the
+bug — that value is identical in the build that renders correctly.
+
+### 37.3 XenDroid's chain preserves orientation TOO
+
+The `dump_row_marker` probe of section 36 was ported into XDtester
+(`897d2add9` in the xendroid tree) — identical placement, name and ramp.
+
+| column x=960 | AEX R/G | XenDroid R/G |
+|---|---|---|
+| y=60 (top) | 8 / **25** | 9 / **26** |
+| y=510 | 17 / 12 | 17 / 13 |
+| y=960 (bottom) | **28** / 2 | **26** / 1 |
+
+`scratchpad/xd_dump_marker_result.png`. Identical. **Both builds map host render
+target row 0 to the top of the screen.** There is no compensating flip in
+XenDroid to port.
+
+### 37.4 What that leaves — and why "flip" is the wrong word
+
+Both chains preserve orientation. Both NDC-Y regimes are identical. The guest
+constants matched back in 23.2. Yet one build's vista is correct and the other's
+is inverted.
+
+**Therefore the host render target CONTENT differs. The two builds are not
+drawing the same thing.** Nothing about the transform or the presentation is
+wrong in AE; the pixels going in are different.
+
+### 37.5 The hypothesis this points at
+
+Halo 3's menu vista sits over water, and a **water-reflection pass is
+legitimately rendered upside down**. If AE composites the reflection render
+target because the real scene draws were never submitted, the result is exactly
+what is observed: an otherwise-correct scene, inverted, deterministic, with the
+2D UI unaffected.
+
+This would unify the vista with the ball for the first time. Section 30 measured
+that the guest issues **4.6-7x fewer draws** in AE (88-138 vs 611-641) and that
+the draws are missing from the ring buffer rather than dropped by us. A vista
+composed from the wrong render target because the later passes never ran is the
+same defect seen from the other end — and it matches the long-standing intuition
+that "if the vista is upside down, the character is a ball".
+
+⚠️ It also means **no amount of Y-sign work can fix this**, which is consistent
+with every Y-sign hypothesis in sections 14-23 having failed.
+
+### 37.6 Next
+
+Identify which render target the vista is composited from, in each build, and
+compare: `debug.canary.vista_rt_base` (already built,
+`vulkan_render_target_cache.cc:6491`) and `debug.canary.halo3_vista_probe`
+(`vulkan_command_processor.cc:2643`). If AE's base differs from XD's, that names
+the wrong-RT directly. If they match, count the draws targeting that RT in each.
