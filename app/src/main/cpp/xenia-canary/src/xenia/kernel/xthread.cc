@@ -544,6 +544,17 @@ X_STATUS XThread::Exit(int exit_code) {
   // Notify processor of our exit.
   emulator()->processor()->OnThreadExit(thread_id_);
 
+  if (fiber_) {
+    // On a fiber, Thread::Exit() would kill the shared dispatch thread. Wake
+    // our waiters, hand ourselves to the scheduler, and yield forever. The
+    // dispatcher drops our last handle once it is back on the idle fiber.
+    running_ = false;
+    fiber_exit_event_->Set();
+    auto* scheduler = kernel_state()->guest_scheduler();
+    scheduler->NotifyThreadExited(this);
+    scheduler->YieldToScheduler();  // never returns
+  }
+
   // NOTE: unless PlatformExit fails, expect it to never return!
   current_xthread_tls_ = nullptr;
   current_thread_ = nullptr;
@@ -579,6 +590,14 @@ X_STATUS XThread::Terminate(int exit_code) {
 
   running_ = false;
   if (XThread::IsInThread(this)) {
+    if (fiber_) {
+      // Self-terminate on our fiber, same as Exit(), yielding forever so the
+      // dispatcher reclaims our handle from the idle fiber.
+      fiber_exit_event_->Set();
+      auto* scheduler = kernel_state()->guest_scheduler();
+      scheduler->NotifyThreadExited(this);
+      scheduler->YieldToScheduler();  // never returns
+    }
     // Same ordering hazard as XThread::Exit() — defer ReleaseHandle until
     // after pthread_exit() fires inside Terminate().
     pthread_cleanup_push([](void* arg) {
@@ -586,9 +605,21 @@ X_STATUS XThread::Terminate(int exit_code) {
     }, this);
     xe::threading::Thread::Exit(exit_code);
     pthread_cleanup_pop(1);  // unreachable; balances push above
-  } else {
+  } else if (thread_) {
     thread_->Terminate(exit_code);
     ReleaseHandle();
+  } else {
+    // Fiber-backed guest thread terminated from another host thread. Signal
+    // the exit event first so waits on the thread object resolve.
+    fiber_exit_event_->Set();
+    // It may be parked mid-wait, where nothing else will unwind its
+    // registration and a dead entry gates every other waiter on that object.
+    XObject::AbandonCooperativeWait(this);
+    if (kernel_state()->guest_scheduler()->TerminateThread(this)) {
+      // Nothing will ever run on its stack again, so free it here.
+      ReclaimExited();
+    }
+    // Otherwise its dispatcher runs it to a safepoint where it exits.
   }
 
   return X_STATUS_SUCCESS;
@@ -846,7 +877,11 @@ void XThread::RundownAPCs() {
   xboxkrnl::xeRundownApcs(thread_state_->context());
 }
 
-int32_t XThread::QueryPriority() { return thread_->priority(); }
+int32_t XThread::QueryPriority() {
+  // Fiber-backed guest threads have no host thread, so report the guest
+  // priority.
+  return thread_ ? thread_->priority() : priority_;
+}
 
 // Map Xenon's 0-31 priority range across the available host priority levels.
 // Priority 18 (0x12) is the Xenon real-time threshold — threads at or above
@@ -875,8 +910,13 @@ void XThread::SetPriority(int32_t increment) {
   priority_ = clamped;
   base_priority_ = clamped;
   quantum_start_ms_ = Clock::QueryHostUptimeMillis();
-  if (!cvars::ignore_thread_priorities) {
+  // No host thread under the cooperative scheduler, which orders by priority_.
+  if (!cvars::ignore_thread_priorities && thread_) {
     thread_->set_priority(GuestPriorityToHost(clamped));
+  }
+  // The ready queue is indexed by priority, so a queued thread has to move.
+  if (GuestScheduler::enabled()) {
+    kernel_state()->guest_scheduler()->RequeueForPriority(this);
   }
 }
 
@@ -1123,7 +1163,12 @@ X_STATUS XThread::Resume(uint32_t* out_suspend_count) {
 
   // Try to resume host thread if fully resumed (for non-self-suspended case).
   if (should_resume_host) {
-    thread_->Resume(&unused_host_suspend_count);
+    if (thread_) {
+      thread_->Resume(&unused_host_suspend_count);
+    } else if (GuestScheduler::enabled()) {
+      // Fiber-backed: it is parked on its suspend count, not a host thread.
+      kernel_state()->guest_scheduler()->ResumeThread(this);
+    }
   }
   return X_STATUS_SUCCESS;
 #endif
@@ -1147,6 +1192,16 @@ X_STATUS XThread::Suspend(uint32_t* out_suspend_count) {
   // If we had suspend count wrap around and go back to 0 then thread is not
   // suspended.
   if (guest_thread->suspend_count == 0) {
+    return X_STATUS_SUCCESS;
+  }
+
+  if (!thread_) {
+    // Fiber-backed: the scheduler parks it on its suspend count. A fiber
+    // suspending itself has to give the CPU up now, or it would keep running
+    // past its own suspend.
+    if (GuestScheduler::enabled() && this == XThread::GetCurrentFiberThread()) {
+      kernel_state()->guest_scheduler()->YieldCurrentThread(false);
+    }
     return X_STATUS_SUCCESS;
   }
 

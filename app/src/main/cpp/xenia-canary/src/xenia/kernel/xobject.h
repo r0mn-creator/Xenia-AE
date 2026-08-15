@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <deque>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -35,6 +37,24 @@ class XThread;
 
 template <typename T>
 class object_ref;
+
+// FIFO of cooperative fiber waiters, shared by the permit-gated types so a
+// parked waiter is not starved by a running acquirer that never parks.
+class CooperativeWaiterFifo {
+ public:
+  void Add(XThread* thread);
+  // Unregisters |thread|, returning true if a waiter remains to be woken.
+  bool Remove(XThread* thread);
+  // True when |thread| is first in line (or no one is queued).
+  bool MayAcquire(XThread* thread);
+  bool HasWaiters();
+  // First in line, or null with no waiters queued.
+  XThread* Front();
+
+ private:
+  std::mutex lock_;
+  std::deque<XThread*> waiters_;
+};
 
 // https://www.nirsoft.net/kernel_struct/vista/DISPATCHER_HEADER.html
 typedef struct {
@@ -278,6 +298,11 @@ class XObject {
   uint32_t guest_object_ptr_ = 0;
   bool allocated_guest_object_ = false;
  public:
+  // Fair FIFO wakeup for cooperative fiber waiters on fungible-permit objects.
+  // Begin/End register the waiter and CooperativeMayAcquire gates the poll to
+  // the queue front. Call the Enter/Leave wrappers rather than these directly.
+  virtual void CooperativeWaitBegin(XThread* thread) {}
+  virtual void CooperativeWaitEnd(XThread* thread) {}
   // Which single thread a signal can wake, or null when any watcher may
   // proceed (events) and every watcher's CPU must be woken.
   virtual XThread* CooperativeWakeTarget() { return nullptr; }

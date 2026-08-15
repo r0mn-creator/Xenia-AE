@@ -40,11 +40,17 @@ class XMutant : public XObject {
   xe::threading::WaitHandle* GetWaitHandle() override { return mutant_.get(); }
   void WaitCallback() override;
 
+  void CooperativeWaitBegin(XThread* thread) override;
+  void CooperativeWaitEnd(XThread* thread) override;
+  bool CooperativeMayAcquire(XThread* thread) override;
+  XThread* CooperativeWakeTarget() override { return waiters_.Front(); }
+
  private:
   XMutant();
 
   std::unique_ptr<xe::threading::Mutant> mutant_;
   std::atomic<XThread*> owning_thread_{nullptr};
+  CooperativeWaiterFifo waiters_;
 };
 
 }  // namespace kernel

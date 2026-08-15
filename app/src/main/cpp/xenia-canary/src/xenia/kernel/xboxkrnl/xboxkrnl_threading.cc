@@ -22,6 +22,7 @@
 #include "xenia/base/testrig_debug_server.h"
 #include "xenia/base/platform.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xsemaphore.h"
@@ -616,8 +617,17 @@ DECLARE_XBOXKRNL_EXPORT3(KeDelayExecutionThread, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
 
 dword_result_t NtYieldExecution_entry() {
-  xe::threading::MaybeYield();
-  return 0;
+  if (GuestScheduler::enabled() && XThread::GetCurrentFiberThread()) {
+    // NT reports whether anything else ran. A host MaybeYield() here would
+    // yield the dispatch thread, not this fiber, so nothing else on our CPU
+    // could run.
+    if (!kernel_state()->guest_scheduler()->YieldCurrentThread(true)) {
+      return X_STATUS_NO_YIELD_PERFORMED;
+    }
+  } else {
+    xe::threading::MaybeYield();
+  }
+  return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT2(NtYieldExecution, kThreading, kImplemented,
                          kHighFrequency);
@@ -1335,6 +1345,10 @@ DECLARE_XBOXKRNL_EXPORT3(NtSignalAndWaitForSingleObjectEx, kThreading,
 
 static void PrefetchForCAS(const void* value) { swcache::PrefetchW(value); }
 
+// Brief spin budget for a spinlock held on another dispatch thread, roughly
+// the cost of the fiber reschedule it avoids.
+static constexpr int kRemoteHolderSpinTries = 16;
+
 uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
                                bool change_irql) {
   auto old_irql = change_irql ? xeKfRaiseIrql(ctx, 2) : 0;
@@ -1349,6 +1363,37 @@ uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
   // Lock.
   while (
       !xe::atomic_cas(0, xe::byte_swap(our_pcr), &lock->prcb_of_owner.value)) {
+    // Under the cooperative scheduler the holder may be a fiber queued behind
+    // us on this dispatch thread, so it can only run if we yield the fiber. A
+    // host-thread yield here would sleep the dispatch thread the holder is
+    // queued on and neither could ever make progress. A holder running on
+    // another dispatch thread releases in nanoseconds, so spin briefly there
+    // before paying a reschedule.
+    if (XThread::GetCurrentFiberThread()) {
+      uint32_t owner_pcr_be = lock->prcb_of_owner.value;
+      if (!owner_pcr_be) {
+        continue;  // freed between the CAS and the read
+      }
+      auto* owner_kpcr =
+          ctx->TranslateVirtual<X_KPCR*>(xe::byte_swap(owner_pcr_be));
+      auto* scheduler = ctx->kernel_state->guest_scheduler();
+      if (scheduler->DispatchCpuOf(owner_kpcr->prcb_data.current_cpu) !=
+          scheduler->DispatchCpuOf(our_cpu)) {
+        volatile uint32_t* owner_raw = &lock->prcb_of_owner.value;
+        for (int i = 0; i < kRemoteHolderSpinTries && *owner_raw; ++i) {
+#if XE_ARCH_AMD64 == 1
+          _mm_pause();
+#endif
+        }
+        if (!*owner_raw) {
+          continue;
+        }
+        // Still held past the budget, e.g. a holder preempted mid-hold, so
+        // stop burning the slice.
+      }
+      GuestScheduler::SpinYield();
+      continue;
+    }
     // On real hardware, threads sharing a Xenon HW thread are serialized by
     // the kernel scheduler — the spinner would be preempted within one
     // timeslice (~1ms) so the holder can make progress.  In the naive
@@ -1528,9 +1573,14 @@ uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
     memory->SystemHeapFree(apc_ptr);
     return X_STATUS_UNSUCCESSFUL;
   }
-  // no-op, just meant to awaken a sleeping alertable thread to process real
-  // apcs
-  thread->thread()->QueueUserCallback([]() {});
+  // Awaken a sleeping alertable thread to process real apcs. A host thread gets
+  // a no-op user callback to break its wait, a fiber gets a scheduler poke so
+  // its alertable poll re-runs (a fiber has no host thread() to call back on).
+  if (thread->thread()) {
+    thread->thread()->QueueUserCallback([]() {});
+  } else if (GuestScheduler::enabled()) {
+    kernel_state()->guest_scheduler()->WakeAll();
+  }
   return X_STATUS_SUCCESS;
 }
 dword_result_t NtQueueApcThread_entry(dword_t thread_handle,

@@ -41,9 +41,15 @@ class XSemaphore : public XObject {
     return semaphore_.get();
   }
 
+  void CooperativeWaitBegin(XThread* thread) override;
+  void CooperativeWaitEnd(XThread* thread) override;
+  bool CooperativeMayAcquire(XThread* thread) override;
+  XThread* CooperativeWakeTarget() override { return waiters_.Front(); }
+
  private:
   std::unique_ptr<xe::threading::Semaphore> semaphore_;
   uint32_t maximum_count_ = 0;
+  CooperativeWaiterFifo waiters_;
 };
 
 }  // namespace kernel

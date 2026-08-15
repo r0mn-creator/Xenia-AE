@@ -29,6 +29,8 @@
 DECLARE_bool(emit_mmio_aware_stores_for_recorded_exception_addresses);
 DECLARE_bool(emit_inline_mmio_checks);
 
+DECLARE_bool(guest_scheduler);
+
 DEFINE_bool(a64_park_spin_backoff, true,
             "For collapsed guest spin-backoff loops, spin cheaply for the first "
             "few iterations then park the thread with a short real sleep "
@@ -112,17 +114,31 @@ EMITTER_OPCODE_TABLE(OPCODE_DELAY_EXECUTION, DELAY_EXECUTION);
 // isb); once it proves long it sleeps briefly so the core stops burning
 // cycles. A gap since the previous call starts a fresh episode, so an
 // unrelated later wait spins cheap again. The sleep timeout guarantees forward
-// progress, so no wake plumbing is needed.
-//
-// Ported from XenDroid, minus its cooperative-guest-scheduler paths - Xenia-AE
-// has no guest scheduler, so there is no fiber that host-parking could stall
-// and no preempt_requested flag to gate on.
+// progress, so no wake plumbing is needed. Never host-blocks under the
+// cooperative scheduler - blocking a dispatch thread there can stall the
+// sibling fiber that releases the polled word.
 static void SpinBackoffParkThunk(void* /*ppc_context*/) {
   static constexpr uint32_t kSpinIters = 24;
   static constexpr int64_t kParkNs = 30000;   // 30us bounded park
   static constexpr int64_t kGapNs = 200000;   // >200us idle -> new episode
   thread_local uint32_t consec = 0;
   thread_local int64_t last_ns = 0;
+  if (cvars::guest_scheduler) {
+    // Cooperative path: host-parking would stall co-resident fibers and
+    // host-spinning never runs the producer, which may be a fiber queued
+    // behind this one. Yield instead - ready-tail requeue guarantees
+    // co-resident progress.
+    if (auto* yield_handler = xe::cpu::backend::spin_backoff_yield_handler) {
+      yield_handler(nullptr);
+      return;
+    }
+    // Scheduler enabled but not started yet (early init), or a non-fiber
+    // caller: fall back to the cheap spin.
+    for (uint32_t n = 0; n < 8; ++n) {
+      __asm__ __volatile__("isb sy" ::: "memory");
+    }
+    return;
+  }
   const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              std::chrono::steady_clock::now().time_since_epoch())
                              .count();
@@ -161,6 +177,23 @@ struct SPIN_BACKOFF
       // Adaptive spin-then-park: cheap for short waits, a real short sleep for
       // long ones. CallNativeSafe preserves guest context across the
       // (possibly sleeping) helper.
+      //
+      // Under the cooperative scheduler the helper only yields the fiber, a
+      // no-op unless something else is runnable, but the call is a full
+      // guest->host thunk plus a thread_local lookup. Gate it on the
+      // scheduler's own give-way flag so the common case is two instructions.
+      if (cvars::guest_scheduler) {
+        static_assert(offsetof(ppc::PPCContext, preempt_requested) < 4096);
+        auto& skip = e.NewCachedLabel();
+        e.ldrb(e.w16,
+               Xbyak_aarch64::ptr(e.GetContextReg(),
+                                  static_cast<uint32_t>(offsetof(
+                                      ppc::PPCContext, preempt_requested))));
+        e.cbz(e.w16, skip);
+        e.CallNativeSafe(reinterpret_cast<void*>(&SpinBackoffParkThunk));
+        e.L(skip);
+        return;
+      }
       e.CallNativeSafe(reinterpret_cast<void*>(&SpinBackoffParkThunk));
       return;
     }

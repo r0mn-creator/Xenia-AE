@@ -54,6 +54,19 @@ bool XSemaphore::ReleaseSemaphore(int32_t release_count,
   return success;
 }
 
+void XSemaphore::CooperativeWaitBegin(XThread* thread) { waiters_.Add(thread); }
+
+void XSemaphore::CooperativeWaitEnd(XThread* thread) {
+  // Poke the new front so it re-polls now.
+  if (waiters_.Remove(thread)) {
+    WakeCooperativeWaiters();
+  }
+}
+
+bool XSemaphore::CooperativeMayAcquire(XThread* thread) {
+  return waiters_.MayAcquire(thread);
+}
+
 bool XSemaphore::Save(ByteStream* stream) {
   if (!SaveObject(stream)) {
     return false;

@@ -43,12 +43,22 @@ class XEvent : public XObject {
   static object_ref<XEvent> Restore(KernelState* kernel_state,
                                     ByteStream* stream);
 
+  uint32_t cooperative_pulse_epoch() const override {
+    return pulse_epoch_.load();
+  }
+
  protected:
   xe::threading::WaitHandle* GetWaitHandle() override { return event_.get(); }
+
+  void CooperativeWaitBegin(XThread* thread) override;
+  void CooperativeWaitEnd(XThread* thread) override;
+  bool CooperativeMayAcquire(XThread* thread) override;
 
  private:
   bool manual_reset_ = false;
   std::unique_ptr<xe::threading::Event> event_;
+  CooperativeWaiterFifo waiters_;
+  std::atomic<uint32_t> pulse_epoch_{0};
 };
 
 }  // namespace kernel

@@ -68,9 +68,30 @@ int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
 
 int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
   set_priority_increment(priority_increment);
+  // A parked cooperative waiter re-polls only after a host pulse has already
+  // reset the event, so every pulse would be lost. Deliver as a set the first
+  // waiter consumes, which for an auto-reset event with a waiter is exactly
+  // pulse semantics.
+  if (!manual_reset_ && waiters_.HasWaiters()) {
+    return Set(priority_increment, wait);
+  }
+  if (manual_reset_) {
+    // Releases every waiter parked right now. Must precede the wake below.
+    pulse_epoch_.fetch_add(1);
+  }
   event_->Pulse();
   WakeCooperativeWaiters();
   return 1;
+}
+
+void XEvent::CooperativeWaitBegin(XThread* thread) { waiters_.Add(thread); }
+
+void XEvent::CooperativeWaitEnd(XThread* thread) { waiters_.Remove(thread); }
+
+// An auto-reset set with a parked waiter belongs to the front of the queue.
+// NT wakes the first waiter directly, so a later poller must not steal it.
+bool XEvent::CooperativeMayAcquire(XThread* thread) {
+  return manual_reset_ || waiters_.MayAcquire(thread);
 }
 
 int32_t XEvent::Reset() {

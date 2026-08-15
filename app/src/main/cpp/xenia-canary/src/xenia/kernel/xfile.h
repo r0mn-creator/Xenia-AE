@@ -186,9 +186,25 @@ class XFile : public XObject {
  private:
   XFile();
 
+  // The bodies behind the public entry points. Each public method wraps its
+  // *Internal in GuestScheduler::RunBlockingHostCall so a fiber parks instead
+  // of stalling the dispatch thread it shares with other guest threads.
+  X_STATUS QueryDirectoryInternal(X_FILE_DIRECTORY_INFORMATION* out_info,
+                                  size_t length,
+                                  const std::string_view file_name,
+                                  bool restart);
+
   X_STATUS ReadInternal(uint32_t buffer_guest_address, uint32_t buffer_length,
                         uint64_t byte_offset, uint32_t* out_bytes_read,
                         uint32_t apc_context, bool notify_completion);
+
+  X_STATUS ReadScatterInternal(uint32_t segments_guest_address, uint32_t length,
+                               uint64_t byte_offset, uint32_t* out_bytes_read,
+                               uint32_t apc_context);
+
+  X_STATUS WriteInternal(uint32_t buffer_guest_address, uint32_t buffer_length,
+                         uint64_t byte_offset, uint32_t* out_bytes_written,
+                         uint32_t apc_context);
 
   vfs::File* file_ = nullptr;
   std::unique_ptr<threading::Event> async_event_ = nullptr;

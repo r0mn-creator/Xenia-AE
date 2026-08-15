@@ -297,17 +297,35 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
       const uint32_t handle_value = handles().empty() ? 0 : handle();
       self->set_cooperative_wait_shape(
           XThread::CooperativeWaitKind::kSingle, &handle_value, 1);
-      EnterCooperativeWait(self);
+      // Sampled BEFORE the first poll: a pulse landing between a failed poll
+      // and the park would otherwise be lost and the fiber never wake.
+      const uint32_t entry_pulse_epoch = cooperative_pulse_epoch();
+      EnterCooperativeWait(self);  // FIFO fairness for semaphores/mutants
       X_STATUS status = CooperativeWait(
           scheduler, kthread, this, alertable != 0, deadline_ms,
           [&]() -> std::optional<X_STATUS> {
-            auto poll = xe::threading::Wait(wait_handle, false,
-                                            std::chrono::milliseconds(0));
+            // Released by a pulse that already reset the host primitive, so
+            // polling it would never see the signal.
+            if (cooperative_pulse_epoch() != entry_pulse_epoch) {
+              self->BoostOnWake(priority_increment());
+              WaitCallback();
+              return X_STATUS_SUCCESS;
+            }
+            // Only the front-of-queue fiber may take a permit (no-op for
+            // events, which have no permits to hand out).
+            if (!CooperativeMayAcquire(self)) {
+              return std::nullopt;
+            }
+            auto poll =
+                xe::threading::Wait(wait_handle, alertable ? true : false,
+                                    std::chrono::milliseconds(0));
             switch (poll) {
               case xe::threading::WaitResult::kSuccess:
                 self->BoostOnWake(priority_increment());
                 WaitCallback();
                 return X_STATUS_SUCCESS;
+              case xe::threading::WaitResult::kUserCallback:
+                return X_STATUS_USER_APC;
               case xe::threading::WaitResult::kTimeout:
                 return std::nullopt;  // not signaled yet - keep waiting
               case xe::threading::WaitResult::kAbandoned:
@@ -716,10 +734,47 @@ std::vector<XObject::SignalRecord> XObject::RecentCooperativeSignals(
   return out;
 }
 
+void CooperativeWaiterFifo::Add(XThread* thread) {
+  std::lock_guard<std::mutex> lock(lock_);
+  for (auto* w : waiters_) {
+    if (w == thread) {
+      return;  // already queued
+    }
+  }
+  waiters_.push_back(thread);
+}
+
+bool CooperativeWaiterFifo::Remove(XThread* thread) {
+  std::lock_guard<std::mutex> lock(lock_);
+  for (auto it = waiters_.begin(); it != waiters_.end(); ++it) {
+    if (*it == thread) {
+      waiters_.erase(it);
+      break;
+    }
+  }
+  return !waiters_.empty();
+}
+
+bool CooperativeWaiterFifo::MayAcquire(XThread* thread) {
+  std::lock_guard<std::mutex> lock(lock_);
+  return waiters_.empty() || waiters_.front() == thread;
+}
+
+bool CooperativeWaiterFifo::HasWaiters() {
+  std::lock_guard<std::mutex> lock(lock_);
+  return !waiters_.empty();
+}
+
+XThread* CooperativeWaiterFifo::Front() {
+  std::lock_guard<std::mutex> lock(lock_);
+  return waiters_.empty() ? nullptr : waiters_.front();
+}
+
 void XObject::EnterCooperativeWait(XThread* thread) {
   if (!thread) {
     return;
   }
+  CooperativeWaitBegin(thread);
   thread->set_cooperative_wait_object(this);
 }
 
@@ -728,6 +783,7 @@ void XObject::LeaveCooperativeWait(XThread* thread) {
     return;
   }
   thread->set_cooperative_wait_object(nullptr);
+  CooperativeWaitEnd(thread);
 }
 
 void XObject::AbandonCooperativeWait(XThread* thread) {
