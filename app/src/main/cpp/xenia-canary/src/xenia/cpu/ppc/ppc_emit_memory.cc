@@ -1156,16 +1156,20 @@ int InstrEmit_dcbtst(PPCHIRBuilder& f, const InstrData& i) {
   return 0;
 }
 
+int InstrEmit_dcbz128(PPCHIRBuilder& f, const InstrData& i);
+
 int InstrEmit_dcbz(PPCHIRBuilder& f, const InstrData& i) {
   // EA <- (RA) + (RB)
   // memset(EA & ~31, 0, 32)
-  Value* ea = CalculateEA_0(f, i.X.RA, i.X.RB);
-  // dcbz - 32 byte set
-  int block_size = 32;
-  int address_mask = ~31;
-  f.Memset(f.And(ea, f.LoadConstantInt64(address_mask)), f.LoadZeroInt8(),
-           f.LoadConstantInt64(block_size));
-  return 0;
+  //
+  // On the Xbox 360 there is NO short cache line - the Xenon's line is 128
+  // bytes and plain dcbz clears 128, exactly like dcbz128. Clearing only 32
+  // (which is what this did, inherited from the original 0.14 import and
+  // never revisited) leaves 96 bytes of stale memory behind on every dcbz a
+  // game uses to zero a block, so anything the guest zeroes this way keeps
+  // whatever was there before. Both upstream canary and XenDroid forward to
+  // dcbz128 here.
+  return InstrEmit_dcbz128(f, i);
 }
 
 int InstrEmit_dcbz128(PPCHIRBuilder& f, const InstrData& i) {
