@@ -996,15 +996,43 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_ZPD(
   // Occlusion queries:
   // This command is send on query begin and end.
   // As a workaround report some fixed amount of passed samples.
-  auto* pSampleCounts = memory_->TranslatePhysical<xe_gpu_depth_sample_counts*>(
-      register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR]);
-  // 0xFFFFFEED is written to this two locations by D3D only on D3DISSUE_END
-  // and used to detect a finished query.
-  bool is_end_via_z_pass = pSampleCounts->ZPass_A == kQueryFinished &&
-                           pSampleCounts->ZPass_B == kQueryFinished;
-  // Older versions of D3D also checks for ZFail (4D5307D5).
-  bool is_end_via_z_fail = pSampleCounts->ZFail_A == kQueryFinished &&
-                           pSampleCounts->ZFail_B == kQueryFinished;
+  //
+  // The report record is 0x20 bytes and the guest may point RB_SAMPLE_COUNT_ADDR
+  // anywhere inside it, so the address MUST be masked down to the record base.
+  // Writing (and memsetting 0x20 bytes) at the raw address otherwise lands
+  // misaligned and clobbers whatever guest data follows the record.
+  constexpr uint32_t kRecordSizeBytes =
+      uint32_t(sizeof(xe_gpu_depth_sample_counts));  // 0x20
+  static_assert(kRecordSizeBytes == 0x20u, "ZPD record is 0x20 bytes");
+  const uint32_t report_record_base =
+      register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR] &
+      ~(kRecordSizeBytes - 1u);
+  if (!report_record_base) {
+    return true;
+  }
+  auto* pSampleCounts =
+      memory_->TranslatePhysical<xe_gpu_depth_sample_counts*>(
+          report_record_base);
+  // 0xFFFFFEED is written by D3D only on D3DISSUE_END and is used to detect a
+  // finished query.
+  //
+  // Only the A field decides: some titles (4D5307E8 and the rest of the Halo
+  // family) carry unique, non-zero values in the B fields, so requiring
+  // A *and* B never matched for them - the record was zeroed and no sample
+  // count was ever written back, leaving the guest to read 0 passing samples,
+  // i.e. EVERYTHING reported as fully occluded on every query.
+  //
+  // Both byte orders are accepted: the struct is LE (D3D swaps it) but the
+  // sentinel is observed in either form depending on how the title wrote it.
+  constexpr uint32_t kSentinelLE = 0xEDFEFFFFu;
+  constexpr uint32_t kSentinelBE = 0xFFFFFEEDu;
+  const uint32_t z_pass_a = pSampleCounts->ZPass_A;
+  const uint32_t z_fail_a = pSampleCounts->ZFail_A;
+  const bool is_end_via_z_pass =
+      z_pass_a == kSentinelLE || z_pass_a == kSentinelBE;
+  // Older versions of D3D also check ZFail (4D5307D5).
+  const bool is_end_via_z_fail =
+      z_fail_a == kSentinelLE || z_fail_a == kSentinelBE;
   std::memset(pSampleCounts, 0, sizeof(xe_gpu_depth_sample_counts));
   if (is_end_via_z_pass || is_end_via_z_fail) {
     pSampleCounts->ZPass_A = samples;
