@@ -2294,3 +2294,39 @@ grep -a VSCONSTSTATE <log>                # 257 lines incl. the "table full" lin
 ```
 Then compare the sign of c3.x across states. Fast, and it discriminates in one
 run per build.
+
+### 39.6 CPU-side bisection - what is ELIMINATED (2026-08-15)
+
+All measured against the c3.x sign histogram (baseline **34 positive / 221
+negative**; XenDroid **254 / 0**), which is a far sharper instrument than
+looking at the screen:
+
+| tried | result |
+|---|---|
+| `disable_context_promotion = true` | vista unchanged. (AE already *excludes* VEC128 from promotion; XenDroid is the one that ADDED it.) |
+| `debug.canary.saverest_fast = 0` (AE-only opt, "set 0 to bisect") | histogram **bit-identical** 34/221 |
+| `dcbz` 32 -> 128 bytes (real AE regression, fixed in `3d461e5e5`) | histogram **bit-identical** 34/221 |
+| `readback_resolve = uma` + host-visible shared memory | image changes, still wrong, 5.5-7.9 FPS. Reverted |
+| AltiVec `vmsum*` / `vsum*` unimplemented in AE, implemented in XenDroid | real gap, but **not executed at the menu** - zero `Unimplemented instruction:` lines in the log |
+| `ppc_emit_fpu.cc`, `ppc_emit_alu.cc` vs XenDroid | **byte-identical** |
+| `simplification_pass.cc`, `a64_seq_vector.cc` sign-relevant paths | differences are **cosmetic only** (brace style) |
+| AE vs upstream canary in `cpu/ppc` + `cpu/compiler` | small; only `dcbz` was substantive, and it is eliminated above |
+
+**Methodological note that saved time:** compare the *histogram*, not the
+screenshot. The menu camera pans, so two screenshots of the same build at
+different moments look quite different; the sign statistic does not move.
+
+### 39.7 Still open
+
+XenDroid's own CPU additions (`inline_leaf_calls`, VEC128 context promotion,
+the range-keyed validity tracking) are **optimisations XenDroid ADDED**, so AE
+lacking them cannot explain AE computing a *wrong* value - AE is the
+conservative side. That inverts the search: the defect is more likely something
+**AE does differently**, not something it is missing.
+
+Unexamined AE-vs-XenDroid surface, by size: `a64_seq_memory.cc` (456),
+`a64_backend.cc` (245), `a64_sequences.cc` (222), `a64_emitter.cc` (213),
+`a64_seq_util.h` (84), `ppc_translator.cc` (119), `processor.cc` (77).
+The a64 **memory** sequences are the most promising of these: guest vector
+loads/stores are byte-order sensitive, and a lane or endianness error there
+produces exactly this signature - right magnitudes, wrong signs.
