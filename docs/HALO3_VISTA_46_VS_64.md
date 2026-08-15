@@ -2330,3 +2330,57 @@ Unexamined AE-vs-XenDroid surface, by size: `a64_seq_memory.cc` (456),
 The a64 **memory** sequences are the most promising of these: guest vector
 loads/stores are byte-order sensitive, and a lane or endianness error there
 produces exactly this signature - right magnitudes, wrong signs.
+
+### 39.8 Second bisection round - also eliminated
+
+| tried | result |
+|---|---|
+| `validate_hir = true` (runs ValidationPass between every pass) | **no validation errors** - no pass emits malformed HIR |
+| `MemorySequenceCombinationPass` vs XenDroid | **byte-identical** |
+| `PPCContext` layout vs upstream | AE's scheduler fields are correctly **append-only**; no offset shift |
+| `xboxkrnl_memory.cc` memory reported to the guest | identical (512 MB / `total_physical_pages = 0x20000`) |
+| `xboxkrnl_video.cc` display mode reported | both report **1280x720 mode 8** (already verified 2026-08-12) |
+| Pass **ORDER**: AE runs `PreemptCheckInjectionPass` 1st, XenDroid 3rd (after CFA) | real divergence, but the pass **returns early when `guest_scheduler` is off**, and the vista is broken with it off. Worth fixing for when the scheduler is on; not this bug. |
+
+### 39.9 Sharper read of the constants
+
+Comparing distinct c0-c3 states rather than sign counts:
+
+* Both builds share **3 identical** "identity" states - `c3=(1,0,0,0)`,
+  `c0.x=-0.00156`, `c1.z=+2.57067 / +2.50657`.
+* The **camera** states diverge:
+
+| | c3.x | c1.z | c3.w |
+|---|---|---|---|
+| XDtester | **+0.994** | **+2.4928** | +9.415 … +9.630 |
+| Canary AEX | **-0.9976** | **-2.4813** | +4.386 … +7.346 |
+
+`c3.x` and `c1.z` flip **together**, and the remaining components differ in
+magnitude too - so it is a camera rotated ~180 degrees, not a clean negation of
+one matrix. **`c1.z` ~ ±2.5 is a projection Y-scale, and a negative projection
+Y-scale IS the vertical flip.**
+
+Critically: **AEX never once produces XenDroid's camera values** (0 of AEX's
+positive states appear in XenDroid's set). That rules out staleness/ordering -
+if the draws were merely observing an old state, AEX would still produce the
+correct values at some point. **AEX's guest computes a different projection.**
+
+### 39.10 The shape of the remaining question
+
+This now matches a divergence the document already recorded independently:
+Halo 3 picks a **368x368 shadow cascade** under AE where XenDroid gets
+**512x512** (section 39.8's video note, and the `extent_y` 343-vs-512
+difference in section 37.2). Both are **guest decisions**, made from something
+the emulator reports.
+
+So the question is no longer "which instruction is miscompiled" - the HIR
+validates, the FPU/ALU emitters are byte-identical, and every pass and context
+layout checks out. It is **"what does the guest ask us that we answer
+differently from XenDroid?"**
+
+**▶️ NEXT: diff the kernel-call stream.** Enable `log_all_kernel_calls` in both
+builds (it is gated behind `LogLevel::Debug`, so `log_level` must be raised
+above the shipped 2 - that gating is why an earlier attempt produced nothing),
+reach the menu in each, and diff the sequence of calls and return values. That
+directly finds the input the guest is deciding on, and it should explain the
+projection sign and the 368-vs-512 cascade together.
