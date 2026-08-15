@@ -2384,3 +2384,71 @@ above the shipped 2 - that gating is why an earlier attempt produced nothing),
 reach the menu in each, and diff the sequence of calls and return values. That
 directly finds the input the guest is deciding on, and it should explain the
 projection sign and the 368-vs-512 cascade together.
+
+---
+
+## 40. ⭐⭐⭐⭐⭐ MINIMAL REPRO: the FIRST camera state, same shader, negated
+
+**2026-08-15. This is the tightest the bug has ever been pinned.**
+
+### 40.1 The two builds run in LOCKSTEP, then diverge at one exact point
+
+`debug.canary.vsconst_states` output ordered by `n` (the probe's global state
+counter), AEX vs XDtester at the Halo 3 main menu:
+
+* **n=1 through n=32: bit-identical in both builds** - same shaders, same order,
+  same constants. Every one is an identity/2D transform
+  (`c3=(1,0,0,0)`, `c1.z=+2.50657`).
+* **n=33: XenDroid switches to the real 3D camera.** AEX instead emits three
+  MORE identity-transform states (shaders `C2543FD5CD52420B`,
+  `C5E0199746AB8E83`, `9EA48FC2B26C325D` - note these are the same three that
+  `ndcy_draw` reports as `flipped=0, extent_y=8192`).
+* **Both builds' first real camera state comes from the SAME vertex shader,
+  `E05650CA89E232AF`:**
+
+| | n | c1.z (projection Y-scale) | c3.x |
+|---|---|---|---|
+| XDtester | 33 | **+2.49331** | **+0.99365** |
+| Canary AEX | 36 | **-2.49313** | **-0.99383** |
+
+Magnitudes agree to four decimals - AEX's arrives three states later, so a small
+animation-phase difference is expected. **Both components are negated.**
+
+### 40.2 What negating both means
+
+Negating the X basis and the Y (projection) scale together is a **180 degree
+roll about the view axis**. On this landscape that reads as "upside down", which
+is exactly the reported symptom, and it leaves the separately-drawn 2D UI
+untouched.
+
+### 40.3 Why this is the useful form of the bug
+
+Everything before the divergence is bit-identical, so the guest executed
+identically up to that point. The divergence is not gradual drift and not a
+global sign error - it appears **at the first draw that carries a real camera**,
+in one named shader, at a known state index.
+
+That gives, for the first time, a **minimal reproduction with a fixed address in
+the trace**: run either build to the menu with `debug.canary.vsconst_states=1`,
+look at the first state whose `|c3.x|` is a camera rather than 1.0, and read two
+numbers.
+
+### 40.4 Also eliminated this round
+
+| tried | result |
+|---|---|
+| Kernel-call stream diff (`log_all_kernel_calls`, `log_level=3`, both builds; 583k lines AEX / 5.07M XD) | **call sets match** - nothing called in one and not the other except thread-name noise |
+| `VdSetDisplayMode`, `VdQueryVideoMode`, `XGetVideoMode`, `VdGetCurrentDisplayInformation`, `VdGetCurrentDisplayGamma`, `VdInitializeEngines`, `VdIsHSIOTrainingSucceeded`, `VdPersistDisplay` | **identical arguments in both builds** |
+| `VdQueryVideoFlags` implementation | **byte-identical** source in both |
+| Physical-memory allocation failures | **none** in the AEX log |
+
+So the guest is told the same things and asks the same questions. The divergence
+is in what it *computes* at that one transition.
+
+### 40.5 Next
+
+The three extra identity draws AEX emits at n=33-35, immediately before its
+camera appears, are the strongest remaining thread: they are the same shaders
+`ndcy_draw` flags as `extent_y=8192, flipped=0`, and XenDroid does not draw them
+at that point. Determine what those three draws are (a pre-pass? a clear?) and
+why AEX issues them first - the camera negation appears on the very next state.
