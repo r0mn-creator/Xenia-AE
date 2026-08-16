@@ -55,28 +55,38 @@ inline void EmitWithVmxFpcr(A64Emitter& e, Fn&& emit_op) {
 // value for the movi instruction.
 // The 8-bit immediate "a:b:c:d:e:f:g:h" maps to the 64-bit value:
 // "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffffgggggggghhhhhhhh"
-inline bool TryMovi64Imm(uint64_t value, uint8_t& imm8) {
-  // Common cases
+// Whether a 64-bit value is encodable by movi's 2D form, which requires every
+// byte to be 0x00 or 0xFF. This is a PREDICATE only - the caller passes the
+// value itself to movi, which does its own compression.
+inline bool IsMovi64Imm(uint64_t value) {
+  if (value == 0 || value == ~uint64_t(0)) {
+    return true;
+  }
+  for (int shift = 0; shift < 8; ++shift) {
+    const uint8_t shift_u8 = static_cast<uint8_t>(value >> (shift * 8));
+    if (shift_u8 != 0 && shift_u8 != 0xFF) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The old, WRONG per-byte compression, retained only so
+// debug.canary.movi64_fix=0 can reproduce the previous behaviour for A/B.
+// Do not use for anything else.
+inline uint8_t LegacyMovi64Compressed(uint64_t value) {
   if (value == 0) {
-    // 00000...
-    imm8 = 0;
-    return true;
-  } else if (value == ~uint64_t(0)) {
-    // 11111...
-    imm8 = 0xFF;
-    return true;
+    return 0;
+  }
+  if (value == ~uint64_t(0)) {
+    return 0xFF;
   }
   uint8_t compressed = 0;
   for (int shift = 0; shift < 8; ++shift) {
     const uint8_t shift_u8 = static_cast<uint8_t>(value >> (shift * 8));
-    if (shift_u8 == 0xFF || shift_u8 == 0) {
-      compressed |= (shift_u8 == 0xFF) << shift;
-    } else {
-      return false;
-    }
+    compressed |= uint8_t((shift_u8 == 0xFF) << shift);
   }
-  imm8 = compressed;
-  return true;
+  return compressed;
 }
 
 // Try to see if the provided double value can be compressed into an 8-bit value
@@ -235,8 +245,31 @@ inline void LoadV128Const(A64Emitter& e, int vreg_idx, const vec128_t& val,
   const uint64_t splat_u64 = val.u64[0];
   const double splat_f64 = val.f64[0];
   if (all_equal_u64) {
-    if (uint8_t movi_imm; TryMovi64Imm(val.low, movi_imm)) {
-      e.movi(VReg2D(vreg_idx), movi_imm);
+    // movi's 2D form takes the FULL 64-bit VALUE, not a pre-encoded imm8 -
+    //   void movi(const VReg2D& vd, const uint64_t imm)
+    // and Xbyak compresses it itself (AdvSimdModiImmMoviMvniEnc calls
+    // compactImm(imm)). Passing our own compressed code here meant it got
+    // compressed a SECOND time, silently materializing the wrong constant.
+    //
+    // The all-ones mask is the case that mattered: value 0xFFFFFFFFFFFFFFFF
+    // compressed to 0xFF, and movi(2D, 0xFF) then encoded compactImm(0xFF),
+    // loading 0x00000000000000FF instead of all-ones. An all-ones vector is
+    // the mask for compare results, vsel, vandc, vnor and NOT, so a broken one
+    // selects the wrong operand - which produces a correct magnitude with an
+    // inverted sign. (Note the 2S/4S/8B/16B/4H/8H overloads DO take a
+    // pre-encoded uint32_t imm8; only the 2D/DReg forms take the value.)
+    // Toggle: debug.canary.movi64_fix (default ON; set 0 to restore the old,
+    // wrong encoding for A/B). Correcting it is visible - Halo 3's menu vista
+    // animation runs noticeably faster with it on, because guest code that
+    // depends on all-ones masks now behaves differently. It does NOT fix the
+    // vista's orientation (measured: c3.x histogram unchanged at 221 negative).
+    if (IsMovi64Imm(val.low) && XE_AE_FIX_ENABLED("debug.canary.movi64_fix")) {
+      e.movi(VReg2D(vreg_idx), val.low);
+    } else if (uint8_t legacy_imm;
+               IsMovi64Imm(val.low) &&
+               (legacy_imm = LegacyMovi64Compressed(val.low), true)) {
+      // Old behaviour, kept only for bisection.
+      e.movi(VReg2D(vreg_idx), legacy_imm);
     } else if (IsFmov64Imm(splat_f64)) {
       e.fmov(VReg(vreg_idx).d2, splat_f64);
     } else {
