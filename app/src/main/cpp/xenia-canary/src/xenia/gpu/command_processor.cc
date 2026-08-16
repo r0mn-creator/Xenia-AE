@@ -765,6 +765,31 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
       XELOGI("REGTRACE seq={} {} raw=0x{:08X} x={} y={}", seq, name, value,
              value & 0x7FFFu, (value >> 16) & 0x7FFFu);
     }
+
+    // DIAG(gpu/camera): every value the guest WRITES into the camera constant
+    // slot, as opposed to what a draw later OBSERVES there.
+    //
+    // The whole vista investigation hinges on one ambiguity (docs section 39/40):
+    // the draws observe a camera with c3.x NEGATIVE where XenDroid observes it
+    // POSITIVE at the same magnitude. That is either
+    //   (a) the guest genuinely computing a mirrored camera - a CPU bug, or
+    //   (b) the guest computing it correctly while our draws observe the wrong
+    //       constant state - an ordering bug, the same mechanism that collapses
+    //       the bone matrices (debug.canary.bonedistinct).
+    // VSCONSTSTATE samples at DRAW time and so cannot tell these apart.
+    //
+    // This samples the WRITE side. If a positive ~0.99 value is ever written,
+    // the guest is computing it correctly and the defect is (b) ordering. If
+    // only negative values are ever written, it is (a) computation.
+    //
+    // c3.x is register base + 3*4 + 0. One line per write, and the slot is
+    // written only a few times per frame, so the volume is small.
+    if (XE_AE_DIAG_ENABLED("debug.canary.camwrite") &&
+        index == XE_GPU_REG_SHADER_CONSTANT_000_X + 12) {
+      float f;
+      std::memcpy(&f, &value, sizeof(f));
+      XELOGI("CAMWRITE seq={} c3.x={:.6g} raw=0x{:08X}", seq, f, value);
+    }
   }
 
   // CWRITE probe (2026-08-06): count writes landing in the bone-matrix

@@ -2601,3 +2601,61 @@ builds in the same relative order, but at very different points:
 
 So AEX pulls that pass ~33 states earlier. This is a **draw-ordering
 divergence**, and the camera that follows it in AEX is the negated one.
+
+---
+
+## 43. ⭐⭐⭐⭐⭐ SETTLED: it is a COMPUTATION bug, not an ordering bug
+
+**2026-08-16.** New probe `debug.canary.camwrite` (default OFF) logs every value
+the guest WRITES into the camera constant slot (`SHADER_CONSTANT_000_X + 12`,
+i.e. c3.x), as opposed to what a draw later OBSERVES there.
+
+### 43.1 Why this was needed
+
+`vsconst_states` samples at DRAW time, so it could never separate:
+* **(a) computation** - the guest genuinely computes a mirrored camera, versus
+* **(b) ordering** - the guest computes it correctly but our draws observe the
+  wrong constant state, which is exactly the mechanism that collapses the bone
+  matrices (`debug.canary.bonedistinct`, section 29).
+
+Every round of this investigation has been ambiguous between those two.
+
+### 43.2 Result
+
+At the Halo 3 main menu, one AEX run:
+
+```
+CAMWRITE camera-magnitude writes:  POSITIVE = 0   NEGATIVE = 235489
+```
+
+**The guest never writes the correct positive camera. Not once, in a quarter of
+a million writes.**
+
+### 43.3 What this settles
+
+* **(b) ORDERING IS RULED OUT for the vista.** No amount of fixing draw/constant
+  interleaving can help - the correct value is never produced to begin with.
+  (The ordering mechanism remains valid for the BALL, which is a separate
+  measurement - section 29.)
+* **(a) COMPUTATION is confirmed.** The PowerPC guest, running under Canary AE,
+  computes a mirrored camera.
+
+Combined with the ledger in section 42, the guest does this while:
+kernel answers are identical, reported memory and display mode are identical,
+`LOAD_ALU_CONSTANT`/`SET_CONSTANT` are identical to upstream, `ppc_emit_fpu.cc`
+and `ppc_emit_alu.cc` are byte-identical to XenDroid, the HIR validates clean,
+and no cvar in either build changes the outcome.
+
+### 43.4 Next - locate the guest code
+
+The remaining task is to find the PowerPC function that computes it. The write
+side is on the GPU thread (parsing the ring buffer), so it carries no guest LR;
+the ring buffer was filled by the guest CPU earlier. Route:
+
+1. **Find the matrix in guest RAM.** The value written is a distinctive float
+   (approximately -0.99383). Scan guest memory for that bit pattern to get the
+   address D3D copies from.
+2. **Watch that address** for writes and capture the writing guest LR. That names
+   the PPC function.
+3. Compare that function's execution between the two builds - by then it is a
+   single named function, not a subsystem.
