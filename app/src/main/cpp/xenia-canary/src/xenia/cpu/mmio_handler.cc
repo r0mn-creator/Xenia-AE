@@ -23,8 +23,9 @@ namespace cpu {
 
 MMIOHandler* MMIOHandler::global_handler_ = nullptr;
 
-// DIAG(gpu/camera): see the declaration in mmio_handler.h.
+// DIAG(gpu/camera): see the declarations in mmio_handler.h.
 const HostThreadContext* g_ae_camwatch_fault_context = nullptr;
+const void* g_ae_camwatch_fault_host_address = nullptr;
 
 std::unique_ptr<MMIOHandler> MMIOHandler::Install(
     uint8_t* virtual_membase, uint8_t* physical_membase, uint8_t* membase_end,
@@ -455,6 +456,7 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     if (access_violation_callback_) {
       // DIAG(gpu/camera): see g_ae_camwatch_fault_context's declaration.
       g_ae_camwatch_fault_context = ex->thread_context();
+      g_ae_camwatch_fault_host_address = fault_host_address;
       return access_violation_callback_(std::move(lock),
                                         access_violation_callback_context_,
                                         fault_host_address, is_write);
@@ -475,6 +477,7 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     if (access_violation_callback_) {
       // DIAG(gpu/camera): see g_ae_camwatch_fault_context's declaration.
       g_ae_camwatch_fault_context = ex->thread_context();
+      g_ae_camwatch_fault_host_address = fault_host_address;
       return access_violation_callback_(std::move(lock),
                                         access_violation_callback_context_,
                                         fault_host_address, is_write);

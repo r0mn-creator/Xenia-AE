@@ -34,6 +34,12 @@ namespace cpu {
 // global_critical_region locked once. See docs/HALO3_VISTA_46_VS_64.md
 // section 43.
 extern const HostThreadContext* g_ae_camwatch_fault_context;
+// DIAG(gpu/camera): the EXACT faulting host address (not rounded to a page -
+// the invalidation callback only receives the watched page's range, and a
+// page can hold many unrelated fields, so this is needed to confirm a hit
+// actually lands on the byte being tracked rather than a neighbour on the
+// same page). Same validity window as g_ae_camwatch_fault_context.
+extern const void* g_ae_camwatch_fault_host_address;
 
 typedef uint32_t (*MMIOReadCallback)(void* ppc_context, void* callback_context,
                                      uint32_t addr);

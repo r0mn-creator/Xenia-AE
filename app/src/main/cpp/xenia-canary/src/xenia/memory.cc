@@ -10,6 +10,7 @@
 #include "xenia/memory.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <random>
 
@@ -25,6 +26,7 @@
 #include "xenia/base/threading.h"
 
 #include "xenia/cpu/mmio_handler.h"
+#include "xenia/cpu/ppc/ppc_context.h"
 
 // TODO(benvanik): move xbox.h out
 #include "xenia/xbox.h"
@@ -715,10 +717,24 @@ namespace {
 // within a couple of seconds. g_ae_camwatch_pages tracks the (at most two,
 // since the source buffer double-buffers) pages we actually armed, and the
 // callback drops anything else before it even counts as a hit.
-constexpr int kAeCamwatchMaxHits = 12;
+// Raised from 12: with page-granular watching, the first fault after arming
+// is whatever field happens to be written FIRST on that page, not
+// necessarily the tracked byte (confirmed - every one of the first 12 hits
+// had exact_match=false, landing at varying offsets under 0xD00 on each
+// page). The callback below now re-arms itself immediately on every hit
+// (SharedMemory's own MemoryInvalidationCallback re-acquires
+// global_critical_region_ from inside itself, so this is a proven-safe
+// pattern, not a new one) so one page's writes are traced back-to-back
+// until the exact byte is hit or the cap is reached.
+constexpr int kAeCamwatchMaxHits = 2000;
 std::atomic<uint32_t> g_ae_camwatch_pages[2]{{0}, {0}};
+// Most recently armed EXACT address (not page-rounded) - lets the callback
+// report whether a hit's fault_phys matches the byte we actually meant to
+// track, versus some other field sharing the same 4 KB page.
+std::atomic<uint32_t> g_ae_camwatch_exact_target{0};
 std::atomic<bool> g_ae_camwatch_registered{false};
 std::atomic<int> g_ae_camwatch_hits{0};
+std::atomic<bool> g_ae_camwatch_found_exact{false};
 
 bool AeCamwatchPageIsOurs(uint32_t page) {
   return page != 0 &&
@@ -742,13 +758,24 @@ std::pair<uint32_t, uint32_t> AeCamwatchInvalidationCallback(
   if (tc) {
     had_context = true;
     // PPCContext pointer lives in x20 (the context register - see
-    // a64_emitter.h and PreemptCurrentFiber). lr is PPCContext offset 0x10;
-    // read raw rather than pulling in cpu/ppc/ppc_context.h here.
+    // a64_emitter.h and PreemptCurrentFiber).
+    //
+    // BUG FIXED (2026-08-16): this used to read a hardcoded offset 0x10 for
+    // lr, copied from a comment in ppc_context.h ("uint64_t lr; // 0x10").
+    // That comment is STALE - the struct was reordered ("most frequently
+    // used registers first") and never re-annotated. The real layout has
+    // cr0..cr7 (32B) + fpscr (4B) + 4B padding to 8-align + r[32] (256B) +
+    // ctr (8B) THEN lr, landing lr at offset 304 - which is exactly the
+    // address a disassembly of guest_825AD9F0 showed a guest `bl`-equivalent
+    // writing its return address to. Confirmed by including the real struct
+    // and using offsetof instead of trusting the comment a second time.
     ppc_ctx_ptr = tc->x[20];
     if (ppc_ctx_ptr) {
-      std::memcpy(&guest_lr,
-                  reinterpret_cast<const uint8_t*>(ppc_ctx_ptr) + 0x10,
-                  sizeof(guest_lr));
+      static_assert(offsetof(cpu::ppc::PPCContext, lr) == 304,
+                    "PPCContext::lr moved - camwatch's guest_lr read is now "
+                    "wrong again, fix the assumption, not the assert");
+      guest_lr = uint32_t(
+          reinterpret_cast<const cpu::ppc::PPCContext*>(ppc_ctx_ptr)->lr);
     }
   }
 #endif
@@ -760,18 +787,75 @@ std::pair<uint32_t, uint32_t> AeCamwatchInvalidationCallback(
     host_lr = tc->x[30];
   }
 #endif
+  // DIAG(gpu/camera): the EXACT faulting byte, not just the watched page -
+  // physical_address_start/length above are the ARMED RANGE (page-rounded),
+  // not the fault. A 4 KB page can hold many unrelated fields (confirmed:
+  // hits 13-16 on one page in an earlier run resolved to three DIFFERENT
+  // guest functions), so this is what actually confirms a hit is the byte
+  // being tracked and not a neighbour.
+  uint32_t fault_phys = 0;
+  const void* fault_host = cpu::g_ae_camwatch_fault_host_address;
+  if (fault_host) {
+    auto* memory = reinterpret_cast<Memory*>(context_ptr);
+    fault_phys = uint32_t((reinterpret_cast<uintptr_t>(fault_host) -
+                           reinterpret_cast<uintptr_t>(memory->physical_membase())) &
+                          0x1FFFFFFFu);
+  }
+  uint32_t exact_target =
+      g_ae_camwatch_exact_target.load(std::memory_order_relaxed);
+  bool exact_match = fault_phys == exact_target;
   XELOGI(
-      "CAMWATCH hit={} phys=0x{:08X} len={} had_context={} x20=0x{:016X} "
-      "guest_lr=0x{:08X} host_pc=0x{:016X} host_lr=0x{:016X}",
-      hit, physical_address_start, length, had_context, ppc_ctx_ptr,
-      guest_lr, host_pc, host_lr);
+      "CAMWATCH hit={} phys=0x{:08X} len={} fault_phys=0x{:08X} "
+      "exact_match={} had_context={} x20=0x{:016X} guest_lr=0x{:08X} "
+      "host_pc=0x{:016X} host_lr=0x{:016X}",
+      hit, physical_address_start, length, fault_phys, exact_match,
+      had_context, ppc_ctx_ptr, guest_lr, host_pc, host_lr);
+  if (exact_match) {
+    g_ae_camwatch_found_exact.store(true, std::memory_order_relaxed);
+  }
+  // DIAG(gpu/camera): re-arm the SAME page immediately, from inside the
+  // callback, so back-to-back writes within one buffer-fill pass are all
+  // traced instead of losing coverage after the page's one-shot watch fires
+  // once. SharedMemory::MemoryInvalidationCallback re-acquires
+  // global_critical_region_ from inside itself in production, so doing
+  // real work (not just returning) from inside this callback is a proven
+  // pattern here, not a new risk.
+  if (!g_ae_camwatch_found_exact.load(std::memory_order_relaxed) &&
+      g_ae_camwatch_hits.load(std::memory_order_relaxed) < kAeCamwatchMaxHits) {
+    reinterpret_cast<Memory*>(context_ptr)
+        ->EnablePhysicalMemoryAccessCallbacks(page, 4096, true, false);
+  }
   return std::make_pair(uint32_t(0), UINT32_MAX);
 }
 }  // namespace
 
 void Memory::EnableCamwatchDiag(uint32_t physical_address) {
-  if (g_ae_camwatch_hits.load(std::memory_order_relaxed) >=
-      kAeCamwatchMaxHits) {
+  // DIAG(gpu/camera): arm ONCE (the very first call), then leave the target
+  // alone. WriteALURangeFromMem calls WriteRegister in a tight host loop, so
+  // the external CAMWRITE hook re-fires far faster than one page's watch can
+  // be re-triggered by a guest write - re-arming the target on every call
+  // thrashed it before the callback's own re-arm ever got a second hit on
+  // the SAME page (confirmed: 60/60 hits, every one a DIFFERENT page).
+  //
+  // Tried gating this on page-recurrence first (only arm once a page had
+  // already been seen twice) to skip the menu-load linear-allocator phase -
+  // REVERTED. Bumping the recurrence-detection ring from 16 to 256 slots
+  // fixed it firing at all, but the page it then armed still only produced
+  // hits at OTHER offsets (many distinct writers share a page - confirmed:
+  // one run got 24 back-to-back hits on the same page, all at just two
+  // other offsets, zero at the tracked byte). The target byte looks like
+  // it's written once per buffer instance, so waiting for a first-seen
+  // buffer to be reused needs patience across many frames, not a smarter
+  // gate - arm on the very first sample and let the (large) hit cap and a
+  // long test run do the waiting.
+  static std::atomic<bool> started{false};
+  bool expected_start = false;
+  if (!started.compare_exchange_strong(expected_start, true)) {
+    return;
+  }
+  if (g_ae_camwatch_found_exact.load(std::memory_order_relaxed) ||
+      g_ae_camwatch_hits.load(std::memory_order_relaxed) >=
+          kAeCamwatchMaxHits) {
     return;
   }
   bool expected = false;
@@ -779,6 +863,7 @@ void Memory::EnableCamwatchDiag(uint32_t physical_address) {
     RegisterPhysicalMemoryInvalidationCallback(AeCamwatchInvalidationCallback,
                                                this);
   }
+  g_ae_camwatch_exact_target.store(physical_address, std::memory_order_relaxed);
   uint32_t page = physical_address & ~uint32_t(0xFFF);
   if (g_ae_camwatch_pages[0].load(std::memory_order_relaxed) != page &&
       g_ae_camwatch_pages[1].load(std::memory_order_relaxed) != page) {
@@ -787,6 +872,8 @@ void Memory::EnableCamwatchDiag(uint32_t physical_address) {
     g_ae_camwatch_pages[next_slot.fetch_add(1, std::memory_order_relaxed) & 1]
         .store(page, std::memory_order_relaxed);
   }
+  XELOGI("CAMWATCH_ARMED target=0x{:08X} page=0x{:08X}", physical_address,
+         page);
   EnablePhysicalMemoryAccessCallbacks(page, 4096, true, false);
 }
 

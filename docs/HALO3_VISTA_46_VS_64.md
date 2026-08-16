@@ -2817,3 +2817,199 @@ opcodes instead of "all of ppc_emit_fpu.cc".
   fault site, `mmio_handler.h`/`.cc`.
 * Probe: `debug.canary.camwatch` (default OFF, pairs with `camwrite` which
   must also be on - camwatch reads camwrite's `src_phys`).
+
+## 45. `guest_825AD9F0` is a mover, not the computer - and where that leaves us
+
+Continuation of section 44, same day. Executed the ▶️ NEXT from 44.6. Net
+result: **the vista is still broken.** Three real things were found along the
+way; none of them is the bug, but all three close off ground so a future
+session doesn't re-walk it.
+
+### 45.1 ⭐⭐⭐⭐⭐ SECOND REAL BUG FOUND AND FIXED: `guest_lr` was reading the wrong PPCContext field
+
+The 44.2 camwatch tool's `guest_lr` read a **hardcoded offset 0x10**, copied
+from a comment in `ppc_context.h` (`uint64_t lr; // 0x10`). That comment is
+**stale** - the struct was reordered ("most frequently used registers
+first") and the comment never re-annotated. Every `guest_lr` value 44
+reported was **silently wrong** (always 0, from reading padding/cr-register
+bytes, not lr).
+
+Found by disassembling `guest_825AD9F0` (see 45.2) and noticing it wrote a
+guest return address to `[x20, #304]` - not `#0x10`. Confirmed by compiling
+a standalone probe against the **real** `ppc_context.h` with `offsetof`
+instead of trusting a comment a second time:
+
+```
+offsetof(PPCContext, lr) = 304
+```
+
+Fixed in `memory.cc`'s camwatch callback: reads
+`reinterpret_cast<const PPCContext*>(ppc_ctx_ptr)->lr` through the real
+struct now, guarded by `static_assert(offsetof(PPCContext, lr) == 304, ...)`
+so a future struct change fails the BUILD instead of silently reading
+garbage again. ⚠️ **Any other AE-only code that reads PPCContext by a
+hardcoded numeric offset should be treated as suspect** - this is exactly
+the class of bug a layout change makes silently wrong, and it already
+happened once.
+
+With the fix, `guest_lr` reads real, stable values (e.g. `0x825AD9F8`,
+`0x8214C5D0`) - see 45.3.
+
+### 45.2 `guest_825AD9F0` disassembled: zero FP/vector instructions
+
+Dumped the JIT'd ARM64 bytes for `guest_825AD9F0` from the live process
+(`dd` from `/proc/<pid>/mem` at the perf-map-resolved host range) and
+disassembled with `llvm-mc -triple=aarch64 -disassemble` (system
+`objdump`/`llvm-objdump` have no raw-binary aarch64 mode on this host;
+`llvm-mc` fed a hex byte list does).
+
+**393 instructions, zero of them float or vector** (`fmov`/`fneg`/`fadd`/
+`eor`/`scvtf`/etc. all absent - checked explicitly). Heavy on `mov`/`ldr`/
+`str`/`cmp`/`strb`/`cset`. This function **moves already-computed 32-bit
+words around; it does not compute anything.** Whatever flips the sign runs
+somewhere else - `825AD9F0` is downstream of it, a packer/mover only.
+
+The function opens with a fixed prologue that appends a `{tag, r1, lr}`
+triple to a ring buffer at `[x19+152 base, x19+172 index]`, incrementing a
+counter capped at 65536 - this is Xenia's own generic call-trace
+instrumentation (present in every JIT'd function start), not
+Halo-3-specific logic, and explains why `x19` and the ring-write pattern
+look identical across every guest function sampled.
+
+### 45.3 Exact-byte watching: technically works, practically dead-ended
+
+Extended `EnableCamwatchDiag` to also capture and log the **exact** faulting
+host/physical address (`ex->fault_address()` via a new
+`cpu::g_ae_camwatch_fault_host_address`), not just the watched page -
+because a 4 KB page turned out to hold many unrelated fields. Result across
+every test this round: **`exact_match=false`, always** - the byte that
+actually faults after arming is never the byte CAMWRITE told us about.
+
+Chased this through three redesigns, each confirmed correct but insufficient:
+
+1. **Self-re-arm from inside the invalidation callback.** Confirmed safe -
+   `SharedMemory::MemoryInvalidationCallback` already re-acquires
+   `global_critical_region_` from inside itself in production, so doing real
+   work here isn't a new risk. Result: thrashed by the EXTERNAL trigger -
+   `WriteALURangeFromMem` calls `WriteRegister` in a tight host loop, so the
+   external `CAMWRITE` hook re-fires far faster (many times before the next
+   guest frame) than a re-armed page could be hit again. 60/60 hits, every
+   one a **different** page.
+2. **Arm once, chase one page patiently, gated on page-recurrence.** First
+   cut used a 16-slot recent-page ring to detect "this page has been seen
+   before, it's part of the reused set" - **silently never fired.** Root
+   cause: c3.x is a generic constant-register slot every shader's constants
+   land on, not camera-exclusive, so unrelated pages interleave; measured
+   repeat period was **~31 calls**, blowing through 16 slots before the
+   repeat arrived (confirmed by `grep -n` line-position deltas on a raw
+   `CAMWRITE` capture). Fixed by widening to 256 slots.
+3. **256-slot recurrence gate, arm-once.** Now fires, and the internal
+   re-arm loop DOES catch repeat writes to the same page - but always at
+   **some other offset**, never the tracked one (e.g. one run: 24 back-to-
+   back hits on one page, offsets clustering at just two OTHER byte
+   positions, target never touched, then the page went permanently silent).
+   A separate run armed on the very first-ever sample (a menu-load address)
+   and waited **4 minutes** - one single hit, then nothing.
+
+⇒ **The conclusion, not a tooling gap:** this class of buffer looks
+**single-use** - written once by the CPU, read once by the GPU, then either
+never revisited or revisited only for OTHER fields, on a timescale beyond
+what's practical to wait out. Watching an address after the fact only works
+if the same byte gets written again; here it doesn't, reliably, across every
+technique tried. **Do not re-attempt address-recurrence watching on this
+buffer class - it has now failed three different ways for the same
+underlying reason.**
+
+### 45.4 XenDroid comparison: `825AD9F0`'s JIT output for the SAME guest bytes is ~27% larger - explained, not a bug
+
+XenDroid ships `a64_perf_map` **on by default** (`DEFINE_bool(a64_perf_map,
+true, ...)`, `a64_code_cache.cc`) - no cvar needed, path
+`/data/data/<pkg>/perf-<pid>.map` (fall back `/data/local/tmp`,
+`/tmp`). Ran Halo 3 on XDtester (package
+`xendroid.compose.xdtester.debug`), confirmed the vista renders **correctly**
+(as always), pulled its perf map, found `825AD9F0` at host
+`0xaa189aa90`/size `0x7cc`, dumped the bytes the same way as AEX, and
+disassembled.
+
+| | AEX | XenDroid |
+|---|---|---|
+| instructions | 393 | 499 |
+| `rev` (byte-swap) | 10 | 28 |
+| `str`/`ldr` | 51/57 | 68/76 |
+| `sub` | 7 | 28 |
+| unconditional `b` | 0 | 28 |
+| `ldrb` | 0 | 4 |
+
+The two are **byte-identical through the shared ring-log prologue**, then
+diverge right after: XenDroid inserts a conditional block - `ldrb w8,
+[x20, #2712]; cbz w8, ...` guarding a register-spill sequence (`rev`+`str`
+of r24/r25/r26 to `[r1-72]`/`[r1-64]`/`[r1-56]`, i.e. saving GPRs to the
+**guest's own stack**) - that AEX's output skips entirely, rejoining at the
+same continuation point either way.
+
+**Traced this to `PreemptCheckInjectionPass::Run` (line 59):
+`if (!cvars::guest_scheduler || !builder->first_block()) return;` - the
+entire pass is a no-op unless `guest_scheduler` is on.** Neither test run
+this session set `guest_scheduler=true` (AEX defaults it off); XDtester
+apparently ran with it effectively on. **This is the expected, correct
+difference for that config gap - not a JIT miscompilation, and not the
+vista bug** (independently: 45.2 already showed this function has no FP
+ops, so it can't be flipping a float's sign regardless).
+
+⚠️ Don't resurrect "825AD9F0's JIT output differs" as a lead without first
+matching `guest_scheduler` between the two builds - the difference is fully
+explained and will reappear every time as noise otherwise.
+
+### 45.5 Genuine PPCContext struct-layout mismatch found (unrelated to the vista, but real)
+
+Computed `offsetof` against **both trees'** real `ppc_context.h` (compiled
+minimal standalone probes, not manual struct counting - see 45.1 for why
+manual counting is untrustworthy here). AEX's struct has an extra field,
+**`reserved_val`** (`uint64_t`, "value of last reserved load", used for
+`lwarx`/`stwcx` reservations) between `physical_membase` and `thread_state`.
+**XenDroid's struct does not have this field at all** (`grep reserved_val`
+on their header: zero matches). Every field from `thread_state` onward is
+offset **+8 in AEX relative to XenDroid**:
+
+| field | AEX offset | XenDroid offset |
+|---|---|---|
+| `physical_membase` | 2688 | 2688 |
+| `reserved_val` | 2696 | *(absent)* |
+| `thread_state` | 2704 | 2696 |
+| `virtual_membase` | 2712 | 2704 |
+| `preempt_requested` | 2720 | 2712 |
+| `last_safepoint_pc` | 2724 | 2716 |
+
+This is why `[x20, #2712]` means **`virtual_membase`** (a pointer) in AEX's
+layout but **`preempt_requested`** (the scheduler yield flag) in
+XenDroid's - the same numeric offset in each disassembly is coincidental,
+not evidence of anything by itself (each tree's JIT computes its own
+offsets from its own header at compile time, so this mismatch is not
+inherently a bug). Recorded because **any AE code that references
+PPCContext by a hardcoded numeric offset copied from XenDroid source or
+docs would be silently wrong** - the same failure mode as 45.1, just not
+triggered here.
+
+### 45.6 ▶️ NEXT (untested, for whoever resumes this)
+
+`825AD9F0` is a dead end for finding the computer - it's a mover with no FP
+ops (45.2), and the one real JIT difference found is explained and
+irrelevant (45.4). The exact-byte-watch technique is now proven unreliable
+for this buffer class across three redesigns (45.3) - **do not retry it
+without a fundamentally different targeting strategy**, e.g.:
+
+1. **Find a guest function that actually HAS FP/vector instructions** near
+   this one in the call graph, rather than continuing to instrument
+   `825AD9F0`'s neighborhood. The perf map lists every compiled guest
+   function by address; scanning compiled ranges for `rev`-heavy vs
+   `fmul`/`fneg`/`vmaddfp`-heavy bodies (same `llvm-mc` technique as 45.2)
+   could locate the real computer without needing to catch it in the act at
+   all.
+2. **Instrument the JIT's store-emission path directly** (inside the a64
+   backend itself) to check a target guest address inline and log the
+   *live* guest LR at that exact moment, instead of using Xenia's
+   page-granular, one-shot access-violation mechanism - this sidesteps
+   45.3's entire single-use-buffer problem, at the cost of modifying the
+   JIT backend rather than staying in diagnostic-only code. Higher
+   engineering cost, but the only approach in this list guaranteed not to
+   depend on a write recurring.

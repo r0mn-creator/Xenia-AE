@@ -1,30 +1,51 @@
 # AEX — RESUME STATE (single source of truth)
 
 **Read this first. It is written to be enough on its own.**
-Last updated 2026-08-16 (evening).
+Last updated 2026-08-16 (late evening). **Vista still broken.**
 
-## ⭐⭐⭐⭐⭐ LATEST: the writer is named - guest function `825AD9F0`
+## ⭐⭐⭐⭐⭐ LATEST: `825AD9F0` is a DEAD END - ruled out, not confirmed
 
-Doc `docs/HALO3_VISTA_46_VS_64.md` §44. Avoided the §43.6 scan-hang entirely:
-`PM4_LOAD_ALU_CONSTANT` already names its guest RAM source address in the
-packet, so `CAMWRITE` now logs it directly (`src_phys`) with no scan. Armed
-Xenia's existing physical-memory write-watch on that address
-(`Memory::EnableCamwatchDiag`, filtered - the raw mechanism is global and
-flooded 7700+ hits from unrelated pages before the filter) and read the
-guest LR off `HostThreadContext::x[20]` (the PPCContext pointer) at the
-fault. `guest_lr` was 0 every time (thread never `bl`'d yet), but `host_pc`
-was **perfectly deterministic across 12 consecutive hits**, and resolving it
-through the existing `debug.canary.perf_map` JIT symbol map named it:
-**`guest_825AD9F0`**, one routine, called every frame, writing the camera
-constant into its shadow buffer slot.
+Doc `docs/HALO3_VISTA_46_VS_64.md` §45 (supersedes §44's tentative
+conclusion - §44 named `guest_825AD9F0` as "the writer" from address-only
+evidence; §45 verified it byte-for-byte and that verification **failed**).
 
-This does NOT mean the function differs between builds - it's the same
-compiled Halo 3 PowerPC bytes under both AEX and XenDroid. Either an INPUT to
-it differs (produced by code not yet located), or our JIT miscompiles this
-one function's specific opcode mix despite the emitter source files being
-byte-identical (§39.6/39.8 compared source, not this function's output).
-**Untested next step:** dump and diff the ARM64 machine code our JIT emitted
-for `825AD9F0` against XenDroid's, for the same guest input.
+**Two real bugs found and fixed this round** (see §45.1, §45.5 for detail -
+both are about `PPCContext` field offsets, found the same way: a stale
+comment or a cross-tree assumption trusted instead of a compiled
+`offsetof`):
+1. The camwatch tool's `guest_lr` read a **hardcoded offset 0x10** for `lr`,
+   copied from a stale comment in `ppc_context.h`. The real offset is
+   **304** (verified via a compiled `offsetof` probe, now guarded by a
+   `static_assert` so this can't silently drift again). Every `guest_lr`
+   value §44 reported was wrong (always read as 0).
+2. AEX's `PPCContext` has an extra field (`reserved_val`) that XenDroid's
+   does not, shifting every field from `thread_state` onward by **+8
+   bytes** between the two trees. Not itself a bug, but the exact failure
+   mode that made bug 1 possible - flagged so it isn't hit a third time.
+
+**With the LR bug fixed**, exact-byte watching (not just page-level) was
+tried three different ways (§45.3) and **never once caught a write to the
+tracked byte** - only to other fields sharing its 4 KB page. Root cause:
+this class of guest RAM buffer looks single-use (written once, read once,
+then abandoned or reused for something else), so "watch an address after
+CAMWRITE already told you about it" cannot work reliably for it. **Do not
+retry address-recurrence watching on this buffer - it has now failed for
+the same underlying reason three times.**
+
+Disassembling `guest_825AD9F0` (the address §44 named) turned up **zero
+floating-point or vector instructions** across 393 instructions - it moves
+already-computed 32-bit words, it does not compute anything, so it cannot
+be flipping a float's sign regardless of what caused §44's watch to land on
+it. Comparing its JIT output against XenDroid's found a real 27%-larger
+translation on their side - fully explained by `guest_scheduler` being off
+in AEX's test config (`PreemptCheckInjectionPass` no-ops without it), not a
+miscompilation.
+
+**Net: the writer of the camera constant is still unidentified.** §45.6 has
+two untested ideas for whoever resumes this - scanning the perf map for
+FP/vector-heavy guest functions instead of chasing `825AD9F0` further, or
+instrumenting the JIT's store-emission path directly instead of Xenia's
+one-shot page watch.
 
 ## ⭐ WHERE WE ARE RIGHT NOW (start here)
 
@@ -82,27 +103,52 @@ args · reported memory/display mode · `ppc_emit_fpu`/`ppc_emit_alu`
 is GLOBAL, not scoped to the page you armed — an unfiltered callback fires for
 every page any subsystem invalidates and floods 7700+ hits in ~2s. Always
 filter on the armed page(s) inside the callback.
+**Tried and failed this round (§45):** watching a guest RAM address AFTER
+`CAMWRITE` already told you about it, to catch a repeat write and read its
+guest LR — tried three ways (self-re-arm, 16-slot recurrence gate, 256-slot
+recurrence gate), all correctly implemented, all failed the same way: the
+tracked byte is never written again within any practical test window (up to
+4 minutes tried). The buffer class looks single-use. **`guest_825AD9F0`**,
+named by this technique in §44, disassembles to zero FP/vector instructions
+— it cannot be the sign-flip source; do not re-chase it. Comparing its JIT
+output against XenDroid's (27% larger there) is fully explained by
+`guest_scheduler` being off in AEX's test config — not evidence of anything;
+don't resurrect without first matching that cvar between builds.
+**Read stale offset comments in `ppc_context.h` with suspicion** — `lr`'s
+comment says `// 0x10`, the real offset is 304 (verified via compiled
+`offsetof`, guarded by `static_assert` in `memory.cc` now). AEX's
+`PPCContext` also has an extra `reserved_val` field XenDroid's lacks,
+shifting everything after it by +8 bytes between the two trees.
 
-### ▶️ NEXT STEP — DONE for step 1-2, now on step 3
+### ▶️ NEXT STEP — `825AD9F0` ruled out, restart the search
 
-~~Locate the PPC function that computes it~~ **Found: `guest_825AD9F0`.** See
-the LATEST section above and doc §44 — no memory scan was needed in the end;
-`PM4_LOAD_ALU_CONSTANT` already names its guest RAM source in the packet, so
-the address fell out of the existing `CAMWRITE` hook for free, and a filtered
-physical-memory write-watch plus the existing `debug.canary.perf_map` JIT
-symbol map named the writer deterministically (12/12 consecutive hits, same
-function, across two independent app launches).
+~~Locate the PPC function that computes it~~ ~~Found: `guest_825AD9F0`~~ —
+**§44's identification did not survive verification.** See the LATEST
+section above and doc §45. `825AD9F0` has zero FP/vector instructions (it
+moves words, doesn't compute), and exact-byte watching (not just page-level)
+never once caught a write to the tracked byte across three redesigns — the
+address-only evidence that named it in §44 was catching some OTHER field on
+the same shared page, not the camera constant.
 
-**Now: step 3, compare that one function's JIT OUTPUT between builds** (not
-its source — it's the same Halo 3 PowerPC bytes in both trees, already
-proven identical). Dump the ARM64 machine code our JIT emitted at guest
-`825AD9F0` (host range varies by JIT compile order per run — re-resolve via a
-fresh `perf-<pid>.map` each time) and diff instruction-by-instruction against
-XenDroid's JIT output for the same guest function on the same input.
-`guest_lr` reads 0 at the fault (thread hadn't `bl`'d yet), so the caller /
-input-source chase, if the JIT output matches, needs a different technique
-(stack walk, or a second watch on whatever feeds this function's input
-register) — not "grep for the LR" again.
+**Two untested ideas for the actual next step (doc §45.6):**
+1. Scan the `debug.canary.perf_map` symbol table for guest functions with
+   FP/vector-heavy bodies (same `llvm-mc -triple=aarch64 -disassemble`
+   technique used to check `825AD9F0`) instead of continuing to chase
+   addresses pulled off this one buffer.
+2. Instrument the JIT's store-emission path directly (inside the a64
+   backend) to check a target guest address inline and log the *live*
+   guest LR at that moment — sidesteps the single-use-buffer problem
+   entirely, at the cost of touching the JIT backend instead of staying in
+   diagnostic-only code.
+
+⚠️ Two real bugs were found and fixed while chasing `825AD9F0` — both worth
+carrying forward even though the function itself was a dead end:
+`PPCContext::lr`'s real offset is **304**, not the `0x10` a stale header
+comment claims (now guarded by a `static_assert`); and AEX's `PPCContext`
+has an extra `reserved_val` field XenDroid's lacks, shifting every field
+after it by +8 bytes between the two trees. Any code — including future
+diagnostics — that reads `PPCContext` by a hardcoded numeric offset instead
+of the real struct is suspect.
 
 ### Real bugs FIXED this session (none fix the vista; all need regression runs)
 
