@@ -2493,3 +2493,52 @@ them. Options, cheapest first:
    of the tests so far can make.
 
 Option 2 is cheap and should be done first; it is a local, offline run.
+
+---
+
+## 41. XDtester cvar bisection - harness and results
+
+**2026-08-15.** Per the "XDtester is the instrument" approach: flip XenDroid's
+cvars toward Canary AE's behaviour until XenDroid's vista BREAKS. Whatever group
+breaks it names the code responsible.
+
+### 41.1 The harness (`scripts/vista_bisect/`)
+
+`xd_bisect.sh <tag> "cvar=value" ...` restores XDtester's config from a pristine
+snapshot, applies the group, launches Halo 3, and captures both a screenshot and
+the `vsconst_states` log. `verdict.py` reads the verdict off the **c3.x sign
+histogram** rather than the screenshot, because the menu camera pans and two
+screenshots of one build at different moments look different while the statistic
+does not move:
+
+* POSITIVE dominant -> vista still CORRECT (group is not the cause)
+* NEGATIVE dominant -> vista BROKE (cause is in this group)
+* NO CAMERA STATES  -> run failed; re-run or split
+
+**Two harness traps, both of which produced false "run failed" verdicts before
+being fixed:**
+1. **String cvars are quoted in the config.** Writing `occlusion_query = fake`
+   bare breaks the TOML parse, the config silently fails to load and the game
+   never starts. The script now quotes anything that is not a bool or number.
+2. **A missed tile tap leaves you on the library screen**, which also scores as
+   "run failed". The script now retries the two-tap launch up to four times and
+   confirms the game is actually rendering (VSCONSTSTATE appearing) before
+   trusting the run.
+
+### 41.2 Results so far - all NEGATIVE (vista stayed correct)
+
+| group | cvars flipped | verdict |
+|---|---|---|
+| A - CPU/vector semantics | `a64_vmx_nan_fixup`, `a64_native_reserved_ops`, `context_promote_vec128`, `inline_leaf_calls`, `inline_gprlr_saverest`, `precise_guest_delays`, `precise_interpolation` | **CORRECT** 215/0 |
+| B1 - guest-visible readback | `occlusion_query=fake`, `readback_resolve=none` | **CORRECT** 223/0 |
+| memexport | `memexport_enable=true`, `memexport_await_fences=true` | **CORRECT** 215/0 |
+| C - shared memory coherency | `shared_memory_zero_copy`, `tiled_shared_memory`, `vulkan_shared_memory_host_visible` | **CORRECT** 223/0 |
+
+⭐ Group A matters most: **`a64_vmx_nan_fixup` is a XenDroid-only PPC NaN
+propagation fixup on VMX float ops that AE has no equivalent of** - the single
+most promising CPU-side candidate found in the whole investigation - and turning
+it off does not break XenDroid's vista. Same for `context_promote_vec128`, the
+VEC128 promotion AE excludes.
+
+B1 also retroactively confirms the EVENT_WRITE_ZPD fix (`5e3d6cef4`) was never
+going to fix the vista: XenDroid on the fake ZPD path still renders it correctly.
