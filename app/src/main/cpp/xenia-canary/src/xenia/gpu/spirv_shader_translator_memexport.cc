@@ -35,6 +35,23 @@ void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
     return;
   }
 
+  // DIAG(gpu/memexport): suppress the memexport STORES themselves.
+  //
+  // Memexport is the one path where a guest shader writes into guest RAM, so a
+  // wrong address or an out-of-range index corrupts guest data the CPU then
+  // reads back - and this fork has a recorded history of memexport SSBO
+  // out-of-bounds. Halo 3's menu vista is drawn with a camera the guest itself
+  // computes wrongly (docs section 39/40) while every kernel answer and every
+  // GPU stage measures identical, which is exactly what corrupted guest RAM
+  // would look like.
+  //
+  // With this on, everything about memexport is still set up and translated -
+  // only the stores are skipped - so the shader, its bindings and the draw are
+  // otherwise unchanged. Diagnostic, default OFF.
+  if (XE_AE_EXPERIMENT_ENABLED("debug.canary.memexport_no_store")) {
+    return;
+  }
+
   // Check if memory export is allowed in this guest shader invocation.
   std::optional<SpirvBuilder::IfBuilder> if_memexport_allowed;
   spv::Id memexport_allowed = main_memexport_allowed_;

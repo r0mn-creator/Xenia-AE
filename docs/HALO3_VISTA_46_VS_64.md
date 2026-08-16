@@ -2542,3 +2542,62 @@ VEC128 promotion AE excludes.
 
 B1 also retroactively confirms the EVENT_WRITE_ZPD fix (`5e3d6cef4`) was never
 going to fix the vista: XenDroid on the fake ZPD path still renders it correctly.
+
+## 42. ⭐ TEST LEDGER - do NOT repeat these
+
+Every vista test run so far, with its verdict. Verdicts on AEX are the c3.x sign
+histogram (baseline **34 positive / 221 negative** = BROKE); verdicts on XDtester
+are whether the flip could be INDUCED (baseline ~220/0 = CORRECT).
+
+### 42.1 On Canary AEX - tried to FIX it. None worked.
+
+| # | change | result |
+|---|---|---|
+| 1 | `dcbz` 32 -> 128 bytes (real bug, kept, `3d461e5e5`) | **bit-identical 34/221** |
+| 2 | `debug.canary.saverest_fast = 0` | **bit-identical 34/221** |
+| 3 | EVENT_WRITE_ZPD addressing + A-only sentinel (real bug, kept, `5e3d6cef4`) | **bit-identical 34/221** |
+| 4 | `disable_context_promotion = true` | unchanged |
+| 5 | `validate_hir = true` | **no validation errors** (no pass emits bad HIR) |
+| 6 | `readback_resolve = uma` + host-visible shared memory | image changes, still wrong, 5.5 FPS. Reverted |
+| 7 | `debug.canary.memexport_no_store = 1` (new toggle, kept, default OFF) | **still BROKE 0/221** - suppressing memexport stores does not help |
+
+### 42.2 On XDtester - tried to BREAK it. None worked.
+
+| # | cvars flipped toward AE behaviour | result |
+|---|---|---|
+| A | `a64_vmx_nan_fixup`, `a64_native_reserved_ops`, `context_promote_vec128`, `inline_leaf_calls`, `inline_gprlr_saverest`, `precise_guest_delays`, `precise_interpolation` | **CORRECT 215/0** |
+| B1 | `occlusion_query=fake`, `readback_resolve=none` | **CORRECT 223/0** |
+| - | `memexport_enable=true`, `memexport_await_fences=true` | **CORRECT 215/0** |
+| C | `shared_memory_zero_copy`, `tiled_shared_memory`, `vulkan_shared_memory_host_visible` | **CORRECT 223/0** |
+| ALL | **33 cvars at once** - all gamma/number-format, all resolve/transfer paths, all async-shader, all vulkan pipeline caching, plus the group A CPU set | **CORRECT 220/0** |
+
+⭐⭐ **No XenDroid feature is responsible for their vista being correct**, and no
+AE-only cvar is responsible for ours being wrong (the AE-only set -
+`gamma_render_target_as_srgb`, `preempt_check_every_block`, `readback_memexport`,
+`vfetch_bounds_clamp`, `vulkan_user_clip_planes`, `render_target_path_vulkan` -
+is entirely at its default/inert value already). **The cause is un-gated code.**
+
+### 42.3 Eliminated by inspection (no run needed)
+
+Kernel-call stream (call sets match, 583k/5.07M lines) · every `Vd*` and
+`XGetVideoMode` argument · `VdQueryVideoFlags` source · reported guest memory ·
+reported display mode (1280x720 mode 8) · physical allocation failures (none) ·
+`ppc_emit_fpu.cc` and `ppc_emit_alu.cc` (byte-identical to XenDroid) ·
+`MemorySequenceCombinationPass` (byte-identical) · `PPCContext` layout
+(append-only) · `simplification_pass` / `a64_seq_vector` sign paths (cosmetic) ·
+compiler pass ORDER (AE runs PreemptCheckInjection 1st vs XD 3rd, but it no-ops
+with `guest_scheduler` off, which is the failing configuration).
+
+### 42.4 New fact from this round
+
+The three shaders AEX draws immediately before its negated camera
+(`C2543FD5CD52420B`, `C5E0199746AB8E83`, `9EA48FC2B26C325D`) exist in BOTH
+builds in the same relative order, but at very different points:
+
+| | first n |
+|---|---|
+| AEX | **33, 34, 35** - before the camera |
+| XDtester | **66, 67, 68** - after the camera |
+
+So AEX pulls that pass ~33 states earlier. This is a **draw-ordering
+divergence**, and the camera that follows it in AEX is the negated one.
