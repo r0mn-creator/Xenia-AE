@@ -1,7 +1,94 @@
 # AEX — RESUME STATE (single source of truth)
 
 **Read this first. It is written to be enough on its own.**
-Last updated 2026-08-14.
+Last updated 2026-08-16.
+
+## ⭐ WHERE WE ARE RIGHT NOW (start here)
+
+**Goal: a correct Halo 3 menu vista on Canary AEX.** It is the cheap proxy for
+the character "ball" — the user's model is that a fixed vista very likely means
+the ball is fixed too, and an upside-down vista means the ball is still there.
+The data supports a shared root cause: the two builds run **bit-identical for
+32 constant states and then diverge**, after which camera sign, draw counts and
+bone-matrix states all differ.
+
+**Status: the vista is STILL UPSIDE DOWN.** Not fixed.
+
+### The one-command test
+
+```
+adb -s 3a478943 shell setprop debug.canary.vsconst_states 1
+# launch Halo 3, reach the main menu (~2 taps on the tile, see "How to test")
+adb -s 3a478943 shell "su -c \"grep -a VSCONSTSTATE <log>\"" > out.txt
+python3 scripts/vista_bisect/verdict.py out.txt
+```
+* AEX baseline: **BROKE, 221 negative** · XDtester: **CORRECT, ~220 positive**
+* Read the verdict off the **c3.x sign histogram, never the screenshot** — the
+  menu camera pans, so two shots of one build differ while the statistic does not.
+
+### What is PROVEN about the bug
+
+1. **It is a COMPUTATION bug, not ordering** (doc §43). `debug.canary.camwrite`
+   logs what the guest WRITES: **POSITIVE=0, NEGATIVE=235489**. The correct
+   camera is never produced, so no draw/constant interleaving fix can help.
+   (Ordering is still a live mechanism for the BALL — separate measurement, §29.)
+2. **The difference is EXACTLY the sign bit** (§43.5). AEX writes `0xBF7E5FB4`,
+   XenDroid `0x3F7E5FB4`. Identical mantissa and exponent. That rules out a
+   different formula, a different input, a precision difference, and a byte-swap
+   error.
+3. **Minimal repro** (§40): both builds are bit-identical for constant states
+   1–32; both reach their first real camera on the SAME shader
+   `E05650CA89E232AF`; XD at n=33 with **+2.49331 / +0.99365**, AEX at n=36 with
+   **−2.49313 / −0.99383**.
+
+### ⛔ DO NOT REPEAT — full ledger in doc §42
+
+**Tried on AEX, none fixed it:** `dcbz` 32→128 · `saverest_fast=0` ·
+EVENT_WRITE_ZPD fix · `disable_context_promotion` · `validate_hir` (no errors) ·
+`readback_resolve=uma` · `memexport_no_store` · the **movi64** fix.
+**Tried on XDtester to BREAK it, none did:** CPU/vector group (incl.
+`a64_vmx_nan_fixup`, `context_promote_vec128`, `inline_leaf_calls`) ·
+`occlusion_query=fake`+`readback_resolve=none` · `memexport_enable` ·
+shared-memory trio · **33 cvars at once**.
+⇒ **No cvar in either build explains it. The cause is un-gated code.**
+**Eliminated by inspection:** kernel-call stream · all `Vd*`/`XGetVideoMode`
+args · reported memory/display mode · `ppc_emit_fpu`/`ppc_emit_alu`
+(byte-identical) · all sign-capable AltiVec ops · `LOAD_ALU_CONSTANT` ·
+`MemorySequenceCombinationPass` · `PPCContext` layout.
+
+### ▶️ NEXT STEP
+
+Locate the PPC function that computes it. The write side runs on the GPU thread
+parsing the ring buffer, so it carries no guest LR.
+1. Find the matrix in guest RAM (the float is ~ -0.993648 / `0xBF7E5FB4`).
+   ⚠️ **Do NOT scan from the `camwrite` hook** — a flat 512 MB sweep from
+   physical 0 crosses unmapped pages and **hangs the command-processor thread**
+   (§43.6). Run off the CP thread, scan only mapped regions.
+2. Watch that address for writes, capture the writing **guest LR** ⇒ names the
+   PPC function.
+3. Compare that one function between builds.
+
+### Real bugs FIXED this session (none fix the vista; all need regression runs)
+
+| commit | fix | ⚠️ |
+|---|---|---|
+| `3d461e5e5` | `dcbz` cleared 32 bytes, not 128 | JIT semantics, all titles |
+| `5e3d6cef4` | EVENT_WRITE_ZPD raw address + A-and-B sentinel | all titles |
+| `a17963228` | `movi` 2D got a pre-compressed imm8 (all-ones mask was wrong) | **visible: vista animation "fast-forwards"**; toggle `debug.canary.movi64_fix=0` |
+
+**Re-test NFS Carbon before any of these reach `canary-ae` or `main`.**
+
+### New tooling
+
+* `scripts/vista_bisect/{xd_bisect.sh,verdict.py}` — flip XDtester cvars, run,
+  read the verdict. ⚠️ String cvars must stay **quoted** (bare breaks TOML so the
+  game never starts) and a missed tile tap leaves you on the library screen; the
+  script retries and confirms via VSCONSTSTATE.
+* Probes (all default OFF): `debug.canary.vsconst_states`, `camwrite`,
+  `dump_row_marker` (also ported into XDtester), `memexport_no_store`.
+* Toggle: `debug.canary.movi64_fix` (default ON).
+
+---
 
 ## The goal
 
