@@ -507,6 +507,15 @@ class Memory {
       uint32_t physical_address, uint32_t length,
       bool enable_invalidation_notifications, bool enable_data_providers);
 
+  // DIAG(gpu/camera): arms a write-watch on the page containing
+  // physical_address. The next CPU write anywhere on that page logs the
+  // faulting guest link register (via cpu::g_ae_camwatch_fault_context) using
+  // a lazily-registered invalidation callback, up to a small hit cap. Meant
+  // to be called repeatedly (e.g. once per observed CAMWRITE) so the watch is
+  // re-armed as its target address rotates between buffers. See
+  // docs/HALO3_VISTA_46_VS_64.md section 43.
+  void EnableCamwatchDiag(uint32_t physical_address);
+
   // Forces triggering of watch callbacks for a virtual address range if pages
   // are watched there and unwatching them. Returns whether any page was
   // watched. Must be called with global critical region locking depth of 1.

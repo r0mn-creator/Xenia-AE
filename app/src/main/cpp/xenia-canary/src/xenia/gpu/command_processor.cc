@@ -735,6 +735,17 @@ void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index,
 // value can be located in the SEQUENCE and not just read.
 std::atomic<uint64_t> g_ae_reg_write_seq{0};
 
+// DIAG(gpu/camera): host address the value about to be handed to WriteRegister
+// was read from, so CAMWRITE can report WHERE in guest RAM it came from
+// without a memory scan (docs/HALO3_VISTA_46_VS_64.md section 43.6 - a hand-
+// rolled scan from this hook hung the CP thread on unmapped pages). Set by
+// every producer (ring-embedded SET_CONSTANT and memory-sourced
+// LOAD_ALU_CONSTANT) just before the WriteRegister call it feeds; read once,
+// immediately after, by WriteRegister's own CAMWRITE block. Only meaningful
+// while debug.canary.camwrite is on - both sides are gated on the same
+// property so a stale value is never logged.
+std::atomic<uintptr_t> g_ae_last_reg_write_src_host{0};
+
 void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   // DIAG(gpu/regtrace): sequence-numbered trace of the registers carrying the
   // vista's size. See docs/HALO3_VISTA_46_VS_64.md section 21.
@@ -788,7 +799,22 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
         index == XE_GPU_REG_SHADER_CONSTANT_000_X + 12) {
       float f;
       std::memcpy(&f, &value, sizeof(f));
-      XELOGI("CAMWRITE seq={} c3.x={:.6g} raw=0x{:08X}", seq, f, value);
+      uintptr_t src_host =
+          g_ae_last_reg_write_src_host.load(std::memory_order_relaxed);
+      uint32_t src_phys = 0;
+      if (src_host && memory_) {
+        src_phys = uint32_t((src_host - reinterpret_cast<uintptr_t>(
+                                            memory_->physical_membase())) &
+                            0x1FFFFFFFu);
+      }
+      XELOGI("CAMWRITE seq={} c3.x={:.6g} raw=0x{:08X} src_phys=0x{:08X}", seq,
+             f, value, src_phys);
+      // DIAG(gpu/camera): re-arm the write-watch every time, since src_phys
+      // rotates between a small set of buffers (double-buffered constant
+      // upload). See Memory::EnableCamwatchDiag.
+      if (src_phys && memory_ && XE_AE_DIAG_ENABLED("debug.canary.camwatch")) {
+        memory_->EnableCamwatchDiag(src_phys);
+      }
     }
   }
 
@@ -844,6 +870,15 @@ void CommandProcessor::WriteRegistersFromMem(uint32_t start_index,
                                              uint32_t* base,
                                              uint32_t num_registers) {
   for (uint32_t i = 0; i < num_registers; ++i) {
+    // DIAG(gpu/camera): see g_ae_last_reg_write_src_host above. This is the
+    // LOAD_ALU_CONSTANT path - base is a host pointer straight from
+    // memory_->TranslatePhysical(guest address in the packet), i.e. a
+    // PERSISTENT guest RAM location the game wrote its shadow constants into,
+    // not a transient ring-buffer offset.
+    if (XE_AE_DIAG_ENABLED("debug.canary.camwrite")) {
+      g_ae_last_reg_write_src_host.store(
+          reinterpret_cast<uintptr_t>(base + i), std::memory_order_relaxed);
+    }
     uint32_t data = xe::load_and_swap<uint32_t>(base + i);
     this->WriteRegister(start_index + i, data);
   }
@@ -853,6 +888,13 @@ void CommandProcessor::WriteRegisterRangeFromRing(xe::RingBuffer* ring,
                                                   uint32_t base,
                                                   uint32_t num_registers) {
   for (uint32_t i = 0; i < num_registers; ++i) {
+    // DIAG(gpu/camera): ring-embedded SET_CONSTANT path - see
+    // g_ae_last_reg_write_src_host above. This address is a transient ring
+    // buffer position, not necessarily a persistent one.
+    if (XE_AE_DIAG_ENABLED("debug.canary.camwrite")) {
+      g_ae_last_reg_write_src_host.store(ring->read_ptr(),
+                                         std::memory_order_relaxed);
+    }
     uint32_t data = ring->ReadAndSwap<uint32_t>();
     WriteRegister(base + i, data);
   }
@@ -921,6 +963,11 @@ XE_NOINLINE
 void CommandProcessor::WriteOneRegisterFromRing(uint32_t base,
                                                 uint32_t num_times) {
   for (uint32_t m = 0; m < num_times; m++) {
+    // DIAG(gpu/camera): see g_ae_last_reg_write_src_host above.
+    if (XE_AE_DIAG_ENABLED("debug.canary.camwrite")) {
+      g_ae_last_reg_write_src_host.store(reader_.read_ptr(),
+                                         std::memory_order_relaxed);
+    }
     uint32_t reg_data = reader_.ReadAndSwap<uint32_t>();
     uint32_t target_index = base;
     WriteRegister(target_index, reg_data);

@@ -9,6 +9,7 @@
 
 #include "xenia/memory.h"
 
+#include <atomic>
 #include <cstring>
 #include <random>
 
@@ -17,6 +18,7 @@
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/host_thread_context.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/testrig_debug_server.h"  // TESTRIG(mem)
 #include "xenia/base/math.h"
@@ -701,6 +703,91 @@ void Memory::EnablePhysicalMemoryAccessCallbacks(
   heaps_.vE0000000.EnableAccessCallbacks(physical_address, length,
                                          enable_invalidation_notifications,
                                          enable_data_providers);
+}
+
+namespace {
+// DIAG(gpu/camera): see Memory::EnableCamwatchDiag's declaration.
+//
+// RegisterPhysicalMemoryInvalidationCallback is GLOBAL - every registered
+// callback fires for every watched page anyone invalidates (shared memory,
+// texture cache, ...), not just the page we armed. The first run without
+// this filter produced 7700+ hits sweeping unrelated 256 KB-strided ranges
+// within a couple of seconds. g_ae_camwatch_pages tracks the (at most two,
+// since the source buffer double-buffers) pages we actually armed, and the
+// callback drops anything else before it even counts as a hit.
+constexpr int kAeCamwatchMaxHits = 12;
+std::atomic<uint32_t> g_ae_camwatch_pages[2]{{0}, {0}};
+std::atomic<bool> g_ae_camwatch_registered{false};
+std::atomic<int> g_ae_camwatch_hits{0};
+
+bool AeCamwatchPageIsOurs(uint32_t page) {
+  return page != 0 &&
+        (g_ae_camwatch_pages[0].load(std::memory_order_relaxed) == page ||
+         g_ae_camwatch_pages[1].load(std::memory_order_relaxed) == page);
+}
+
+std::pair<uint32_t, uint32_t> AeCamwatchInvalidationCallback(
+    void* context_ptr, uint32_t physical_address_start, uint32_t length,
+    bool exact_range) {
+  uint32_t page = physical_address_start & ~uint32_t(0xFFF);
+  if (!AeCamwatchPageIsOurs(page)) {
+    return std::make_pair(uint32_t(0), UINT32_MAX);
+  }
+  int hit = g_ae_camwatch_hits.fetch_add(1, std::memory_order_relaxed) + 1;
+  uint32_t guest_lr = 0;
+  uint64_t ppc_ctx_ptr = 0;
+  bool had_context = false;
+#if XE_ARCH_ARM64
+  const HostThreadContext* tc = cpu::g_ae_camwatch_fault_context;
+  if (tc) {
+    had_context = true;
+    // PPCContext pointer lives in x20 (the context register - see
+    // a64_emitter.h and PreemptCurrentFiber). lr is PPCContext offset 0x10;
+    // read raw rather than pulling in cpu/ppc/ppc_context.h here.
+    ppc_ctx_ptr = tc->x[20];
+    if (ppc_ctx_ptr) {
+      std::memcpy(&guest_lr,
+                  reinterpret_cast<const uint8_t*>(ppc_ctx_ptr) + 0x10,
+                  sizeof(guest_lr));
+    }
+  }
+#endif
+  uint64_t host_pc = 0;
+  uint64_t host_lr = 0;
+#if XE_ARCH_ARM64
+  if (tc) {
+    host_pc = tc->pc;
+    host_lr = tc->x[30];
+  }
+#endif
+  XELOGI(
+      "CAMWATCH hit={} phys=0x{:08X} len={} had_context={} x20=0x{:016X} "
+      "guest_lr=0x{:08X} host_pc=0x{:016X} host_lr=0x{:016X}",
+      hit, physical_address_start, length, had_context, ppc_ctx_ptr,
+      guest_lr, host_pc, host_lr);
+  return std::make_pair(uint32_t(0), UINT32_MAX);
+}
+}  // namespace
+
+void Memory::EnableCamwatchDiag(uint32_t physical_address) {
+  if (g_ae_camwatch_hits.load(std::memory_order_relaxed) >=
+      kAeCamwatchMaxHits) {
+    return;
+  }
+  bool expected = false;
+  if (g_ae_camwatch_registered.compare_exchange_strong(expected, true)) {
+    RegisterPhysicalMemoryInvalidationCallback(AeCamwatchInvalidationCallback,
+                                               this);
+  }
+  uint32_t page = physical_address & ~uint32_t(0xFFF);
+  if (g_ae_camwatch_pages[0].load(std::memory_order_relaxed) != page &&
+      g_ae_camwatch_pages[1].load(std::memory_order_relaxed) != page) {
+    // Evict round-robin between the two tracked slots.
+    static std::atomic<int> next_slot{0};
+    g_ae_camwatch_pages[next_slot.fetch_add(1, std::memory_order_relaxed) & 1]
+        .store(page, std::memory_order_relaxed);
+  }
+  EnablePhysicalMemoryAccessCallbacks(page, 4096, true, false);
 }
 
 uint32_t Memory::SystemHeapAlloc(uint32_t size, uint32_t alignment,

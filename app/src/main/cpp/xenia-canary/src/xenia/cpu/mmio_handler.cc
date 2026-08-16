@@ -23,6 +23,9 @@ namespace cpu {
 
 MMIOHandler* MMIOHandler::global_handler_ = nullptr;
 
+// DIAG(gpu/camera): see the declaration in mmio_handler.h.
+const HostThreadContext* g_ae_camwatch_fault_context = nullptr;
+
 std::unique_ptr<MMIOHandler> MMIOHandler::Install(
     uint8_t* virtual_membase, uint8_t* physical_membase, uint8_t* membase_end,
     HostToGuestVirtual host_to_guest_virtual,
@@ -450,6 +453,8 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     // TriggerCallbacks will find no watches and the page will be unprotected
     // by the time the instruction retries.
     if (access_violation_callback_) {
+      // DIAG(gpu/camera): see g_ae_camwatch_fault_context's declaration.
+      g_ae_camwatch_fault_context = ex->thread_context();
       return access_violation_callback_(std::move(lock),
                                         access_violation_callback_context_,
                                         fault_host_address, is_write);
@@ -468,6 +473,8 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     // The address is not found within any range, so either a write watch or an
     // actual access violation.
     if (access_violation_callback_) {
+      // DIAG(gpu/camera): see g_ae_camwatch_fault_context's declaration.
+      g_ae_camwatch_fault_context = ex->thread_context();
       return access_violation_callback_(std::move(lock),
                                         access_violation_callback_context_,
                                         fault_host_address, is_write);

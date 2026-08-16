@@ -1,7 +1,30 @@
 # AEX — RESUME STATE (single source of truth)
 
 **Read this first. It is written to be enough on its own.**
-Last updated 2026-08-16.
+Last updated 2026-08-16 (evening).
+
+## ⭐⭐⭐⭐⭐ LATEST: the writer is named - guest function `825AD9F0`
+
+Doc `docs/HALO3_VISTA_46_VS_64.md` §44. Avoided the §43.6 scan-hang entirely:
+`PM4_LOAD_ALU_CONSTANT` already names its guest RAM source address in the
+packet, so `CAMWRITE` now logs it directly (`src_phys`) with no scan. Armed
+Xenia's existing physical-memory write-watch on that address
+(`Memory::EnableCamwatchDiag`, filtered - the raw mechanism is global and
+flooded 7700+ hits from unrelated pages before the filter) and read the
+guest LR off `HostThreadContext::x[20]` (the PPCContext pointer) at the
+fault. `guest_lr` was 0 every time (thread never `bl`'d yet), but `host_pc`
+was **perfectly deterministic across 12 consecutive hits**, and resolving it
+through the existing `debug.canary.perf_map` JIT symbol map named it:
+**`guest_825AD9F0`**, one routine, called every frame, writing the camera
+constant into its shadow buffer slot.
+
+This does NOT mean the function differs between builds - it's the same
+compiled Halo 3 PowerPC bytes under both AEX and XenDroid. Either an INPUT to
+it differs (produced by code not yet located), or our JIT miscompiles this
+one function's specific opcode mix despite the emitter source files being
+byte-identical (§39.6/39.8 compared source, not this function's output).
+**Untested next step:** dump and diff the ARM64 machine code our JIT emitted
+for `825AD9F0` against XenDroid's, for the same guest input.
 
 ## ⭐ WHERE WE ARE RIGHT NOW (start here)
 
@@ -55,18 +78,31 @@ shared-memory trio · **33 cvars at once**.
 args · reported memory/display mode · `ppc_emit_fpu`/`ppc_emit_alu`
 (byte-identical) · all sign-capable AltiVec ops · `LOAD_ALU_CONSTANT` ·
 `MemorySequenceCombinationPass` · `PPCContext` layout.
+**Tooling gotcha (§44.2):** `Memory::RegisterPhysicalMemoryInvalidationCallback`
+is GLOBAL, not scoped to the page you armed — an unfiltered callback fires for
+every page any subsystem invalidates and floods 7700+ hits in ~2s. Always
+filter on the armed page(s) inside the callback.
 
-### ▶️ NEXT STEP
+### ▶️ NEXT STEP — DONE for step 1-2, now on step 3
 
-Locate the PPC function that computes it. The write side runs on the GPU thread
-parsing the ring buffer, so it carries no guest LR.
-1. Find the matrix in guest RAM (the float is ~ -0.993648 / `0xBF7E5FB4`).
-   ⚠️ **Do NOT scan from the `camwrite` hook** — a flat 512 MB sweep from
-   physical 0 crosses unmapped pages and **hangs the command-processor thread**
-   (§43.6). Run off the CP thread, scan only mapped regions.
-2. Watch that address for writes, capture the writing **guest LR** ⇒ names the
-   PPC function.
-3. Compare that one function between builds.
+~~Locate the PPC function that computes it~~ **Found: `guest_825AD9F0`.** See
+the LATEST section above and doc §44 — no memory scan was needed in the end;
+`PM4_LOAD_ALU_CONSTANT` already names its guest RAM source in the packet, so
+the address fell out of the existing `CAMWRITE` hook for free, and a filtered
+physical-memory write-watch plus the existing `debug.canary.perf_map` JIT
+symbol map named the writer deterministically (12/12 consecutive hits, same
+function, across two independent app launches).
+
+**Now: step 3, compare that one function's JIT OUTPUT between builds** (not
+its source — it's the same Halo 3 PowerPC bytes in both trees, already
+proven identical). Dump the ARM64 machine code our JIT emitted at guest
+`825AD9F0` (host range varies by JIT compile order per run — re-resolve via a
+fresh `perf-<pid>.map` each time) and diff instruction-by-instruction against
+XenDroid's JIT output for the same guest function on the same input.
+`guest_lr` reads 0 at the fault (thread hadn't `bl`'d yet), so the caller /
+input-source chase, if the JIT output matches, needs a different technique
+(stack walk, or a second watch on whatever feeds this function's input
+register) — not "grep for the LR" again.
 
 ### Real bugs FIXED this session (none fix the vista; all need regression runs)
 

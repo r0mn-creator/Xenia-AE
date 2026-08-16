@@ -25,6 +25,16 @@ class HostThreadContext;
 namespace xe {
 namespace cpu {
 
+// DIAG(gpu/camera): host thread context captured at the moment a guest
+// physical-memory write-watch fault fires (see ExceptionCallback in
+// mmio_handler.cc), so a PhysicalMemoryInvalidationCallback registered via
+// Memory (xenia/memory.cc) can read the guest link register of the write
+// that triggered the fault. Valid only for the duration of the synchronous
+// access_violation_callback_ call chain, which is entered with
+// global_critical_region locked once. See docs/HALO3_VISTA_46_VS_64.md
+// section 43.
+extern const HostThreadContext* g_ae_camwatch_fault_context;
+
 typedef uint32_t (*MMIOReadCallback)(void* ppc_context, void* callback_context,
                                      uint32_t addr);
 typedef void (*MMIOWriteCallback)(void* ppc_context, void* callback_context,

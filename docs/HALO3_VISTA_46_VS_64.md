@@ -2688,3 +2688,132 @@ one `CAMWRITE` line where the same build had produced 415k without it. Reverted.
 
 If retried, it must (a) run off the command-processor thread, and (b) scan only
 regions known to be mapped rather than a flat 0..512 MB sweep.
+
+## 44. ⭐⭐⭐⭐⭐ FOUND: the writer is guest function `825AD9F0` (2026-08-16)
+
+Avoided the scan in 43.6 entirely. `WriteALURangeFromMem`
+(`command_processor.cc`) is the `PM4_LOAD_ALU_CONSTANT` path
+(`pm4_command_processor_implement.h:1263`) - the game DMAs shader constants
+from a guest RAM location it names in the packet, via
+`memory_->TranslatePhysical(address)`. That host pointer is already the exact
+guest RAM source; no scan needed, just log it at the point it is already
+known.
+
+### 44.1 CAMWRITE now reports the source address
+
+Instrumented all three producer paths (`WriteRegisterRangeFromRing`,
+`WriteOneRegisterFromRing`, `WriteRegistersFromMem`) to stash the host pointer
+of the dword about to be consumed in a global
+(`g_ae_last_reg_write_src_host`), which the existing `CAMWRITE` log
+(`command_processor.cc`) reads and converts to a guest physical address
+(`src_phys`). Confirms the c3.x constant comes through the from-mem path: the
+address drifts through a linear allocator early (menu load), then settles
+into a stable **2-buffer alternation** once steady state is reached at the
+vista (e.g. `0x0536E7D0` / `0x05375790` in one run) - a double-buffered
+per-frame constant upload arena, exactly as expected.
+
+### 44.2 A write-watch that survives the 43.6 trap
+
+`Memory::EnableCamwatchDiag(physical_address)` (`memory.cc`) arms Xenia's
+existing physical-memory write-watch (`EnablePhysicalMemoryAccessCallbacks` +
+`RegisterPhysicalMemoryInvalidationCallback` - the same mechanism
+`SharedMemory`/texture cache use) on the page containing `src_phys`, called
+once per `CAMWRITE` so it re-arms as the target rotates between buffers. This
+sidesteps 43.6's hang completely: no scan, just watching an address already
+known.
+
+⚠️ **First cut flooded**: `RegisterPhysicalMemoryInvalidationCallback` is
+global - every registered callback fires for every page ANY subsystem
+invalidates, not just the one you armed. Produced 7700+ hits sweeping
+unrelated 256 KB-strided ranges within two seconds. Fixed by tracking the (at
+most two) pages actually armed and dropping anything else before it counts as
+a hit (`g_ae_camwatch_pages` in `memory.cc`).
+
+To read the guest link register at the fault: `HostThreadContext` (captured
+in `mmio_handler.cc`'s `ExceptionCallback`, in the same branch that already
+calls `access_violation_callback_` under `global_critical_region` locked
+once) exposes `x[20]`, the PPCContext pointer per this session's earlier
+finding ("Context register = x20"). `PPCContext::lr` is at struct offset
+0x10; read raw via `memcpy` rather than including `ppc_context.h` into
+`memory.cc`/`mmio_handler.cc`.
+
+### 44.3 Result: `guest_lr` is 0, but `host_pc` is fully deterministic
+
+Every hit across every run: `guest_lr=0x00000000`. But `host_pc`/`host_lr`
+(the ARM64 register values, not the guest ones) are **perfectly consistent
+across 12 hits in a row within a run**, and the fault address
+(`aa0000000-ab0000000`, the `/dev/ashmem/xenia_code_cache_*` mapping) is
+**stable across separate app launches** - e.g. `0xAA10E9FA8` appeared
+identically in two independent runs before a third run's fresh JIT
+compilation order produced a different but *equally self-consistent*
+`0xAA10B7808`.
+
+`guest_lr=0` is not a dead end - it means this write happens from a guest
+thread that has not yet executed a `bl` since PPCContext was created (fits: a
+freshly-spawned worker thread whose first action is populating initial
+constant buffers), not that the fault is somehow outside JIT'd code.
+
+### 44.4 Resolved via the existing JIT perf-map probe
+
+`debug.canary.perf_map=1` (see `ae_perf_map.h`, already built for the JIT
+hotspot work) writes `guest_<addr>_<name>` symbols keyed by the exact
+absolute host code-cache address to
+`/sdcard/Android/data/<pkg>/files/xeniaae/perf-<pid>.map` at JIT compile
+time - the same absolute addresses `host_pc`/`host_lr` are already in.
+Looked the captured addresses up directly (no `simpleperf` needed, that's
+only for sampling profiles):
+
+```
+0xaa10b7808 -> guest_825AD9F0   [0xaa10b7360 - 0xaa10b7984]
+0xaa10b73ec -> guest_825AD9F0   [same function]
+```
+
+**All 12 consecutive hits, across every buffer instance in the early linear-
+allocator progression, resolve to the SAME guest function: `825AD9F0`.** One
+routine, called repeatedly, writes the camera constant into its shadow
+buffer slot every frame.
+
+Three other addresses on the same physical page (shared with other
+constants - bone matrices etc., not camera-specific) resolved to
+`guest_82177870`, `guest_8258E090`, and `guest_8216E020` - unsurprising,
+useful only as confirmation the mechanism resolves correctly.
+
+### 44.5 What this does and does NOT mean
+
+`825AD9F0` is a location in Halo 3's OWN compiled PowerPC code - the same
+bytes run under AEX and XenDroid (same XEX). So the divergence is **not**
+"this function differs between builds" (already ruled out at the source
+level: `ppc_emit_fpu.cc`/`ppc_emit_alu.cc` byte-identical, §39.6/39.8). It
+must be either (a) an INPUT to this function that differs - a register or an
+earlier guest-memory value this store depends on, produced by code we
+haven't located yet, or (b) a JIT MISCOMPILATION specific to whichever
+opcodes make up this one function, where our translator and XenDroid's
+diverge for this exact instruction sequence despite the emitter source files
+matching (a plausible mechanism the earlier byte-identical-source checks
+could not rule out, since they compared the emitter's C++, not its output for
+this specific function).
+
+### 44.6 ▶️ NEXT
+
+Dump the ARM64 machine code our JIT emitted for guest `825AD9F0` (host range
+`0xaa10b7360`-`0xaa10b7984` in this run; re-resolve via a fresh perf map each
+time, the code-cache layout is not address-stable across builds) and compare
+instruction-by-instruction against XenDroid's JIT output for the same guest
+function on the same input. If they match, the input differs and the search
+moves one level up the call chain (still lr=0 dead-ends the naive "who
+called this" question - would need a stack walk or a second watch on
+whatever guest address feeds this function's input register). If they
+differ, the JIT backend gap is now scoped to one function's worth of
+opcodes instead of "all of ppc_emit_fpu.cc".
+
+### 44.7 Tooling added this round
+
+* `CAMWRITE` now includes `src_phys` (guest physical address of the value's
+  source) - `command_processor.cc`.
+* `Memory::EnableCamwatchDiag(physical_address)` - one-call arm/re-arm of a
+  filtered physical-memory write-watch with guest-LR capture, capped at 12
+  hits. `memory.h`/`memory.cc`.
+* `cpu::g_ae_camwatch_fault_context` - `HostThreadContext*` captured at the
+  fault site, `mmio_handler.h`/`.cc`.
+* Probe: `debug.canary.camwatch` (default OFF, pairs with `camwrite` which
+  must also be on - camwatch reads camwrite's `src_phys`).
