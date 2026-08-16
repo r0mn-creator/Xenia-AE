@@ -2659,3 +2659,32 @@ the ring buffer was filled by the guest CPU earlier. Route:
    the PPC function.
 3. Compare that function's execution between the two builds - by then it is a
    single named function, not a subsystem.
+
+### 43.5 The difference is EXACTLY the sign bit
+
+Raw values the guest writes into c3.x, from `debug.canary.camwrite`:
+
+| | raw | value |
+|---|---|---|
+| Canary AEX | `0xBF7E5FB4` | -0.993648 |
+| XDtester | `0x3F7E5FB4` (from its +0.99365) | +0.993650 |
+
+**Identical mantissa and exponent; only bit 31 differs.** The magnitude is
+computed the same way in both builds and then one of them has the sign inverted.
+That rules out a different formula, a different input, a precision difference and
+a byte-swap error (a swap would scramble all four bytes, not one bit).
+
+Checked and clean: no differences in any sign-capable AltiVec op (`vxor`,
+`vsubfp`, `vaddfp`, `vmaddfp`, `vnmsubfp`, `vspltisw`, `vsel`, `vrefp`,
+`vrsqrtefp`, `vnor`, `vandc`) between AE and either XenDroid or upstream, and
+`ppc_emit_fpu.cc`/`ppc_emit_alu.cc` are byte-identical to XenDroid.
+
+### 43.6 ⚠️ Failed approach - do not repeat as written
+
+Tried locating the matrix by scanning guest RAM for the bit pattern, driven from
+the `camwrite` hook. **It hangs the command-processor thread**: the scan walks
+512 MB from physical 0, which crosses unmapped guest pages, and the run produced
+one `CAMWRITE` line where the same build had produced 415k without it. Reverted.
+
+If retried, it must (a) run off the command-processor thread, and (b) scan only
+regions known to be mapped rather than a flat 0..512 MB sweep.
