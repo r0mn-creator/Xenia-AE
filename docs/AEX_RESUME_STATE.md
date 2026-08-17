@@ -4,7 +4,43 @@
 Last updated 2026-08-17. **Vista still broken, but the search has a named
 target now.**
 
-## ⭐⭐⭐⭐⭐ LATEST (doc §51): the camera is a QUATERNION, AEX's `w` is NEGATED - measured in BOTH builds
+## ⭐⭐⭐⭐⭐ LATEST (doc §53): THE WRITER IS FOUND - and §52 is RETRACTED
+
+**Write path, end to end** (14,283 of 14,288 captured writes on it):
+
+```
+guest_8212BCE0 +0x8C
+   -> guest_82203438        92 float COMPARES, no fneg/fsub/fdiv/fsqrt
+                            -> a selector/validator, NOT a computer
+      -> +0x2C4 guest_8258E090   ZERO FP arithmetic, 284 str / 255 ldr
+                                 -> a pure block-copy helper
+         -> one 64-bit store
+```
+
+The stored doubleword is **two adjacent floats written together**:
+`1.221730` (= exactly **70.0 degrees**, a FOV constant, identical in every
+sample) followed by the quaternion **`w` (negative in every sample)**.
+
+⚠️ **§52 RETRACTED.** Its "the writer is host-side" came from zero hits on a
+**broken** watch: `ComputeMemoryAddress` returns **x0** on the STVL/STVR path
+and the staging code overwrites x0 twice before the watch read it, so it
+compared a *stack pointer* against the target and could never match, for any
+address. §52.4 flagged this as un-excluded and it was reported anyway. Fixed.
+
+**The missing opcode class was `STORE_I64`** - the quaternion is written by a
+64-bit doubleword store (7,560 hits in 15 s), while `STORE_I32`/`F32`/`OFFSET`/
+`V128`/`STVL`/`STVR` all genuinely return zero. This time backed by a
+**positive control**: the page watch's hottest faulting address gives the store
+watch **39,663 hits**, so its zeroes are measurements, not artefacts.
+
+**▶️ NEXT:** neither function in the write path can create the sign, so **`w` is
+already negative before it reaches them**. Walk up from `guest_8212BCE0 +0x8C`
+(or watch the SOURCE of `guest_8258E090`'s copy) to the first function that owns
+real FP arithmetic - an `fneg`, an operand-swappable `fsub`, or an `fsel`/`fcmp`
+select (a quaternion shortest-path test, `if dot < 0 then negate`, is the
+classic way this sign gets chosen).
+
+## OLDER (doc §51): the camera is a QUATERNION, AEX's `w` is NEGATED - measured in BOTH builds
 
 **First direct A/B capture of the bug value.** Found the camera object by
 CONTENT signature (frame delta `0x3C888889` = 1/60, immediately followed by the
