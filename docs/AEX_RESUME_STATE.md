@@ -4,7 +4,47 @@
 Last updated 2026-08-17. **Vista still broken, but the search has a named
 target now.**
 
-## ⭐⭐⭐⭐⭐ RESUME HERE (doc §55): the PRODUCER is `guest_82203D10` - compare its INPUTS
+## ⚠️⚠️ RESUME HERE (doc §56): the quaternion sign is NOT the cause - re-aim
+
+**§51's causal claim is REFUTED.** Compared `82203D10`'s inputs against XenDroid
+by aligning the two heaps (identical object layout, bases differing by a
+constant `0x6480`): **1232 words identical, 48 differing**, and of those only
+three counters, one self-pointer (differing by exactly the base delta) and one
+near-identical value are non-float. **No structural or flag divergence.**
+
+That comparison produced the decisive result:
+
+* Canonicalised to `|w|`, **both builds encode a SMALL rotation** - AEX
+  7.9°-10.6°, XenDroid 6.6°-24.1°.
+* A `w`-only flip gives `-conj(q)` = the **inverse** rotation, differing by
+  `2θ` = **13°-48°**. A mirrored vista needs **~180°**.
+* And decisively: **quaternion→matrix conversion is QUADRATIC**, so
+  **`R(q) = R(-q)` exactly**. A sign convention cannot change the rendering
+  matrix at all.
+
+**So the negative `w` cannot itself flip the vista.** What survives: AEX stores
+`w<0` and XenDroid `w>0` in every sample - real and discriminating, but **not
+sufficient**. It is a symptom or benign.
+
+**▶️ DO THIS NEXT:**
+1. **Test the blend hypothesis** - the only surviving mechanism. Interpolation
+   IS sign-sensitive. §55.2 found **six identity quaternions (`w=+1.0`)** in the
+   same array; a blend from `w=-0.996` toward `+1.0` has `dot<0` and without the
+   shortest-path negate goes the long way (~180°). Consumers are already named
+   (§52.2: `8212BDC4`, `8212BDA4`, `8212B7F0`, `8212B680`) - look for a
+   dot-then-conditional-negate shape, or its absence.
+2. **If no blend exists, drop this thread.** Return to §39/§43's **vertex shader
+   constant `c3.x`** - POSITIVE 254/254 in XenDroid vs NEGATIVE 221/255 in AEX
+   **at the same magnitude**, a cleaner signature than this quaternion (whose
+   magnitudes differ between builds). First confirm whether `c3.x` is actually
+   derived from this quaternion; if not, **§44-§56 tracked the wrong value** and
+   `c3.x`'s producer must be traced independently.
+
+⚠️ **Lesson**: "value X differs in sign between builds" ≠ "value X causes the
+symptom". Check the magnitude of the effect can produce the magnitude of the
+symptom BEFORE committing sections to it.
+
+## OLDER (doc §55): the producer is `guest_82203D10`
 
 **The producer is found.** The primary live camera slot takes 11,131
 `STORE_I32` writes, all from `guest_lr=0x82203D20 / caller=0x8212BDC4 /
