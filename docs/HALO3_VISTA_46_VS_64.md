@@ -3957,3 +3957,55 @@ Given 53.6, look for the first function on that path that owns real FP
 arithmetic - `fneg`, an `fsub` that could be operand-swapped, or an `fsel`/
 `fcmp`-driven select (a quaternion shortest-path test, `if dot < 0 then negate`,
 is the classic way a sign like this gets chosen).
+
+## 54. One level up: the copy's SOURCE buffer, already negative (2026-08-17)
+
+Short round, stopped early on request - recorded so it can be resumed cold.
+
+### 54.1 Captured the block copy's arguments
+
+Extended the `STORE_I64` watch to also record `r3`/`r4`/`r5` at the store
+(PPC ABI first three args; `PPCContext::r[n]` is at `32 + 8n`; reuses the
+`r24`/`r26`/`r28` slots, logged under those names). 8,985 of 8,988 samples
+agree:
+
+```
+r3 = 0x20000000        (a flag/count, not a pointer)
+r4 = 0xA5AFA738        destination side (quaternion sat at 0xA5AFA744)
+r5 = 0xA5AFA108        a DIFFERENT buffer, 0x630 lower  <-- the source
+```
+
+### 54.2 The source buffer has the identical layout, and `w` is ALREADY negative
+
+Reading `0xA5AFA108` directly out of guest RAM:
+
+```
+0xA5AFA108  0x3F9C61AA   1.221730     <- 70.0 degrees, the same FOV constant
+0xA5AFA10C  0xBF75D600  -0.960297     <- quaternion w, ALREADY NEGATIVE
+0xA5AFA110  0xBE74EE84  -0.239191        x
+0xA5AFA114  0xBE130914  -0.143589        y
+0xA5AFA118  0x3E1F1BF4   0.155380        z
+```
+
+Same `[FOV][w][x][y][z]` shape as the destination (51.3 / 53.5). This confirms
+53.6 from the data side rather than by inference: **the block copy is faithfully
+moving an already-wrong value**, so the producer is upstream of it.
+
+### 54.3 ▶️ NEXT — resume here
+
+Point the watch set at **`0xA5AFA10C`** (the `w` of the source buffer) with
+`debug.canary.jit_watch_exact=1` **and `debug.canary.jit_watch_i64=1`** - the
+quaternion is written by 64-bit doubleword stores, so leaving the i64 watch off
+will show a false zero (that is exactly how sections 51/52 went wrong).
+
+Repeat the 53.4 procedure on that address to name its writer, and keep walking
+up until a function with real FP arithmetic appears - `fneg`, an
+operand-swappable `fsub`, or an `fsel`/`fcmp` select. A quaternion
+shortest-path test (`if dot < 0 then negate`) remains the most likely origin.
+
+⚠️ Reminders that cost time this session:
+* The object's address moves every run. Locate it by content signature
+  (`findquat.sh`: 1/60 delta `0x3C888889` + ASCII `"rad!"`, quaternion at
+  `+0x34`), and note the signature scan does NOT find every instance - probe
+  candidates for load traffic to find the ACTIVE copy.
+* **Establish a positive control before believing any zero** (53.2).

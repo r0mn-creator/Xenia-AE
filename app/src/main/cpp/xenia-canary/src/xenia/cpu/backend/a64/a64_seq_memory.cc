@@ -848,6 +848,16 @@ static void EmitAeJitWatch64(A64Emitter& e, uint32_t addr_reg_idx,
         ptr(e.x20, static_cast<uint32_t>(offsetof(ppc::PPCContext, lr))));
   e.str(e.w15,
         ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, guest_lr))));
+  // DIAG(gpu/camera): section 54 - the storing function is a block copy, so
+  // its ARGUMENTS name the source buffer the negative w was copied FROM.
+  // PPC ABI: r3/r4/r5 = first three args. PPCContext::r[n] is at 32 + 8n.
+  // Reuses the r24/r26/r28 slots (logged as r3/r4/r5 for this kind).
+  e.ldr(e.x13, ptr(e.x20, 32 + 3 * 8));
+  e.str(e.x13, ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, r24))));
+  e.ldr(e.x13, ptr(e.x20, 32 + 4 * 8));
+  e.str(e.x13, ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, r26))));
+  e.ldr(e.x13, ptr(e.x20, 32 + 5 * 8));
+  e.str(e.x13, ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, r28))));
 
   e.ldr(e.w9, ptr(e.x19, 172));
   auto& no_caller = e.NewCachedLabel();
