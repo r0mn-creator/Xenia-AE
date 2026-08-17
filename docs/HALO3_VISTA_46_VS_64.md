@@ -3468,3 +3468,79 @@ instead of a vague "somewhere upstream":
   does, giving the JIT watch (46.1) a real caller instead of a possibly-stale
   `guest_lr`. Same safety property as the rest of the watch - only
   x0-x18/scratch registers touched.
+
+## 49. Named `8212BCE0`'s own caller (`821A8FF8`) - it's a generic dispatch loop, not camera-specific code
+
+Executed 48.5 step 1. Extended `AeJitWatchEntry` with a second field,
+`grandcaller_guest_addr`, read from `stackpoints[current_stackpoint_depth-2]`
+- one more frame up the exact same array the caller-aware watch (48.1)
+already reads, no new mechanism.
+
+### 49.1 One caller, zero variance
+
+Every one of 28,736 hits on `caller=0x8212BDC4` (the same call site 48.2
+found) resolved to **the exact same** `grandcaller=0x821A91E0` - not a
+distribution, a constant. That determinism itself is a data point: this
+call site is reached from exactly one place in the guest code, not
+dispatched through varying paths.
+
+### 49.2 Verified directly in the disassembly - not inferred from address proximity
+
+Dumped and disassembled the containing function. First attempt used a
+manually-computed page-aligned `/proc/pid/mem` read and got the arithmetic
+wrong (an off-by-20-pages typo), which silently produced a disassembly
+that decoded fine but didn't start with a valid function prologue - a
+reminder to sanity-check a raw dump against something structural (a known
+prologue shape) before trusting it, the same lesson as 45's stale-comment
+bug. Redone correctly (`aa0b87280`, 11792 bytes = `guest_821A8FF8`'s full
+host code per the perf map), the file starts with the exact prologue
+shape seen in every other function this investigation has disassembled
+(`sub sp,sp,#80` / stackpoint push).
+
+Searched the corrected disassembly for the literal construction of
+`0x821A91E0` (the watched return address) and found it at line 1129,
+**directly followed by** (1135-1141) the resolver-table call sequence
+building guest target `0x8212BCE0` (`mov w16,#48352; movk
+w16,#33298,lsl16` = `0xbce0`/`0x8212`) and `blr`-ing to it. This is not
+address-range inference - it is the actual "store return address, build
+target, call" triplet, confirmed byte-for-byte.
+
+### 49.3 What the surrounding code shows: a dispatch loop, not a camera routine
+
+The call to `8212BCE0` is one of a **long run of near-identical call
+sites** in `821A8FF8` - at least six visible in a 300-line window alone,
+each with the same shape: load `d4` from context offset 568 into offset
+328, clear a bit in the context-offset-32 flag word, set both `sp+56` and
+context-offset-304 (`lr`) to a return address exactly 8 guest bytes past
+the last, build a target guest address via the same `mov
+w16/movk w16,lsl16` resolver-load pattern, `blr`. Each call's target is a
+**different** guest address (`0x8247C1C8`, `0x8247A3A8`, `0x8212BCE0`,
+`0x8247C708`, ...) - the classic shape of a loop walking a **table of
+function pointers or node handlers**, calling whichever one the current
+iteration's data names, not a hand-written sequence of camera-specific
+calls.
+
+This matches `8212BCE0`'s own internal shape (found in 45/48.3: it
+initializes `r24=1`/`r26=184`/`r28=0` itself, i.e. its own loop counters)
+- `8212BCE0` looks like a **generic node/element handler**, not a
+camera-only function, called from a **generic dispatch loop**, not a
+camera-only caller. The camera-specific behavior is entirely in the DATA
+this generic machinery is pointed at, not in any function name found so
+far.
+
+### 49.4 ▶️ NEXT
+
+* One more level (`821A8FF8`'s own caller, via `grandcaller` on a watch
+  planted *inside* `821A8FF8` instead of `82203D10`) would name whoever
+  drives the dispatch loop - likely where the node list itself starts.
+* Per 48.5 step 2 (still open): capture live `r24`/`r26`/`r28`/context-328
+  values from a running AEX process at the watched moment and read the
+  guest memory those pointers name, then repeat on XenDroid at the
+  equivalent point, to compare the actual INPUT rather than more code.
+* Given 49.3's dispatch-table shape, comparing the **node list / handler
+  table contents** between AEX and XenDroid (not just this one node's
+  code) may be a shorter path than continuing to trace individual pointer
+  chains - if the two builds walk the same table in a different order, or
+  with a different node's data at this slot, that alone would explain a
+  mirrored-camera-only symptom without needing every downstream pointer
+  traced.

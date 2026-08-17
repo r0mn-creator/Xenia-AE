@@ -292,6 +292,11 @@ struct AeJitWatchEntry {
   // exactly "where the innermost pushed frame was called from", read the
   // same way here as PopulatePseudoStacktrace does from host C++.
   uint32_t caller_guest_addr;
+  // DIAG(gpu/camera): section 48.5 step 1 - one more frame up the same
+  // stackpoints array (depth-2) names the CALLER's caller, i.e. who called
+  // guest_8212BCE0 itself and set up r24/r26/r28 for it. Zero if fewer
+  // than 2 frames are pushed.
+  uint32_t grandcaller_guest_addr;
 };
 constexpr uint32_t kAeJitWatchRingSize = 64;
 AeJitWatchEntry g_ae_jit_watch_ring[kAeJitWatchRingSize];
@@ -313,9 +318,9 @@ void DumpAeJitStoreWatch() {
         g_ae_jit_watch_ring[seq % kAeJitWatchRingSize];
     XELOGI(
         "JITWATCH seq={} guest_addr=0x{:08X} value=0x{:08X} guest_lr=0x{:08X} "
-        "caller=0x{:08X}",
+        "caller=0x{:08X} grandcaller=0x{:08X}",
         seq, entry.guest_addr, entry.value, entry.guest_lr,
-        entry.caller_guest_addr);
+        entry.caller_guest_addr, entry.grandcaller_guest_addr);
   }
   g_ae_jit_watch_ring_dumped = written;
 }
@@ -656,21 +661,43 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
         // function made since being entered.
         e.ldr(e.w9, ptr(e.x19, 172));
         auto& no_caller = e.NewCachedLabel();
+        auto& no_grandcaller = e.NewCachedLabel();
+        auto& grandcaller_done = e.NewCachedLabel();
         e.cbz(e.w9, no_caller);
+        e.mov(e.w11, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
         e.sub(e.w9, e.w9, 1);
         e.ldr(e.x10, ptr(e.x19, 152));
-        e.mov(e.w11, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
-        e.umull(e.x9, e.w9, e.w11);
-        e.add(e.x10, e.x10, e.x9);
-        e.ldr(e.w9,
-              ptr(e.x10, static_cast<uint32_t>(offsetof(
+        e.umull(e.x12, e.w9, e.w11);
+        e.add(e.x12, e.x10, e.x12);
+        e.ldr(e.w14,
+              ptr(e.x12, static_cast<uint32_t>(offsetof(
                              A64BackendStackpoint, guest_return_address_))));
-        e.str(e.w9, ptr(e.x2, static_cast<uint32_t>(offsetof(
-                                  AeJitWatchEntry, caller_guest_addr))));
+        e.str(e.w14, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                                   AeJitWatchEntry, caller_guest_addr))));
+        // grandcaller: one more frame up the same array (depth-2). w9 here
+        // still holds depth-1 (the index just used above), so depth-2 is
+        // w9-1 - only valid if the ORIGINAL depth was >= 2, i.e. w9 (=
+        // depth-1) is nonzero.
+        e.cbz(e.w9, no_grandcaller);
+        e.sub(e.w9, e.w9, 1);
+        e.umull(e.x12, e.w9, e.w11);
+        e.add(e.x12, e.x10, e.x12);
+        e.ldr(e.w14,
+              ptr(e.x12, static_cast<uint32_t>(offsetof(
+                             A64BackendStackpoint, guest_return_address_))));
+        e.str(e.w14, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                                   AeJitWatchEntry, grandcaller_guest_addr))));
+        e.b(grandcaller_done);
+        e.L(no_grandcaller);
+        e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                                   AeJitWatchEntry, grandcaller_guest_addr))));
+        e.L(grandcaller_done);
         e.b(watch_skip);
         e.L(no_caller);
         e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
                                    AeJitWatchEntry, caller_guest_addr))));
+        e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                                   AeJitWatchEntry, grandcaller_guest_addr))));
         e.L(watch_skip);
       }
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {

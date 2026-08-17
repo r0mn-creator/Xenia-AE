@@ -4,6 +4,32 @@
 Last updated 2026-08-17. **Vista still broken, but the search has a named
 target now.**
 
+## ⭐⭐⭐⭐⭐ LATEST (doc §49): named `8212BCE0`'s caller - it's a generic dispatch loop
+
+Extended the caller-aware watch (§48.1) one frame further
+(`grandcaller_guest_addr`, `stackpoints[current_stackpoint_depth-2]` - same
+array, same mechanism, no new infra). All 28,736 hits on the known call
+site resolved to **one constant caller**, `guest_821A8FF8`. Verified
+directly in its disassembly (not inferred from address proximity - first
+attempt had an off-by-20-pages arithmetic bug in the manual `/proc/pid/mem`
+read that silently produced a bogus-but-plausible-looking disassembly;
+caught it because the output didn't start with the standard function
+prologue, redid it correctly): line 1129 builds the exact watched return
+address, immediately followed by the resolver-call sequence targeting
+`0x8212BCE0` - a direct, byte-confirmed call site.
+
+**The surrounding code is a dispatch loop, not camera logic**: at least six
+near-identical call sites in one window, each loading the same context
+slots, building a *different* guest target address via the same
+resolver-load pattern, and calling it - the shape of a loop walking a table
+of function pointers/node handlers, not hand-written camera code. Combined
+with `8212BCE0` initializing its own loop counters internally (§45/48.3),
+this whole layer looks like a **generic node/element evaluator system**,
+with the camera-specific behavior living entirely in the DATA it processes,
+not in any function found so far. See doc §49.4 for next steps - tracing
+one more caller level, or comparing the node/handler table contents
+directly instead of continuing to chase individual pointers.
+
 ## ⭐⭐⭐⭐⭐ LATEST (doc §48): found the EXACT bug value live, in a named call chain - and it's a DATA bug, not a JIT bug
 
 Watched a live process write `0xBF7E5FB4` - the *exact* raw float from
