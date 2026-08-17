@@ -4295,3 +4295,92 @@ phase-dependent comparison is unreliable.
 ⚠️ Track `c3.x` from here, **not** the quaternion. Re-verify any candidate
 against the §39/§43 signature: a **same-magnitude** sign flip. The quaternion
 failed that test (its magnitudes differ between builds); `c3.x` passes it.
+
+## 58. ⭐⭐⭐⭐⭐ REFRAMED: this is NOT a camera bug - it is per-vertex position data
+
+### 58.1 The framing that invalidates §44-§57
+
+The user's observation, which settles it in one step:
+
+* the in-game **level geometry renders perfectly**;
+* the **characters collapse into a ball**;
+* the menu **vista is upside down**.
+
+**A camera/view transform multiplies every vertex in the scene equally.** If it
+were wrong, the level would be wrong too. It isn't. And no camera orientation
+error can turn a character into a ball - that is vertices collapsing toward a
+common point, i.e. **per-vertex position computation**: bone/skinning matrices
+wrong, or skinned vertex output never becoming visible to whoever consumes it.
+
+§44-§57 spent fourteen sections treating this as a camera-constant sign bug -
+including five on a quaternion that §56 then proved *incapable* of causing the
+symptom. The level-perfect / characters-broken asymmetry rules the whole framing
+out immediately, and was in the docs from the start.
+
+**Rule going forward: prefer explanations that hit skinned/exported geometry and
+leave static level geometry alone. Judge fixes on the CHARACTERS.**
+
+### 58.2 AEX's own source already names the mechanism - and says it is untested
+
+`vulkan_shared_memory.cc` around the host-visible memory-type selection:
+
+> *"with a device-local-only buffer, data the GPU writes (memexport output,
+> resolve output) and the CPU's view of guest RAM can diverge, because the CPU
+> only ever sees what a staging copy brings back. Host-visible shared memory is
+> read directly, so guest RAM and the GPU never diverge - **which is the
+> mechanism XenDroid credits for fixing Halo 3's collapsed skinned geometry
+> (the "ball")**. AE had neither this nor XenDroid's `shared_memory_zero_copy`;
+> it uploads dirty pages each frame instead."*
+>
+> *"Toggle: `debug.canary.shared_memory_host_visible` (experiment, **default OFF
+> until the ball is re-tested in gameplay**...)"*
+
+So the port exists, is **off by default, explicitly pending a gameplay test that
+was never performed**. §38.3 did enable it - but judged only the **vista**, and
+reverted. That is exactly the gap 58.1's reframing exposes.
+
+Confirmed by grep: AEX has **no** `shared_memory_zero_copy` cvar (its only
+mention is the comment above) and **no** `vulkan_shared_memory_host_visible`;
+XenDroid defines and uses both, plus `readback_resolve="uma"`,
+`readback_resolve_sync`, `tiled_shared_memory`.
+
+### 58.3 The gameplay test that was owed
+
+Ran it. With `debug.canary.shared_memory_host_visible=1` the log confirms the
+buffer really is host-mapped:
+
+```
+SHMHOSTVIS host-map decision: is_uma=false type_bits=0x7 device_local=0xf
+  host_visible=0x7 host_cached=0x6 host_coherent=0x3 -> host_visible=true coherent=true
+SHMHOSTVIS buffer host-mapped, coherent=1
+```
+
+Loaded the opening campaign cinematic in both configurations, same camera:
+
+| | characters |
+|---|---|
+| **host-visible ON** | helmet and visor clean, torso a coherent armoured piece, limbs resolved |
+| **host-visible OFF** (default) | pale elongated blob where the head/neck belongs, armour split into separated chunks with visible gaps |
+
+**ON is visibly less fragmented.** Screenshots: `scratchpad/HOSTVIS_ON.png`,
+`scratchpad/HOSTVIS_OFF.png`.
+
+⚠️ **Limits of this result, stated plainly**: single frames from a *moving*
+cinematic, so the two are not the same instant; the improvement is suggestive,
+not conclusive. **Neither configuration shows the historical "ball"** - in this
+cinematic the characters are fragmented but recognisable in both, so either the
+symptom is scene-dependent or it has changed since it was documented. And the
+vista stayed upside down in both.
+
+### 58.4 ▶️ NEXT
+
+1. **Repeat 58.3 with a still**: pause or pick a scene with a stationary
+   character so the two configs can be compared frame-for-frame, and confirm the
+   improvement is real rather than cinematic timing.
+2. **Port `shared_memory_zero_copy`** - AEX still lacks it entirely. Host-visible
+   only makes the buffer readable; zero-copy makes guest RAM *be* the buffer,
+   which is the stronger guarantee and the one XenDroid actually runs with.
+3. **Then re-check the vista.** If the ball and the vista are one bug (58.1),
+   fixing the position path should move both. If the characters improve and the
+   vista does not, they are two bugs and the vista needs its own trace - but
+   started from the position/skinning path, not the camera.
