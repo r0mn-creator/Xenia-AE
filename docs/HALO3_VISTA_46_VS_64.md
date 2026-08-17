@@ -4488,3 +4488,96 @@ a branch differently; find the first one.
    wrong constant.
 3. **Judge every candidate on the CHARACTERS** (§58.1), and prefer any
    explanation that also predicts the 368-vs-512 scissor choice.
+
+## 60. Why fewer draws: three eliminations, and the scheduler moves to prime suspect
+
+Following §59.5 ("find the wrong decision, not the wrong value").
+
+### 60.1 ELIMINATED: the guest's frame-time clock
+
+Halo 3 keeps a frame delta in the same object family as the camera (the `dt`
+field 4 bytes before the `"rad!"` tag, §51.2). If AEX fed the guest a different
+notion of elapsed time, adaptive quality would explain both the lower detail and
+the missing draws. Measured directly in both builds at the menu:
+
+| | guest `dt` | actual render rate |
+|---|---|---|
+| AEX | **0.016667 (1/60)**, occasionally 1/30 | ~5-8 FPS |
+| XenDroid | **0.016667 (1/60)** | ~17-25 FPS |
+
+**Identical.** Both guests believe they are running at 60 FPS regardless of the
+real frame rate, so the guest's clock is not the divergence and frame-time-driven
+adaptive quality is ruled out.
+
+(Worth noting for its own sake: the guest's simulation clock is decoupled from
+wall time in *both* emulators - normal for a vblank-driven guest, but it means
+`dt` can never be used as a performance signal.)
+
+### 60.2 ELIMINATED: display/video configuration
+
+A different reported display would plausibly explain a 368-vs-512 render-target
+choice. All of `widescreen`, `use_50Hz_mode`, `video_standard`,
+`internal_display_resolution` and `avpack` are **identical** between the two
+configs (`true`, `false`, `1`, `8`, `8`).
+
+### 60.3 The probe that cannot answer this
+
+`debug.canary.ndcy_draw` exists in both builds but logs **once per distinct
+shader** (44 lines), not per draw, so it cannot localise a 7x draw deficit by
+shader. §37.2's "43 vertex shaders appear in both logs" is therefore a statement
+about shader *variety*, not draw *counts* - the same draw types occur in both,
+just far fewer of them in AEX. Any future per-shader draw histogram needs a new
+counter.
+
+### 60.4 ⭐ The scheduler: AEX runs WITHOUT it, and turning it off cripples XenDroid
+
+The config diff's remaining structural divergence is `guest_scheduler`:
+**XenDroid `true`, AEX `false`** - the cooperative fiber scheduler that runs
+guest threads in-kernel instead of mapping each to a host OS thread.
+
+§38.1 tested this and concluded "the scheduler is NOT the vista fix", which is
+correct - but it also wrote, explicitly: **"(This says nothing either way about
+the ball.)"** That gap was never closed, and the ball is precisely the
+thread-timing-sensitive symptom.
+
+Ran XenDroid with `guest_scheduler=false` (via §41's harness mechanism, config
+snapshot/restore):
+
+* it reaches the menu and renders the **vista correctly at 24.8 FPS** -
+  reproducing §38.1 exactly;
+* but the campaign level **had not finished loading after ~9 minutes**, versus
+  ~2 minutes with the scheduler on. The screen is still animating (108,542 of
+  520,000 sampled pixels changed between two captures two minutes apart), so it
+  is rendering and slow, **not hung** - the distinction §38.1 itself was
+  retracted over.
+
+**Turning the scheduler off in the build that works cripples the guest's ability
+to make progress on heavily-threaded work.** Level loading is exactly that. And
+starved guest worker threads is the one mechanism that predicts every symptom at
+once:
+
+* per-frame object/animation work not completing -> **~7x fewer draws** (§31)
+* the animation thread not updating poses -> **bone matrices stale** -> §29's 142
+  saturated states -> **the ball**
+* thread interleaving varying run to run -> §22's **non-determinism**
+* and a game that adapts detail to what finished in time -> the **368-vs-512**
+  scissor choice
+
+### 60.5 ⚠️ What is NOT established
+
+**I did not observe XenDroid's characters with the scheduler off** - the level
+never finished loading. So this is a strong, evidence-backed *hypothesis*, not a
+demonstration that the scheduler causes the ball. Do not record it as proven.
+
+### 60.6 ▶️ NEXT
+
+1. **Finish the owed test**: let XenDroid load with `guest_scheduler=false` for
+   as long as it needs (20+ minutes if necessary) and look at the characters.
+   That single observation either confirms or kills this hypothesis outright.
+2. **If confirmed, enable AEX's scheduler.** Per `project_canary_aex`, the
+   engine is 100% ported and the wedge (`xeKeKfAcquireSpinLock` sleeping the
+   dispatch thread the lock holder was queued on) was root-caused and fixed in
+   `2faeb88b0` - but that fix is still **untested on device**. Testing it is the
+   natural next step regardless, and it is now aimed at the ball rather than the
+   vista.
+3. Judge on the **characters** (§58.1).
