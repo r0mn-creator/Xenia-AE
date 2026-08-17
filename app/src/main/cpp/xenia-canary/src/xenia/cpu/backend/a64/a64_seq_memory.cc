@@ -281,6 +281,17 @@ struct AeJitWatchEntry {
   uint32_t guest_addr;
   uint32_t value;
   uint32_t guest_lr;
+  // DIAG(gpu/camera): section 47's data-pipeline chase needs "who called
+  // the function this store is inside", not just guest_lr (which is
+  // usually stale by the time a store deep in a function fires - it shows
+  // the return point of whatever call THIS function itself last made, not
+  // who called it). A64BackendStackpoint (a64_backend.h) is XENIA'S OWN
+  // stack-unwind mechanism, pushed by every guest function's prologue and
+  // read by A64Backend::PopulatePseudoStacktrace - not a repurposed trace
+  // log. stackpoints[current_stackpoint_depth-1].guest_return_address_ is
+  // exactly "where the innermost pushed frame was called from", read the
+  // same way here as PopulatePseudoStacktrace does from host C++.
+  uint32_t caller_guest_addr;
 };
 constexpr uint32_t kAeJitWatchRingSize = 64;
 AeJitWatchEntry g_ae_jit_watch_ring[kAeJitWatchRingSize];
@@ -301,8 +312,10 @@ void DumpAeJitStoreWatch() {
     const AeJitWatchEntry& entry =
         g_ae_jit_watch_ring[seq % kAeJitWatchRingSize];
     XELOGI(
-        "JITWATCH seq={} guest_addr=0x{:08X} value=0x{:08X} guest_lr=0x{:08X}",
-        seq, entry.guest_addr, entry.value, entry.guest_lr);
+        "JITWATCH seq={} guest_addr=0x{:08X} value=0x{:08X} guest_lr=0x{:08X} "
+        "caller=0x{:08X}",
+        seq, entry.guest_addr, entry.value, entry.guest_lr,
+        entry.caller_guest_addr);
   }
   g_ae_jit_watch_ring_dumped = written;
 }
@@ -633,6 +646,31 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
                                     offsetof(ppc::PPCContext, lr))));
         e.str(e.w15, ptr(e.x2, static_cast<uint32_t>(
                                    offsetof(AeJitWatchEntry, guest_lr))));
+        // caller_guest_addr: read A64BackendStackpoint - x19's own fields,
+        // offsets confirmed against a64_backend.h (152=stackpoints,
+        // 172=current_stackpoint_depth), same struct
+        // A64Backend::PopulatePseudoStacktrace reads from host C++. depth-1
+        // is the innermost pushed frame - .guest_return_address_ there is
+        // "where this function was called from", stable even though
+        // guest_lr itself may already be stale from an internal call this
+        // function made since being entered.
+        e.ldr(e.w9, ptr(e.x19, 172));
+        auto& no_caller = e.NewCachedLabel();
+        e.cbz(e.w9, no_caller);
+        e.sub(e.w9, e.w9, 1);
+        e.ldr(e.x10, ptr(e.x19, 152));
+        e.mov(e.w11, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
+        e.umull(e.x9, e.w9, e.w11);
+        e.add(e.x10, e.x10, e.x9);
+        e.ldr(e.w9,
+              ptr(e.x10, static_cast<uint32_t>(offsetof(
+                             A64BackendStackpoint, guest_return_address_))));
+        e.str(e.w9, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                                  AeJitWatchEntry, caller_guest_addr))));
+        e.b(watch_skip);
+        e.L(no_caller);
+        e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                                   AeJitWatchEntry, caller_guest_addr))));
         e.L(watch_skip);
       }
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {

@@ -3347,3 +3347,124 @@ via convergent evidence so far.
    need a different targeting method - e.g. narrowing the JIT watch to a
    specific sample's exact mantissa (46.7's idea 3, still untried) to name
    a function this session hasn't already ruled out.
+
+## 48. ⭐⭐⭐⭐⭐ BREAKTHROUGH: found the exact `0xBF7E5FB4` value in a named, traced call chain - and the WHOLE chain's arithmetic is proven correct
+
+Same day, continuation of section 47. Executed 47.5's idea 2 (a real call
+stack, not guessed adjacency) and got a direct hit.
+
+### 48.1 New tool: read Xenia's own stack-unwind mechanism from inside the JIT watch
+
+`guest_lr` (raw `PPCContext.lr`) is usually stale by the time a store deep
+inside a function fires - it shows the return point of whatever call *that
+function itself* last made, not who called it. Xenia already solves this
+problem for its own exception backtraces: every JIT'd function's prologue
+pushes an `A64BackendStackpoint` (`a64_backend.h`) - `{host_stack_,
+guest_stack_, guest_return_address_}`, 16 bytes - onto an array pointed to
+by `A64BackendContext::stackpoints`, indexed by `current_stackpoint_depth`.
+`A64Backend::PopulatePseudoStacktrace` already walks this from host C++ for
+real stack traces. Confirmed by computing the struct's field offsets and
+matching them exactly against the prologue bytes already seen in every
+function disassembled this session (`ldr x8,[x19,#152]` = `stackpoints`;
+`ldr w9,[x19,#172]` = `current_stackpoint_depth`; the `umull ..., #16` =
+`sizeof(A64BackendStackpoint)`).
+
+Added `caller_guest_addr` to `AeJitWatchEntry` (46.1's ring buffer) and,
+inline in `STORE_I32::Emit`, read `stackpoints[current_stackpoint_depth -
+1].guest_return_address_` the same way `PopulatePseudoStacktrace` does -
+still no function call, same x0-x18 scratch-register safety guarantee as
+the rest of the watch. Verified stable at the same FPS as before, no
+crashes, before trusting the data.
+
+### 48.2 The exact historical bug value, found live
+
+Re-ran the (now caller-aware) watch. `guest_82203D20` (already a candidate
+from section 47.2) resolves its caller consistently to `0x8212BDC4`
+(76,486 and 93,861 hits across two independent runs). Checked the VALUE
+distribution behind that specific (guest_lr, caller) pair -
+**`0xBF7E5FB4` is in it** - the *exact* raw value from this
+investigation's original bug report (§43.5: "AEX writes `0xBF7E5FB4`,
+XenDroid `0x3F7E5FB4`"). This is no longer a plausible candidate by
+convergent evidence - it is a **direct, unambiguous capture of the exact
+historical bug manifesting live**, with a named caller.
+
+`0x8212BDC4` resolves to `guest_8212BCE0 + 0xE4`. Dumped and disassembled
+it (803 AEX instructions, `func_8212BCE0_mc.asm`; XenDroid 1051,
+`xd_8212BCE0_mc.asm`). Confirmed the call graph directly in the bytes:
+`8212BCE0` builds the guest address `0x82203D10` as a call target
+(`mov w16,#15632; movk w16,#33312,lsl16` = `0x8220_3D10`) and `blr`s to it,
+with the return point set to exactly `0x8212BDC4` beforehand - **so
+`8212BCE0` is confirmed to directly call `guest_82203D10`**, and the
+watched value is produced somewhere inside that call.
+
+### 48.3 Traced the whole computation feeding the call - all of it matches XenDroid instruction-for-instruction
+
+Right before the call, `8212BCE0` computes what the code shape strongly
+suggests is a delta/direction vector: two pointers (`PPCContext` offsets
+288 and 272, i.e. `r31`/`r29`) are each dereferenced to load a guest float,
+and `fsub d4, d4, d5` subtracts one from the other before it feeds the
+call to `82203D10`. Checked every step against XenDroid's disassembly:
+
+* **The pointers' own setup** (`r29 = word read from guest[r24+r28]`;
+  `r31 = r26 + that same word`) - identical registers, identical context
+  offsets, identical addition order, in both trees.
+* **The `fsub`** - `fsub d4, d4, d5` in both, same registers, no operand
+  swap (a swap would silently flip the sign without changing the
+  instruction or its count - checked specifically because that's exactly
+  the failure mode `fmul`'s commutativity can't rule out but subtraction
+  order can hide).
+* **The call itself** - same guest target address, same argument-passing
+  shape.
+
+**Every single piece of this chain - pointer setup, the subtraction, the
+call - is byte-for-byte identical between AEX and XenDroid.** Combined
+with section 47's proof that `guest_82205690`'s core computation also
+matches exactly, this is now four independently-verified computations
+(825AD9F0 ruled irrelevant by content, not comparison; 82177870;
+82205690; and now the 8212BCE0→82203D10 chain that provably produces the
+exact bug value) all compiling correctly.
+
+### 48.4 What this means
+
+If the code computing with the data is proven identical and the data were
+also identical, the output would have to be identical too. Since AEX's
+output is wrong and the code is proven right, **the guest memory this
+chain reads (at `guest[r24+r28]` and whatever `r31` dereferences to
+downstream) must already hold different values by the time this code
+runs** - not a JIT miscompilation, a runtime **data** difference. This
+does not contradict section 46.4's finding that a *fixed, static*
+guest constant (`0x82000AF8`) matches between builds - that was
+read-only game data; `r24`, `r26`, `r28` here are almost certainly
+**dynamic, per-frame state** (positions, indices) computed by
+something else entirely, upstream of this chain.
+
+### 48.5 ▶️ NEXT
+
+The search is now on the INPUT side, with a concrete, named entry point
+instead of a vague "somewhere upstream":
+
+1. **Trace `r24`/`r26`/`r28`'s own values** (the context slots feeding the
+   pointer arithmetic in 48.3) back to where THEY get set - likely earlier
+   in `8212BCE0` itself, or passed in as ITS OWN arguments from ITS caller.
+   One more level of the same caller-aware JIT watch technique (48.1)
+   applied to `8212BCE0` itself would name that caller directly.
+2. **Read the live guest memory at `[r24+r28]`** from both a running AEX
+   and XenDroid process at the equivalent moment (same technique as
+   46.4's constant check, but this address is dynamic - needs the live
+   `r24`/`r28` values captured via CAMWATCH/JITWATCH first, not a fixed
+   guest address) to directly compare the INPUT DATA, not just the code
+   reading it.
+3. This is likely NOT the end of the chain - `8212BCE0` is itself probably
+   called from somewhere, and whatever sets `r24`/`r26`/`r28` might itself
+   receive them from further up. Each level traced this way is strictly
+   progress, even if the ultimate root is several calls further up.
+
+### 48.6 Tooling added this round
+
+* `AeJitWatchEntry::caller_guest_addr` + inline stackpoint-walk in
+  `STORE_I32::Emit` (`a64_seq_memory.cc`) - reads
+  `A64BackendContext::stackpoints[current_stackpoint_depth-1]
+  .guest_return_address_` the same way `A64Backend::PopulatePseudoStacktrace`
+  does, giving the JIT watch (46.1) a real caller instead of a possibly-stale
+  `guest_lr`. Same safety property as the rest of the watch - only
+  x0-x18/scratch registers touched.

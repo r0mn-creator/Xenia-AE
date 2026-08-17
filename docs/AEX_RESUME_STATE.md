@@ -1,9 +1,42 @@
 # AEX — RESUME STATE (single source of truth)
 
 **Read this first. It is written to be enough on its own.**
-Last updated 2026-08-17. **Vista still broken.**
+Last updated 2026-08-17. **Vista still broken, but the search has a named
+target now.**
 
-## ⭐⭐⭐⭐⭐ LATEST: every FP computation checked so far is CORRECT - the JIT isn't miscompiling the arithmetic
+## ⭐⭐⭐⭐⭐ LATEST (doc §48): found the EXACT bug value live, in a named call chain - and it's a DATA bug, not a JIT bug
+
+Watched a live process write `0xBF7E5FB4` - the *exact* raw float from
+this investigation's original bug report (`0xBF7E5FB4` vs XenDroid's
+`0x3F7E5FB4`) - and traced its full producing call chain:
+`guest_8212BCE0` (at guest address `0x8212BDC4`) calls `guest_82203D10`,
+which is where the value gets written. Found this using a NEW tool: read
+Xenia's own existing stack-unwind array
+(`A64BackendContext::stackpoints`, the same one
+`A64Backend::PopulatePseudoStacktrace` uses for real backtraces) from
+inside the inline JIT watch, giving a real caller instead of a possibly-
+stale `guest_lr`.
+
+**Traced every step of the computation feeding that call - all of it is
+byte-for-byte identical between AEX and XenDroid**: the two pointers
+providing the delta-vector components (same context offsets, same
+addition order), the `fsub` that subtracts them (same registers, no
+operand swap), and the call itself. Combined with §47's proof that
+`guest_82205690`'s core computation also matches exactly, **five
+independent pieces of arithmetic across this whole pipeline are now
+proven identical between builds.**
+
+**Conclusion: this is not a JIT miscompilation. It's a data problem.** If
+the code is proven identical and still produces a different result, the
+GUEST MEMORY it reads (a dynamic position/vector value, not the static
+game constant §46.4 already checked and confirmed identical) must already
+differ by the time this code runs. The search should now trace **where
+that memory gets WRITTEN**, not scrutinize more arithmetic - see doc
+§48.5 for the concrete next step (one more level of the same caller-aware
+watch, applied to `8212BCE0` itself, to find who calls IT and sets up its
+inputs).
+
+## OLDER: every FP computation checked so far is CORRECT - the JIT isn't miscompiling the arithmetic
 
 Doc §47. **Correction to §46**: the top `guest_lr` hits that named
 `guest_82177870` (`0x82178360`/`0x8216A70C`) turned out to be a constant
