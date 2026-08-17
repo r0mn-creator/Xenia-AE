@@ -4,7 +4,43 @@
 Last updated 2026-08-17. **Vista still broken, but the search has a named
 target now.**
 
-## ⭐⭐⭐⭐⭐ RESUME HERE (doc §54): watch `0xA5AFA10C`-equivalent - the copy SOURCE
+## ⭐⭐⭐⭐⭐ RESUME HERE (doc §55): the PRODUCER is `guest_82203D10` - compare its INPUTS
+
+**The producer is found.** The primary live camera slot takes 11,131
+`STORE_I32` writes, all from `guest_lr=0x82203D20 / caller=0x8212BDC4 /
+grandcaller=0x821A91E0` - the §48 chain. Unlike §53's block copy (no FP at all),
+`guest_82203D10` owns real arithmetic: **7 `fneg`, 3 `fsqrt`, 3 `fdiv`, 40
+`fmul`, 18 `fnmsub`, 20 `fmadd`, 446 compares**. It is the quaternion computer.
+(This overturns §47's dismissal of it.)
+
+**But its sign-relevant codegen is IDENTICAL to XenDroid**: `fneg` 7/7, `fabs`
+3/3, `fdiv` 3/3, `fsqrt` 3/3, `fmadd` 20/20, `eor` 7/7. XenDroid's extra
+`fmul`/`fcmp`/`fmov` with FEWER total instructions is just `inline_leaf_calls`
+(§41: not load-bearing). Six of the seven `fneg` are in NaN-quieting paths
+(`orr #0x8000000000000` = double bit 51), not the camera sign.
+
+**So the divergence is in the INPUT, again.** Next: read what `82203D10` loads
+just before the `fneg` and compare against XenDroid. The watch already records
+`r24=0xA5B072AC`, `r26=0xA5B07244`, **`r28=0x82745EA4` (a STATIC XEX address -
+directly comparable between builds)**.
+
+⚠️ **§51's framing corrected (see §55.1)**: "only `w` negated = the inverse
+rotation" is WRONG - `q` and `-q` are the same rotation. The measured invariant
+(AEX `w` always negative, XenDroid always positive) still holds and still
+discriminates, but does not by itself prove the camera points the wrong way.
+Do NOT compare component sign patterns across builds: the camera animates,
+components cross zero, and the two are never sampled at the same phase - two
+such comparisons this session gave contradictory answers. Compare **rotations
+canonicalised to `w > 0`**, or better, compare **inputs**.
+
+⚠️ Enable BOTH `debug.canary.jit_watch_exact` and `debug.canary.jit_watch_i64`.
+⚠️ Positive control before believing any zero (§53.2).
+⚠️ Object address moves every run - locate by content signature
+(`scratchpad/findquat.sh`), and probe candidates for load traffic to find the
+ACTIVE copy. Useful map: `scratchpad/probe.sh <pid> <addr>` reports readers,
+writers and arg registers for one address.
+
+## OLDER (doc §54): the copy SOURCE buffer is already negative
 
 The camera quaternion's writer is a **block copy**, and §54 captured its
 arguments: `r5` = the **source buffer**, which has the identical
