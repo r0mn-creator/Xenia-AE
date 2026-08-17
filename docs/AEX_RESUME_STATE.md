@@ -4,7 +4,33 @@
 Last updated 2026-08-17. **Vista still broken, but the search has a named
 target now.**
 
-## ⭐⭐⭐⭐⭐ LATEST (doc §53): THE WRITER IS FOUND - and §52 is RETRACTED
+## ⭐⭐⭐⭐⭐ RESUME HERE (doc §54): watch `0xA5AFA10C`-equivalent - the copy SOURCE
+
+The camera quaternion's writer is a **block copy**, and §54 captured its
+arguments: `r5` = the **source buffer**, which has the identical
+`[FOV 70°][w][x][y][z]` layout and whose `w` is **already negative**
+(`-0.960297`). The copy faithfully moves an already-wrong value.
+
+**Do this next:**
+1. Launch Halo 3 to the menu, locate the object by CONTENT signature
+   (`scratchpad/findquat.sh` - 1/60 delta `0x3C888889` + ASCII `"rad!"`,
+   quaternion at `+0x34`). ⚠️ The address moves EVERY run, and the scan does
+   not find every instance - probe candidates for load traffic to find the
+   ACTIVE copy.
+2. Turn on **BOTH** `debug.canary.jit_watch_exact=1` **and**
+   `debug.canary.jit_watch_i64=1`, then set `debug.canary.jit_watch_addr`.
+   ⚠️ The quaternion is written by **64-bit doubleword stores**; leaving the
+   i64 watch off reports a false zero - that is exactly how §51/§52 went wrong.
+3. Read `r3`/`r4`/`r5` off the `STR64` hits to get that buffer's own source,
+   and repeat until a function with real FP arithmetic appears (`fneg`, an
+   operand-swappable `fsub`, or an `fsel`/`fcmp` select). A quaternion
+   shortest-path test (`if dot < 0 then negate`) is the most likely origin.
+
+⚠️ **Establish a positive control before believing any zero** (§53.2): arm the
+page watch, take its hottest faulting address, point the store watch at it, and
+confirm hits.
+
+## OLDER (doc §53): THE WRITER IS FOUND - and §52 is RETRACTED
 
 **Write path, end to end** (14,283 of 14,288 captured writes on it):
 
