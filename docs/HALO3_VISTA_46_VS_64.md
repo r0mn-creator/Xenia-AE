@@ -3756,3 +3756,85 @@ session's display is blanked, `spectacle` returns an all-black frame, Xenia's
 own F12 screenshot needs a keystroke, and no `xdotool`/`wmctrl`/`Xvfb` is
 installed. Still worth doing - it is a cheap, decisive discriminator - but it
 needs a working headed session or an input tool.
+
+## 52. The camera quaternion is NEVER written by guest JIT code — the writer is host-side
+
+Executed 51.8. Extended the exact-address watch to the vector stores
+(`STVL_V128` kind 2, `STVR_V128` kind 3, `STORE_V128` kind 4), matching on the
+**aligned 16-byte line** rather than the exact address - an unaligned 16-byte
+value is written as an `stvlx`/`stvrx` pair straddling two lines, so an exact
+compare would miss whichever half does not start at the target. Each hit records
+all four lanes byte-swapped into guest order, so a quaternion reads `(w,x,y,z)`
+straight out of the log, plus caller/grandcaller from the stackpoint array.
+The ring/entry layout moved into `a64_jit_watch_diag.h` so the scalar
+(`a64_seq_memory.cc`) and vector (`a64_seq_vector.cc`) sides cannot drift.
+
+### 52.1 Result: ~92,000 loads, ZERO stores of any kind
+
+| watched address | STORE_I32 | LOAD_I32 | STVLX | STVRX | STORE_V128 |
+|---|---|---|---|---|---|
+| `0xA5B079C4` (the `w` field) | 0 | 91,893 | 0 | 0 | 0 |
+| `0xA5B079C0` (line start) | 0 | 59,070 | 0 | 0 | 0 |
+| `0xA5B079D0` (next line) | 0 | 56,646 | 0 | 0 | 0 |
+| `0x85B079C4` (other alias) | 0 | 1,794 | 0 | 0 | 0 |
+
+The whole 16-byte neighbourhood, on both guest aliases, is read tens of
+thousands of times per 20 s and **written zero times** - while the value
+demonstrably changes every frame (`w` drifted -0.9954 → -0.9945 → -0.9939
+across successive scans of the same run).
+
+### 52.2 The readers are exactly the chain sections 44-51 chased
+
+Every load resolves to one of four call sites, in equal proportion:
+
+```
+22973  caller=0x8212BDC4  grandcaller=0x821A91E0
+22973  caller=0x8212BDA4  grandcaller=0x821A91E0
+22973  caller=0x8212B7F0  grandcaller=0x8212B680
+22973  caller=0x8212B680  grandcaller=0x8212B354
+```
+
+`8212BDC4` and `821A91E0` are the exact addresses §48/§49 identified. So this
+**is** the right object - it is the camera state that whole dispatch chain
+consumes. Those functions are consumers, not the producer.
+
+### 52.3 What this means
+
+If guest code only ever reads this memory, the thing that changes it is not
+guest code. **The writer is host-side** - an HLE kernel routine that writes
+guest RAM directly from C++ (a `RtlCopyMemory`/`XMemCpy`-class export, or any
+other host implementation), which by construction emits no JIT store sequence
+and is therefore invisible to every watch built in sections 44-51.
+
+That also fits the object's shape: the same object appears 2-3 times at a
+uniform 4 MB spacing with slightly different values per copy - i.e. frame-
+buffered snapshots, the signature of a bulk copy rather than field-by-field
+guest writes.
+
+### 52.4 ⚠️ Caveat — the vector watch has no positive control yet
+
+`STVLX`/`STVRX`/`STORE_V128` returned zero for **every** address tried, and
+nothing in this round demonstrated those three watches firing at all. A watch
+that has never been seen to fire cannot distinguish "nothing happened here"
+from "this instrument is broken" - exactly the trap
+`feedback_measurement_discipline` names, and the same one 51.1 caught the value
+filter in.
+
+**Validate before relying on 52.1's zeroes**: point the watch at an address
+known to receive a vector store (e.g. capture any `stvx` destination by
+temporarily logging the first N vector-store addresses unconditionally) and
+confirm a hit. Only the `STORE_I32`/`LOAD_I32` numbers above are backed by a
+working instrument, since those two are seen firing constantly.
+
+### 52.5 ▶️ NEXT — watch the page host-side
+
+Use the page-fault watch that already exists from §45
+(`Memory::EnableCamwatchDiag` / `EnablePhysicalMemoryAccessCallbacks`) on the
+quaternion's page and capture a **host** backtrace at the fault, naming the C++
+function that writes it.
+
+⚠️ §45 abandoned address-based watching because the buffer it targeted was
+effectively single-use, so "wait for a repeat write" never paid off. **That
+objection does not apply here**: this address is written every frame, so a
+page-fault watch will re-trigger continuously. The technique was rejected for a
+target it did not suit, not because it is unsound.

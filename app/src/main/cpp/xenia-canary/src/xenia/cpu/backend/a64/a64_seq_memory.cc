@@ -277,69 +277,16 @@ EMITTER_OPCODE_TABLE(OPCODE_CACHE_CONTROL, CACHE_CONTROL);
 // below), no function call - only x0-x18 touched, never allocated to guest
 // values (a64_backend.cc: "GPR set: x22-x28"), so this cannot corrupt a
 // live guest register even while active.
-struct AeJitWatchEntry {
-  uint32_t guest_addr;
-  uint32_t value;
-  uint32_t guest_lr;
-  // DIAG(gpu/camera): section 47's data-pipeline chase needs "who called
-  // the function this store is inside", not just guest_lr (which is
-  // usually stale by the time a store deep in a function fires - it shows
-  // the return point of whatever call THIS function itself last made, not
-  // who called it). A64BackendStackpoint (a64_backend.h) is XENIA'S OWN
-  // stack-unwind mechanism, pushed by every guest function's prologue and
-  // read by A64Backend::PopulatePseudoStacktrace - not a repurposed trace
-  // log. stackpoints[current_stackpoint_depth-1].guest_return_address_ is
-  // exactly "where the innermost pushed frame was called from", read the
-  // same way here as PopulatePseudoStacktrace does from host C++.
-  uint32_t caller_guest_addr;
-  // DIAG(gpu/camera): section 48.5 step 1 - one more frame up the same
-  // stackpoints array (depth-2) names the CALLER's caller, i.e. who called
-  // guest_8212BCE0 itself and set up r24/r26/r28 for it. Zero if fewer
-  // than 2 frames are pushed.
-  uint32_t grandcaller_guest_addr;
-  // DIAG(gpu/camera): section 49.4 - 821A8FF8's dispatch loop passes data
-  // node-to-node through two fixed PPCContext double slots (confirmed in
-  // its disassembly: "ldr d4,[x20,#568]; str d4,[x20,#328]" runs right
-  // before EVERY call in the sequence) - offset 328 is this call's
-  // argument, offset 568 is the previous call's result. Raw bit pattern,
-  // not reinterpreted as double host-side, so a mismatch is visible even
-  // if it's NaN.
-  uint64_t arg_ctx328;
-  uint64_t result_ctx568;
-  // DIAG(gpu/camera): section 48.5 step 2 - the actual pointer-arithmetic
-  // inputs 48.3 identified (PPCContext r24/r26/r28, offsets 224/240/256 -
-  // r[n] array starts at 0x20, each slot 8 bytes). Captures the raw
-  // register values so [r24+r28] can be read from guest RAM directly in a
-  // follow-up, on both trees, at this exact live moment.
-  uint64_t r24;
-  uint64_t r26;
-  uint64_t r28;
-  // DIAG(gpu/camera): section 51 - 0 = store, 1 = load. The load watch
-  // answers the question the store watch structurally cannot: not "where
-  // did this wrong value get put" but "where was it READ FROM", which is
-  // the address to trace backwards to next.
-  uint32_t kind;
-};
-constexpr uint32_t kAeJitWatchRingSize = 64;
+// Definitions for the ring declared in a64_jit_watch_diag.h.
 AeJitWatchEntry g_ae_jit_watch_ring[kAeJitWatchRingSize];
 std::atomic<uint32_t> g_ae_jit_watch_ring_index{0};
+std::atomic<uint32_t> g_ae_jit_watch_addr{0};
 uint32_t g_ae_jit_watch_ring_dumped = 0;
 
-// DIAG(gpu/camera): section 51 - the guest address to watch in exact-address
-// mode, supplied at RUNTIME via debug.canary.jit_watch_addr.
-//
-// The value filter (46.1) is structurally incapable of answering the question
-// this investigation actually has. It only ever admits negative floats in
-// [0.5, 1.0), so every sample it returns is negative by construction - it can
-// confirm a wrong value exists but can never show a right one, and cannot
-// distinguish "wrongly negative" from "legitimately negative". An exact
-// address, by contrast, reports whatever is written, sign included.
-//
-// It has to be a runtime value rather than a compile-time constant because the
-// object of interest is heap-allocated: its address is only known once the
-// game has built the scene, and it moves between runs. Located by scanning
-// guest RAM for the object's content signature, then fed in here.
-std::atomic<uint32_t> g_ae_jit_watch_addr{0};
+// Defined in a64_seq_vector.cc - records a vector store whose aligned
+// 16-byte line covers the watched address, with all four lanes.
+void EmitAeJitVecWatch(A64Emitter& e, uint32_t addr_reg_idx,
+                       uint32_t src_vreg_idx, uint32_t kind);
 
 void DumpAeJitStoreWatch() {
   // Refresh the exact-address target from its property. Rate-limited the
@@ -370,15 +317,21 @@ void DumpAeJitStoreWatch() {
   for (uint32_t seq = start; seq < written; ++seq) {
     const AeJitWatchEntry& entry =
         g_ae_jit_watch_ring[seq % kAeJitWatchRingSize];
+    const char* kind_name = entry.kind == 0   ? "STORE"
+                            : entry.kind == 1 ? "LOAD "
+                            : entry.kind == 2 ? "STVLX"
+                            : entry.kind == 3 ? "STVRX"
+                                              : "STV128";
     XELOGI(
         "JITWATCH {} seq={} guest_addr=0x{:08X} value=0x{:08X} "
         "guest_lr=0x{:08X} caller=0x{:08X} grandcaller=0x{:08X} "
         "ctx328=0x{:016X} ctx568=0x{:016X} r24=0x{:016X} r26=0x{:016X} "
-        "r28=0x{:016X}",
-        entry.kind ? "LOAD " : "STORE", seq, entry.guest_addr, entry.value,
+        "r28=0x{:016X} lanes=[0x{:08X},0x{:08X},0x{:08X},0x{:08X}]",
+        kind_name, seq, entry.guest_addr, entry.value,
         entry.guest_lr, entry.caller_guest_addr, entry.grandcaller_guest_addr,
         entry.arg_ctx328, entry.result_ctx568, entry.r24, entry.r26,
-        entry.r28);
+        entry.r28, entry.lane[0], entry.lane[1], entry.lane[2],
+        entry.lane[3]);
   }
   g_ae_jit_watch_ring_dumped = written;
 }
@@ -448,6 +401,11 @@ static void EmitAeJitWatchBody(A64Emitter& e, uint32_t addr_reg_idx,
   e.mov(e.w14, kind);
   e.str(e.w14,
         ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, kind))));
+  // Scalar kinds carry no lanes - zero them so the log can't be misread.
+  for (uint32_t li = 0; li < 4; ++li) {
+    e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(
+                               offsetof(AeJitWatchEntry, lane) + li * 4)));
+  }
   e.ldr(e.w15,
         ptr(e.x20, static_cast<uint32_t>(offsetof(ppc::PPCContext, lr))));
   e.str(e.w15,
@@ -927,6 +885,14 @@ struct STORE_V128
     if (need_src_load) {
       e.mov(e.x17, addr);
       addr = e.x17;
+    }
+    // DIAG(gpu/camera): section 51.8 - aligned vector stores. The camera
+    // quaternion is 16 bytes at an unaligned address, so it straddles two
+    // aligned lines; match on the line, not the exact address.
+    if (!i.src2.is_constant &&
+        XE_AE_DIAG_ENABLED("debug.canary.jit_watch_exact")) {
+      EmitAeJitVecWatch(e, addr.getIdx(), i.src2.reg().getIdx(),
+                        /*kind=*/4);
     }
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       // Reverse bytes within each 32-bit word, store via scratch v0.

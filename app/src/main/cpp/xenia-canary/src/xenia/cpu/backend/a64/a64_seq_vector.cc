@@ -13,6 +13,7 @@
 
 #include "xenia/base/math.h"
 #include "xenia/base/ae_fix_toggle.h"
+#include "xenia/cpu/backend/a64/a64_jit_watch_diag.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 #include "xenia/cpu/backend/a64/a64_op.h"
 #include "xenia/cpu/backend/a64/a64_seq_util.h"
@@ -1891,6 +1892,100 @@ EMITTER_OPCODE_TABLE(OPCODE_LVR, LVR_V128);
 // ============================================================================
 // OPCODE_STVL (Store Vector Left)
 // ============================================================================
+// DIAG(gpu/camera): section 51.8 - vector-store watch.
+//
+// The camera quaternion this investigation is chasing lives at an UNALIGNED
+// guest address, so it is written by stvlx/stvrx, never by STORE_I32. Pointing
+// the exact-address watch at it gave 90,237 loads and ZERO stores - sections
+// 44-50 were watching the wrong opcode class the entire time. This records any
+// vector store whose aligned 16-byte line covers the watched address, together
+// with all four lanes in guest byte order, so a quaternion reads (w,x,y,z)
+// straight out of the log.
+//
+// Only x0-x18 / v0-v3 scratch is touched, and only when the address matches,
+// so it cannot disturb the real store that follows.
+void EmitAeJitVecWatch(A64Emitter& e, uint32_t addr_reg_idx,
+                              uint32_t src_vreg_idx, uint32_t kind) {
+  auto& skip = e.NewCachedLabel();
+  // Match on the aligned line: an unaligned 16-byte value is written as an
+  // stvlx/stvrx pair straddling two lines, so an exact-address compare would
+  // miss whichever half does not start at the target.
+  e.mov(e.x1, reinterpret_cast<uint64_t>(&g_ae_jit_watch_addr));
+  e.ldr(e.w11, ptr(e.x1));
+  e.and_(e.w11, e.w11, ~0xFu);
+  e.and_(e.w12, WReg(addr_reg_idx), ~0xFu);
+  e.cmp(e.w12, e.w11);
+  e.b(Xbyak_aarch64::NE, skip);
+
+  e.mov(e.x1, reinterpret_cast<uint64_t>(&g_ae_jit_watch_ring_index));
+  e.ldr(e.w13, ptr(e.x1));
+  e.add(e.w14, e.w13, 1);
+  e.str(e.w14, ptr(e.x1));
+  e.and_(e.w13, e.w13, kAeJitWatchRingSize - 1);
+  e.mov(e.x2, reinterpret_cast<uint64_t>(&g_ae_jit_watch_ring[0]));
+  e.mov(e.w14, static_cast<uint32_t>(sizeof(AeJitWatchEntry)));
+  e.umull(e.x12, e.w13, e.w14);
+  e.add(e.x2, e.x2, e.x12);
+
+  e.str(WReg(addr_reg_idx),
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry,
+                                                 guest_addr))));
+  e.mov(e.w14, kind);
+  e.str(e.w14,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, kind))));
+  e.ldr(e.w15,
+        ptr(e.x20, static_cast<uint32_t>(offsetof(ppc::PPCContext, lr))));
+  e.str(e.w15,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, guest_lr))));
+
+  // Lanes, byte-swapped into guest order (same rev32 the real store applies).
+  e.rev32(VReg(0).b16, VReg(src_vreg_idx).b16);
+  e.str(QReg(0), ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
+  e.add(e.x3, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
+  for (uint32_t li = 0; li < 4; ++li) {
+    e.ldr(e.w14, ptr(e.x3, li * 4));
+    e.str(e.w14, ptr(e.x2, static_cast<uint32_t>(
+                               offsetof(AeJitWatchEntry, lane) + li * 4)));
+  }
+
+  // caller / grandcaller from Xenia's own stackpoint array, same as the
+  // scalar watch (48.1).
+  e.ldr(e.w9, ptr(e.x19, 172));
+  auto& no_caller = e.NewCachedLabel();
+  auto& no_gc = e.NewCachedLabel();
+  auto& gc_done = e.NewCachedLabel();
+  e.cbz(e.w9, no_caller);
+  e.mov(e.w11, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
+  e.sub(e.w9, e.w9, 1);
+  e.ldr(e.x10, ptr(e.x19, 152));
+  e.umull(e.x12, e.w9, e.w11);
+  e.add(e.x12, e.x10, e.x12);
+  e.ldr(e.w14, ptr(e.x12, static_cast<uint32_t>(offsetof(
+                              A64BackendStackpoint, guest_return_address_))));
+  e.str(e.w14, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, caller_guest_addr))));
+  e.cbz(e.w9, no_gc);
+  e.sub(e.w9, e.w9, 1);
+  e.umull(e.x12, e.w9, e.w11);
+  e.add(e.x12, e.x10, e.x12);
+  e.ldr(e.w14, ptr(e.x12, static_cast<uint32_t>(offsetof(
+                              A64BackendStackpoint, guest_return_address_))));
+  e.str(e.w14, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, grandcaller_guest_addr))));
+  e.b(gc_done);
+  e.L(no_gc);
+  e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, grandcaller_guest_addr))));
+  e.L(gc_done);
+  e.b(skip);
+  e.L(no_caller);
+  e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, caller_guest_addr))));
+  e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, grandcaller_guest_addr))));
+  e.L(skip);
+}
+
 // Legacy whole-line blend used by both STVL and STVR when
 // debug.canary.fix_stvlr_partial is turned off. Reads the aligned 16-byte
 // line, merges the in-range bytes of the byte-swapped source with a
@@ -1978,6 +2073,14 @@ struct STVL_V128 : Sequence<STVL_V128, I<OPCODE_STVL, VoidOp, I64Op, V128Op>> {
     e.and_(e.w17, e.w0, 0xF);
     e.and_(e.x16, e.x0, ~0xFull);
     e.add(e.x0, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
+    if (XE_AE_DIAG_ENABLED("debug.canary.jit_watch_exact")) {
+      EmitAeJitVecWatch(e, addr.getIdx(), s, /*kind=*/2);
+      // The watch clobbers v0 and GUEST_SCRATCH, so re-stage both.
+      e.rev32(VReg(0).b16, VReg(s).b16);
+      e.str(QReg(0),
+            ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
+      e.add(e.x0, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
+    }
 
     // for (i = offset; i < 16; ++i) mem[base + i] = stash[i - offset];
     // Heap-backed via the emitter's cache: xbyak's LabelManager registers
@@ -2023,6 +2126,14 @@ struct STVR_V128 : Sequence<STVR_V128, I<OPCODE_STVR, VoidOp, I64Op, V128Op>> {
     e.and_(e.w17, e.w0, 0xF);
     e.and_(e.x16, e.x0, ~0xFull);
     e.add(e.x0, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
+    if (XE_AE_DIAG_ENABLED("debug.canary.jit_watch_exact")) {
+      EmitAeJitVecWatch(e, addr.getIdx(), s, /*kind=*/3);
+      // The watch clobbers v0 and GUEST_SCRATCH, so re-stage both.
+      e.rev32(VReg(0).b16, VReg(s).b16);
+      e.str(QReg(0),
+            ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
+      e.add(e.x0, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
+    }
     e.mov(e.w6, 16);
     e.sub(e.w6, e.w6, e.w17);  // source tail starts at 16 - offset
 
