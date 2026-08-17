@@ -4122,3 +4122,84 @@ XenDroid at the same point.
 and only between samples known to be at the same animation phase - or better,
 compare the *inputs*, which are not animation-phase dependent when they come
 from static memory.
+
+## 56. ⚠️ The quaternion's sign CANNOT by itself flip the vista - §51's causal claim refuted
+
+### 56.1 The object's static configuration is identical between builds
+
+Both builds lay the camera object out identically (block deltas `0x638`/`0x170`
+in each), just at a different heap base - AEX `0xA5B00C88`, XenDroid
+`0xA5AFA808`, differing by a constant `0x6480`. Aligning on that and diffing a
+0x1400-byte window word by word:
+
+* **1232 words identical, 48 differing.**
+* Of the 48, only five are not plausible floats: three counters
+  (`0xDD`/`0x64B`/`0x19F` vs `0x2BC7`/`0x123D`/...), one self-pointer that
+  differs by *exactly* the `0x6480` base delta, and one near-identical small
+  value. **No structural or flag divergence at all.**
+
+The remaining ~43 differing words are the animating camera floats. So the
+object's configuration is the same; only its dynamic state differs.
+
+### 56.2 ⭐ Both builds encode a SMALL rotation - the sign flip is far too small to mirror anything
+
+Canonicalising each sampled quaternion to `|w|` and taking the rotation angle:
+
+| build | `|w|` | rotation |
+|---|---|---|
+| AEX | 0.9958 - 0.9976 | **7.9° - 10.6°** |
+| XenDroid | 0.978 - 0.9984 | **6.6° - 24.1°** |
+
+**Both are small rotations.** And if only `w` flipped sign at equal phase,
+`q → -conj(q)`, which is the **inverse** rotation - differing from the original
+by `2θ`, i.e. **13° to 48°**. A vertically mirrored vista needs ~180°, or a
+reflection.
+
+### 56.3 The mathematical argument: `R(q) = R(-q)` exactly
+
+The standard quaternion→matrix conversion is **quadratic in the components**
+(every term is a product of two of `w,x,y,z`). Therefore `R(q)` and `R(-q)` are
+*identical matrices*. **A whole-quaternion sign convention cannot change the
+rendering matrix at all**, and a `w`-only flip changes it by the inverse
+rotation, which is a few tens of degrees here.
+
+**Conclusion: the negative `w` cannot itself be the cause of the upside-down
+vista.** §51 over-claimed by calling it "the bug value". What §51 actually
+established, and what still stands, is narrower:
+
+* AEX stores `w < 0` in every sample; XenDroid `w > 0` in every sample. A real,
+  reproducible, consistently discriminating A/B difference.
+* It is **not** sufficient to explain the flip.
+
+So it is either a *symptom* of a shared upstream cause, or benign.
+
+### 56.4 The one way the sign could still matter: a BLEND
+
+The sign is invisible to a matrix conversion, but **not** to interpolation.
+`slerp`/`lerp` between two quaternions is sign-sensitive: the standard
+shortest-path fix is `if dot(q0,q1) < 0 then negate q1`. §55.2 found **six
+identity quaternions (`w = +1.0`)** in the same array as the live camera. A
+blend from `w = -0.996` toward `w = +1.0` has `dot < 0`; without the sign fix it
+travels the long way round - through ~180° - which *would* flip the camera.
+
+**This remains a hypothesis.** It has not been shown that any such blend occurs.
+But it is now the *only* mechanism by which the measured sign difference could
+produce the observed symptom, which makes it the thing to test.
+
+### 56.5 ▶️ NEXT
+
+1. **Test the blend hypothesis directly.** Find whether anything reads two
+   quaternion slots and interpolates. The consumers are already named
+   (§52.2: `8212BDC4`, `8212BDA4`, `8212B7F0`, `8212B680`); look for a
+   `dot`-then-conditional-negate shape, or its absence.
+2. **If no blend exists, drop this thread and return to the render-relevant
+   quantity.** §39/§43 measured the *vertex shader constant* `c3.x` as POSITIVE
+   254/254 in XenDroid vs NEGATIVE 221/255 in AEX **at the same magnitude** -
+   a cleaner signature than this quaternion (whose magnitudes differ between
+   builds). Confirm whether `c3.x` is actually derived from this quaternion; if
+   not, §44-§56 have been tracking the wrong value and the `c3.x` producer
+   should be traced independently.
+
+⚠️ Lesson for this file: "value X differs in sign between the builds" is not the
+same as "value X causes the symptom". Check that the magnitude of the effect can
+produce the magnitude of the symptom **before** committing sections to it.
