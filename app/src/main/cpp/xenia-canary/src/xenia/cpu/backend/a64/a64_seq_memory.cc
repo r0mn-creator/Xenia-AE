@@ -314,13 +314,50 @@ struct AeJitWatchEntry {
   uint64_t r24;
   uint64_t r26;
   uint64_t r28;
+  // DIAG(gpu/camera): section 51 - 0 = store, 1 = load. The load watch
+  // answers the question the store watch structurally cannot: not "where
+  // did this wrong value get put" but "where was it READ FROM", which is
+  // the address to trace backwards to next.
+  uint32_t kind;
 };
 constexpr uint32_t kAeJitWatchRingSize = 64;
 AeJitWatchEntry g_ae_jit_watch_ring[kAeJitWatchRingSize];
 std::atomic<uint32_t> g_ae_jit_watch_ring_index{0};
 uint32_t g_ae_jit_watch_ring_dumped = 0;
 
+// DIAG(gpu/camera): section 51 - the guest address to watch in exact-address
+// mode, supplied at RUNTIME via debug.canary.jit_watch_addr.
+//
+// The value filter (46.1) is structurally incapable of answering the question
+// this investigation actually has. It only ever admits negative floats in
+// [0.5, 1.0), so every sample it returns is negative by construction - it can
+// confirm a wrong value exists but can never show a right one, and cannot
+// distinguish "wrongly negative" from "legitimately negative". An exact
+// address, by contrast, reports whatever is written, sign included.
+//
+// It has to be a runtime value rather than a compile-time constant because the
+// object of interest is heap-allocated: its address is only known once the
+// game has built the scene, and it moves between runs. Located by scanning
+// guest RAM for the object's content signature, then fed in here.
+std::atomic<uint32_t> g_ae_jit_watch_addr{0};
+
 void DumpAeJitStoreWatch() {
+  // Refresh the exact-address target from its property. Rate-limited the
+  // same way XE_AE_DIAG_ENABLED samples its own toggle (500 ms), because
+  // this runs from WriteRegister, which is extremely hot.
+  {
+    static std::atomic<uint64_t> next_ms{0};
+    const uint64_t now_ms =
+        uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now().time_since_epoch())
+                     .count());
+    if (now_ms >= next_ms.load(std::memory_order_relaxed)) {
+      next_ms.store(now_ms + 500, std::memory_order_relaxed);
+      g_ae_jit_watch_addr.store(
+          xe::AeDiagValue("debug.canary.jit_watch_addr"),
+          std::memory_order_relaxed);
+    }
+  }
   uint32_t written = g_ae_jit_watch_ring_index.load(std::memory_order_acquire);
   if (written <= g_ae_jit_watch_ring_dumped) {
     return;
@@ -334,15 +371,149 @@ void DumpAeJitStoreWatch() {
     const AeJitWatchEntry& entry =
         g_ae_jit_watch_ring[seq % kAeJitWatchRingSize];
     XELOGI(
-        "JITWATCH seq={} guest_addr=0x{:08X} value=0x{:08X} guest_lr=0x{:08X} "
-        "caller=0x{:08X} grandcaller=0x{:08X} ctx328=0x{:016X} "
-        "ctx568=0x{:016X} r24=0x{:016X} r26=0x{:016X} r28=0x{:016X}",
-        seq, entry.guest_addr, entry.value, entry.guest_lr,
-        entry.caller_guest_addr, entry.grandcaller_guest_addr,
+        "JITWATCH {} seq={} guest_addr=0x{:08X} value=0x{:08X} "
+        "guest_lr=0x{:08X} caller=0x{:08X} grandcaller=0x{:08X} "
+        "ctx328=0x{:016X} ctx568=0x{:016X} r24=0x{:016X} r26=0x{:016X} "
+        "r28=0x{:016X}",
+        entry.kind ? "LOAD " : "STORE", seq, entry.guest_addr, entry.value,
+        entry.guest_lr, entry.caller_guest_addr, entry.grandcaller_guest_addr,
         entry.arg_ctx328, entry.result_ctx568, entry.r24, entry.r26,
         entry.r28);
   }
   g_ae_jit_watch_ring_dumped = written;
+}
+
+// DIAG(gpu/camera): shared emit body for the store watch (46.1) and the
+// load watch (51). Both need byte-identical filtering and capture, and
+// duplicating ~60 lines of hand-written codegen twice is exactly how the
+// two would silently drift apart and make a comparison meaningless.
+//
+// Registers: only x0-x2, w9-w16 - all inside the a64 backend's reserved
+// scratch range (x0-x18), never allocated to guest values
+// (a64_backend.cc: "GPR set: x22-x28"), so this is safe to drop in front
+// of any real load/store without disturbing it. addr_reg_idx and
+// value_reg_idx may name any register including a guest one; they are
+// only ever READ.
+static void EmitAeJitWatchBody(A64Emitter& e, uint32_t addr_reg_idx,
+                               uint32_t value_reg_idx, uint32_t kind,
+                               bool exact_addr) {
+  auto& watch_skip = e.NewCachedLabel();
+  if (exact_addr) {
+    // Exact-address mode (51): match one runtime-supplied guest address and
+    // record whatever is written to it, sign included. Unlike the value
+    // filter below this can report a CORRECT value, which is what makes it
+    // able to answer "is this field ever positive here".
+    e.mov(e.x1, reinterpret_cast<uint64_t>(&g_ae_jit_watch_addr));
+    e.ldr(e.w11, ptr(e.x1));
+    e.cmp(WReg(addr_reg_idx), e.w11);
+    e.b(Xbyak_aarch64::NE, watch_skip);
+    e.mov(e.w16, WReg(value_reg_idx));
+  } else {
+    // Address floor first - see 46.1: unfiltered, a 0x400F41xx math-library
+    // cluster produced 594997 hits in one 50s run. Everything this
+    // investigation cares about is in the physical-alias range.
+    e.mov(e.w11, 0xA0000000u);
+    e.cmp(WReg(addr_reg_idx), e.w11);
+    e.b(Xbyak_aarch64::LO, watch_skip);
+    e.mov(e.w16, WReg(value_reg_idx));
+    // exponent byte == 126 (magnitude in [0.5, 1.0)) and sign set - matches
+    // every mirrored camera value sampled so far (0xBF7E5FB4, 0xBF268EE8,
+    // 0xBF2979F4). NOTE (47): this also matches the constant -0.5 exactly,
+    // which is written extremely often by an unrelated helper - rank
+    // candidates by VALUE VARIANCE, never by hit count. NOTE (51): this
+    // filter can only ever report negatives - see g_ae_jit_watch_addr.
+    e.lsr(e.w15, e.w16, 23);
+    e.and_(e.w15, e.w15, 0xFF);
+    e.cmp(e.w15, 126);
+    e.b(Xbyak_aarch64::NE, watch_skip);
+    e.tbz(e.w16, 31, watch_skip);
+  }
+  // Match - append to the ring buffer. Non-atomic index increment: a lost
+  // entry under contention is acceptable for a diagnostic, an extra
+  // load/store/branch in the hot path is not.
+  e.mov(e.x1, reinterpret_cast<uint64_t>(&g_ae_jit_watch_ring_index));
+  e.ldr(e.w13, ptr(e.x1));
+  e.add(e.w14, e.w13, 1);
+  e.str(e.w14, ptr(e.x1));
+  e.and_(e.w13, e.w13, kAeJitWatchRingSize - 1);
+  e.mov(e.x2, reinterpret_cast<uint64_t>(&g_ae_jit_watch_ring[0]));
+  e.mov(e.w14, static_cast<uint32_t>(sizeof(AeJitWatchEntry)));
+  e.umull(e.x12, e.w13, e.w14);
+  e.add(e.x2, e.x2, e.x12);
+  e.str(WReg(addr_reg_idx),
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry,
+                                                 guest_addr))));
+  e.str(e.w16,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, value))));
+  e.mov(e.w14, kind);
+  e.str(e.w14,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, kind))));
+  e.ldr(e.w15,
+        ptr(e.x20, static_cast<uint32_t>(offsetof(ppc::PPCContext, lr))));
+  e.str(e.w15,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, guest_lr))));
+  // ctx328/ctx568: 49.4's node-to-node data channel. 50.1 measured
+  // ctx328 as a constant 4.0 (a fixed handler selector, NOT camera data)
+  // - kept because it cheaply confirms which dispatch slot is running.
+  e.ldr(e.x13, ptr(e.x20, 328));
+  e.str(e.x13,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry,
+                                                 arg_ctx328))));
+  e.ldr(e.x13, ptr(e.x20, 568));
+  e.str(e.x13,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry,
+                                                 result_ctx568))));
+  e.ldr(e.x13, ptr(e.x20, 224));
+  e.str(e.x13,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, r24))));
+  e.ldr(e.x13, ptr(e.x20, 240));
+  e.str(e.x13,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, r26))));
+  e.ldr(e.x13, ptr(e.x20, 256));
+  e.str(e.x13,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, r28))));
+  // caller/grandcaller: A64BackendStackpoint - x19's own fields, offsets
+  // confirmed against a64_backend.h (152=stackpoints,
+  // 172=current_stackpoint_depth), the same struct
+  // A64Backend::PopulatePseudoStacktrace reads from host C++. depth-1 is
+  // the innermost pushed frame, depth-2 its caller. guest_lr alone is
+  // usually stale by the time a load/store deep in a function fires.
+  e.ldr(e.w9, ptr(e.x19, 172));
+  auto& no_caller = e.NewCachedLabel();
+  auto& no_grandcaller = e.NewCachedLabel();
+  auto& grandcaller_done = e.NewCachedLabel();
+  e.cbz(e.w9, no_caller);
+  e.mov(e.w11, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
+  e.sub(e.w9, e.w9, 1);
+  e.ldr(e.x10, ptr(e.x19, 152));
+  e.umull(e.x12, e.w9, e.w11);
+  e.add(e.x12, e.x10, e.x12);
+  e.ldr(e.w14,
+        ptr(e.x12, static_cast<uint32_t>(offsetof(
+                       A64BackendStackpoint, guest_return_address_))));
+  e.str(e.w14, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, caller_guest_addr))));
+  e.cbz(e.w9, no_grandcaller);
+  e.sub(e.w9, e.w9, 1);
+  e.umull(e.x12, e.w9, e.w11);
+  e.add(e.x12, e.x10, e.x12);
+  e.ldr(e.w14,
+        ptr(e.x12, static_cast<uint32_t>(offsetof(
+                       A64BackendStackpoint, guest_return_address_))));
+  e.str(e.w14, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, grandcaller_guest_addr))));
+  e.b(grandcaller_done);
+  e.L(no_grandcaller);
+  e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, grandcaller_guest_addr))));
+  e.L(grandcaller_done);
+  e.b(watch_skip);
+  e.L(no_caller);
+  e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, caller_guest_addr))));
+  e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, grandcaller_guest_addr))));
+  e.L(watch_skip);
 }
 
 template <typename T, bool swap>
@@ -455,6 +626,24 @@ struct LOAD_I32 : Sequence<LOAD_I32, I<OPCODE_LOAD, I32Op, I64Op>> {
       e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
         e.rev(i.dest, i.dest);
+      }
+      // DIAG(gpu/camera): section 51. The store watch can only say "this
+      // wrong value was written HERE"; every backward step then needs a
+      // guess about who produced it. The load watch says "this wrong value
+      // was READ FROM there" - a concrete guest address to trace to next,
+      // with no guessing. Placed after the byte swap so the captured value
+      // is the guest-visible one, matching what the store watch records.
+      //
+      // Guest float loads DO come through here: 8212BCE0's own
+      // disassembly shows "ldr w23,[x21,x0]; rev w23,w23; fmov s5,w23" -
+      // the a64 backend loads floats as I32 and moves them across, so the
+      // same sign+exponent filter that works for stores works here.
+      const bool exact_addr_mode =
+          XE_AE_DIAG_ENABLED("debug.canary.jit_watch_exact");
+      if (exact_addr_mode ||
+          XE_AE_DIAG_ENABLED("debug.canary.jit_load_watch")) {
+        EmitAeJitWatchBody(e, addr.getIdx(), i.dest.reg().getIdx(), /*kind=*/1,
+                           exact_addr_mode);
       }
     }
   }
@@ -623,121 +812,20 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
       // backend's reserved scratch range (x0-x18), never allocated to guest
       // values (a64_backend.cc: "GPR set: x22-x28") - so it cannot disturb
       // the real store that follows, constant or register.
-      if (XE_AE_DIAG_ENABLED("debug.canary.jit_store_watch")) {
-        auto& watch_skip = e.NewCachedLabel();
-        // First cut (address-unfiltered) drowned in 594997 hits from a
-        // 0x400F41xx cluster (guest_lr=0x89411CD4, a math/audio library -
-        // far below any guest heap the game itself uses) within one 50s
-        // run. The camera constant's source is always in the physical-alias
-        // range (0xA0000000+, per CAMWRITE's src_phys samples translated
-        // through the alias), so exclude everything below that first - one
-        // extra compare, cheap, and it categorically can't drop a real hit.
-        e.mov(e.w11, 0xA0000000u);
-        e.cmp(WReg(addr.getIdx()), e.w11);
-        e.b(Xbyak_aarch64::LO, watch_skip);
+      const bool exact_addr_mode =
+          XE_AE_DIAG_ENABLED("debug.canary.jit_watch_exact");
+      if (exact_addr_mode ||
+          XE_AE_DIAG_ENABLED("debug.canary.jit_store_watch")) {
+        // Materialize the stored value into w16 first (it may be a
+        // constant), then run the shared filter/capture body.
         if (i.src2.is_constant) {
           e.mov(e.w16, static_cast<uint64_t>(
                            static_cast<uint32_t>(i.src2.constant())));
         } else {
           e.mov(e.w16, i.src2);
         }
-        // exponent byte == 126 (magnitude in [0.5, 1.0)) and sign set -
-        // matches every mirrored camera constant sampled so far (e.g.
-        // 0xBF7E5FB4, 0xBF268EE8, 0xBF2979F4).
-        e.lsr(e.w15, e.w16, 23);
-        e.and_(e.w15, e.w15, 0xFF);
-        e.cmp(e.w15, 126);
-        e.b(Xbyak_aarch64::NE, watch_skip);
-        e.tbz(e.w16, 31, watch_skip);
-        // Match - append {guest_addr, value, guest_lr} to the ring buffer.
-        // Non-atomic index increment: a lost entry under contention is
-        // acceptable for a diagnostic, an extra load/store/branch is not.
-        e.mov(e.x1,
-              reinterpret_cast<uint64_t>(&g_ae_jit_watch_ring_index));
-        e.ldr(e.w13, ptr(e.x1));
-        e.add(e.w14, e.w13, 1);
-        e.str(e.w14, ptr(e.x1));
-        e.and_(e.w13, e.w13, kAeJitWatchRingSize - 1);
-        e.mov(e.x2, reinterpret_cast<uint64_t>(&g_ae_jit_watch_ring[0]));
-        e.mov(e.w14, static_cast<uint32_t>(sizeof(AeJitWatchEntry)));
-        e.umull(e.x12, e.w13, e.w14);
-        e.add(e.x2, e.x2, e.x12);
-        e.str(WReg(addr.getIdx()),
-              ptr(e.x2, static_cast<uint32_t>(
-                            offsetof(AeJitWatchEntry, guest_addr))));
-        e.str(e.w16, ptr(e.x2, static_cast<uint32_t>(
-                                   offsetof(AeJitWatchEntry, value))));
-        e.ldr(e.w15, ptr(e.x20, static_cast<uint32_t>(
-                                    offsetof(ppc::PPCContext, lr))));
-        e.str(e.w15, ptr(e.x2, static_cast<uint32_t>(
-                                   offsetof(AeJitWatchEntry, guest_lr))));
-        // ctx328/ctx568: section 49.4's node-to-node data channel - see
-        // AeJitWatchEntry's comment. Plain context reads, x20 is the
-        // PPCContext base register everywhere else in this file already.
-        e.ldr(e.x13, ptr(e.x20, 328));
-        e.str(e.x13, ptr(e.x2, static_cast<uint32_t>(
-                                   offsetof(AeJitWatchEntry, arg_ctx328))));
-        e.ldr(e.x13, ptr(e.x20, 568));
-        e.str(e.x13,
-              ptr(e.x2, static_cast<uint32_t>(
-                            offsetof(AeJitWatchEntry, result_ctx568))));
-        e.ldr(e.x13, ptr(e.x20, 224));
-        e.str(e.x13, ptr(e.x2, static_cast<uint32_t>(
-                                   offsetof(AeJitWatchEntry, r24))));
-        e.ldr(e.x13, ptr(e.x20, 240));
-        e.str(e.x13, ptr(e.x2, static_cast<uint32_t>(
-                                   offsetof(AeJitWatchEntry, r26))));
-        e.ldr(e.x13, ptr(e.x20, 256));
-        e.str(e.x13, ptr(e.x2, static_cast<uint32_t>(
-                                   offsetof(AeJitWatchEntry, r28))));
-        // caller_guest_addr: read A64BackendStackpoint - x19's own fields,
-        // offsets confirmed against a64_backend.h (152=stackpoints,
-        // 172=current_stackpoint_depth), same struct
-        // A64Backend::PopulatePseudoStacktrace reads from host C++. depth-1
-        // is the innermost pushed frame - .guest_return_address_ there is
-        // "where this function was called from", stable even though
-        // guest_lr itself may already be stale from an internal call this
-        // function made since being entered.
-        e.ldr(e.w9, ptr(e.x19, 172));
-        auto& no_caller = e.NewCachedLabel();
-        auto& no_grandcaller = e.NewCachedLabel();
-        auto& grandcaller_done = e.NewCachedLabel();
-        e.cbz(e.w9, no_caller);
-        e.mov(e.w11, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
-        e.sub(e.w9, e.w9, 1);
-        e.ldr(e.x10, ptr(e.x19, 152));
-        e.umull(e.x12, e.w9, e.w11);
-        e.add(e.x12, e.x10, e.x12);
-        e.ldr(e.w14,
-              ptr(e.x12, static_cast<uint32_t>(offsetof(
-                             A64BackendStackpoint, guest_return_address_))));
-        e.str(e.w14, ptr(e.x2, static_cast<uint32_t>(offsetof(
-                                   AeJitWatchEntry, caller_guest_addr))));
-        // grandcaller: one more frame up the same array (depth-2). w9 here
-        // still holds depth-1 (the index just used above), so depth-2 is
-        // w9-1 - only valid if the ORIGINAL depth was >= 2, i.e. w9 (=
-        // depth-1) is nonzero.
-        e.cbz(e.w9, no_grandcaller);
-        e.sub(e.w9, e.w9, 1);
-        e.umull(e.x12, e.w9, e.w11);
-        e.add(e.x12, e.x10, e.x12);
-        e.ldr(e.w14,
-              ptr(e.x12, static_cast<uint32_t>(offsetof(
-                             A64BackendStackpoint, guest_return_address_))));
-        e.str(e.w14, ptr(e.x2, static_cast<uint32_t>(offsetof(
-                                   AeJitWatchEntry, grandcaller_guest_addr))));
-        e.b(grandcaller_done);
-        e.L(no_grandcaller);
-        e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
-                                   AeJitWatchEntry, grandcaller_guest_addr))));
-        e.L(grandcaller_done);
-        e.b(watch_skip);
-        e.L(no_caller);
-        e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
-                                   AeJitWatchEntry, caller_guest_addr))));
-        e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
-                                   AeJitWatchEntry, grandcaller_guest_addr))));
-        e.L(watch_skip);
+        EmitAeJitWatchBody(e, addr.getIdx(), 16, /*kind=*/0,
+                           exact_addr_mode);
       }
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
         if (i.src2.is_constant) {

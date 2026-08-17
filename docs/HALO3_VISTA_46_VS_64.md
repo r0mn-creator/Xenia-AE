@@ -3603,3 +3603,156 @@ float-store filter, or simply add a one-off store-and-log right after the
 disassembly (48.3) - that guarantees the captured `r24`/`r26`/`r28` are
 the actual pointer-arithmetic inputs, not a downstream function's reuse
 of the same register slots.
+
+## 51. ⭐⭐⭐⭐⭐ MEASURED A/B: the camera is a QUATERNION and AEX's `w` is negated — first direct both-emulators capture of the bug value
+
+**2026-08-17.** The first measurement in this investigation that captures the
+wrong value in AEX **and** the right value in XenDroid, at equivalent state, in
+the same field of the same object.
+
+### 51.1 The value filter was structurally incapable of answering the question
+
+Section 46's watch admits only negative floats with exponent byte 126, i.e.
+magnitude in `[0.5, 1.0)`. **Every sample it can ever return is negative by
+construction.** It can confirm that a wrong value exists; it can never show a
+right one, and it cannot distinguish "wrongly negative" from "legitimately
+negative". Several earlier readings were over-interpreted because of this - a
+field looked suspicious purely because the only samples the instrument was
+capable of emitting were negative.
+
+Concretely: `guest_A5B06320` was recorded as holding values in `[-0.85, -0.53]`,
+but reading the same address directly out of guest RAM showed `+3.044`. The
+field was never negative-only; the filter was.
+
+This is the same trap `feedback_measurement_discipline` names - an instrument
+that cannot report failure is not one. Superseded by 51.4's exact-address mode.
+
+### 51.2 Located the camera object by CONTENT signature, not address
+
+Heap addresses differ between runs and between emulators, so no address-based
+comparison can work across the two builds (reading AEX's address in XenDroid
+returned all zeroes). Instead the object is found by what it contains:
+
+* a frame delta `0x3C888889` (= 1/60), immediately followed by
+* the ASCII tag `0x72616421` (`"rad!"`).
+
+That pair is unique and stable: it matches exactly 2-3 objects per run, in both
+emulators. Tooling: `scratchpad/findquat.sh` (+ `dumpguest.sh`, `readguest.sh`
+- guest RAM is read through `/proc/<pid>/mem` at the membase taken from the
+`xenia_memory` ashmem mapping; **the reads must be page-aligned**, unaligned
+byte offsets return EIO).
+
+### 51.3 ⭐ The field at +0x34 is a UNIT QUATERNION, and its `w` sign is the bug
+
+At offset `+0x34` from the tag sits four floats whose norm is 1.000 in every
+sample from both emulators - a unit quaternion, i.e. the camera orientation.
+
+| build | `w` samples | vista |
+|---|---|---|
+| **AEX** | `-0.9495`, `-0.9418`, `-0.9983`, `-0.9931`, `-0.9397`, `-0.9979` | **upside down** |
+| **XenDroid** | `+0.9942`, `+0.9942`, `+0.9937`, `+0.9937`, `+0.9937` | **correct** |
+
+Same device, same game, same driver, same object, equivalent state. **AEX's
+sign is negative in every sample ever taken; XenDroid's is positive in every
+sample ever taken.**
+
+This is exactly the shape of the original bug report (§43.5: AEX `0xBF7E5FB4`,
+XenDroid `0x3F7E5FB4` - identical mantissa, sign only), and it finally explains
+*why* that shape: **a quaternion with only `w` negated is the INVERSE
+rotation.** `(-w, x, y, z) = -conj(q)`. Negating all four components would be
+the same rotation and harmless; negating `w` alone turns the camera to look the
+opposite way, which is precisely a mirrored vista with an upright 2D UI.
+
+It also retires the "is this value legitimately negative?" ambiguity that
+51.1's filter created: the same field is reliably positive in the build that
+renders correctly.
+
+### 51.4 New instrument: exact-address watch (can report CORRECT values)
+
+Added `debug.canary.jit_watch_exact` + `debug.canary.jit_watch_addr` (a
+**runtime** guest address, since a heap object's address is not known until the
+scene is built and moves between runs; new `xe::AeDiagValue()` reads it, sampled
+at 500 ms like `XE_AE_DIAG_ENABLED`). In this mode the watch matches one address
+and records whatever is written or read there, sign included. Also added a
+**load** watch (`debug.canary.jit_load_watch`, `kind` field in the ring entry) -
+the store watch can only say where a value was put, the load watch says where it
+was READ FROM, which is the address to trace to next.
+
+Both share one emit body (`EmitAeJitWatchBody`) so the two can't drift apart.
+
+### 51.5 ⭐ The quaternion is written by UNALIGNED VECTOR stores, not `STORE_I32`
+
+Pointed the exact-address watch at the live `w` address: **90,237 loads, ZERO
+stores** - across both the `0xA5…` physical alias and the `0x85…` alias (both
+are read; 835 loads on the latter). The value animates continuously, so it is
+certainly being written - just not through `STORE_I32`, which is all the watch
+covered.
+
+A 16-byte quaternion at a non-16-byte-aligned address is written with the
+standard PowerPC `stvlx`/`stvrx` pair. **That is why every previous section's
+store watch, and §44-§50's whole line of pointer-chasing, never saw the writer:
+they were watching the wrong opcode class the entire time.**
+
+### 51.6 Found and fixed a real `stvlx`/`stvrx` defect — but it is NOT the vista bug
+
+AEX's `STVL_V128`/`STVR_V128` read the aligned 16-byte line, blend the in-range
+bytes with a 2-register TBL, and **store all 16 bytes back** - including bytes
+the instruction must not touch. Its own comment conceded the `offset == 0` case
+"load and store back the same memory" while still emitting a full-line write for
+an instruction that should write nothing. Single-threaded the bytes round-trip
+unchanged, which is why it hides; but any concurrent write to the out-of-range
+bytes between the load and the store is silently reverted. XenDroid rewrote both
+to touch only the in-range bytes, with exactly that rationale in its comment.
+
+Ported both. **Result: vista still upside down, `w` still negative
+(`-0.9979`).** So this is a genuine correctness fix in the exact code path that
+writes the camera quaternion, but it is **not** the cause of the flip. Kept
+behind `debug.canary.fix_stvlr_partial` (defaults ON = correct behaviour; the
+old whole-line blend is retained as `EmitBlendWholeLine` for a perf A/B),
+because byte-at-a-time is more instructions than the vector blend and **the
+perf cost has not been measured**.
+
+### 51.7 Eliminations this round (all by direct check, not inference)
+
+* **PPC frontend cleared.** `ppc_emit_fpu.cc` is byte-identical to XenDroid.
+  `ppc_emit_altivec.cc` differs only by the `vmsum*`/`vsum*` integer family,
+  which AEX leaves `XEINSTRNOTIMPLEMENTED` - and Halo 3 executes **zero** of
+  them (`grep -c "Unimplemented instruction"` = 0 across a from-launch 200 MB
+  log). A real gap to close, but not this bug.
+* **`PackSingleKeepNaN` confirmed benign**, not assumed: for non-NaN inputs it
+  returns `Select(is_nan, …, sbits)` = exactly AEX's `Cast(Convert(v, F32))`.
+* **`PERMUTE_I32` byte-identical** apart from XenDroid's zip1/zip2 shortcut,
+  which is computed off the *same* `tbl_ctrl` and is therefore equivalent by
+  construction. The `inline_leaf_calls` / `inline_gprlr_saverest` blocks are
+  XenDroid-only perf work, already shown non-causal by §41.
+* **Static XEX data byte-identical** between the two running emulators
+  (`0x82022510…0x8202252C` incl. the `4.0` that feeds `ctx328`). The image
+  loads the same.
+* **Config diff re-run independently** and reproduced §38.2's four divergences
+  exactly, with no new ones. Method validated, no new information.
+
+### 51.8 ▶️ NEXT — one clear step
+
+The writer is an unaligned vector store, so **extend the exact-address watch to
+`STVL_V128`/`STVR_V128` (and `STORE_V128`/`STORE_I64`)**, matching any store
+whose 16-byte span covers the target address, and record all four lanes plus
+caller/grandcaller. That names the guest function that writes the negated `w` -
+which §44-§50 could never reach because they only ever watched `STORE_I32`.
+
+Only after that does it make sense to ask *why* the sign is wrong. The most
+likely shapes, given "only `w` differs":
+* a quaternion SLERP shortest-path test (`if dot(q0,q1) < 0 negate`) taking the
+  wrong branch - a single inverted compare produces exactly this;
+* a `vsel`/`vcmp` or `fsel` whose condition is inverted;
+* a sign-mask constant applied to the wrong lane.
+
+### 51.9 Also attempted, blocked
+
+Ran the desktop x86 oracle (`/home/roman/xeniatest/oracle`, Halo 3 boots and
+translates shaders fine) to test §38.4's open question - whether the same
+emulator lineage on an x64 JIT renders the vista upright, which would place the
+bug squarely in the a64 backend. **Blocked on screen capture**: the desktop
+session's display is blanked, `spectacle` returns an all-black frame, Xenia's
+own F12 screenshot needs a keystroke, and no `xdotool`/`wmctrl`/`Xvfb` is
+installed. Still worth doing - it is a cheap, decisive discriminator - but it
+needs a working headed session or an input tool.

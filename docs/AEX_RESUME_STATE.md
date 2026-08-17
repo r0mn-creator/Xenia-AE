@@ -4,7 +4,49 @@
 Last updated 2026-08-17. **Vista still broken, but the search has a named
 target now.**
 
-## ⭐⭐⭐⭐⭐ LATEST (doc §50): one hypothesis refuted, next watch needs re-aiming
+## ⭐⭐⭐⭐⭐ LATEST (doc §51): the camera is a QUATERNION, AEX's `w` is NEGATED - measured in BOTH builds
+
+**First direct A/B capture of the bug value.** Found the camera object by
+CONTENT signature (frame delta `0x3C888889` = 1/60, immediately followed by the
+ASCII tag `"rad!"`) rather than by address - heap addresses differ between runs
+and between emulators, which is why every cross-emulator address comparison
+before now returned zeroes. At `+0x34` sits a **unit quaternion** (norm 1.000 in
+every sample, both builds):
+
+* **AEX** (vista upside down): `w` = -0.9495, -0.9418, -0.9983, -0.9931, -0.9397, -0.9979 - **negative in every sample ever taken**
+* **XenDroid** (vista correct): `w` = +0.9942, +0.9942, +0.9937, +0.9937, +0.9937 - **positive in every sample ever taken**
+
+Same device, same game, same driver, same field. This is exactly the original
+bug report's shape (§43.5: `0xBF7E5FB4` vs `0x3F7E5FB4`, identical mantissa,
+sign only) and finally explains it: **a quaternion with only `w` negated is the
+INVERSE rotation** (`(-w,x,y,z) = -conj(q)`). Negating all four would be the
+same rotation and harmless; negating `w` alone points the camera the opposite
+way - a mirrored vista with an upright 2D UI.
+
+⚠️ **§46's value filter was structurally incapable of answering this**: it only
+admits negatives, so every sample it can emit is negative. Some earlier
+readings were over-read because of that. Replaced by an exact-address watch
+(`debug.canary.jit_watch_exact` + `debug.canary.jit_watch_addr`, a runtime
+address) which reports whatever is actually there, sign included.
+
+⭐ **Why §44-§50 never found the writer**: pointing the exact-address watch at
+the live `w` gave **90,237 loads and ZERO stores**. The quaternion is unaligned,
+so it is written by `stvlx`/`stvrx` - **the whole investigation was watching
+`STORE_I32`, the wrong opcode class, the entire time.**
+
+**▶️ NEXT (doc §51.8):** extend the exact-address watch to `STVL_V128`/
+`STVR_V128`/`STORE_V128`, matching any store whose 16-byte span covers the
+target, and record all four lanes + caller. That names the writer. Then ask why
+the sign is wrong - most likely a quaternion SLERP shortest-path test
+(`if dot < 0 negate`) taking the wrong branch, an inverted `vsel`/`fsel`
+condition, or a sign mask hitting the wrong lane.
+
+Also fixed en route (real defect, **NOT** the vista cause - retested, `w` still
+negative): AEX's `stvlx`/`stvrx` did a whole-line read-modify-write, rewriting
+bytes the instruction must not touch. Ported XenDroid's partial-store version,
+behind `debug.canary.fix_stvlr_partial` (ON by default; perf cost unmeasured).
+
+## OLDER (doc §50): one hypothesis refuted, next watch needs re-aiming
 
 Captured two more live fields on the existing watch (no new mechanism -
 same struct, same site): `ctx328`/`ctx568` (the node-to-node data channel

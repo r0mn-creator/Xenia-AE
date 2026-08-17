@@ -44,6 +44,7 @@
 #if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
 #include <sys/system_properties.h>
 
+#include <cstdlib>
 #include <cstring>
 #endif
 
@@ -74,6 +75,27 @@ inline bool AeExperimentEnabled(const char* prop_name) {
   }
 #endif
   return false;
+}
+
+// Reads a numeric AE diagnostic property (hex with or without "0x", or
+// decimal). Returns `fallback` when unset/empty/unparseable. Used by watches
+// that need a runtime-supplied guest ADDRESS: the address of a heap object
+// is not known until the game has allocated it, so it cannot be baked in at
+// JIT-compile time the way the boolean toggles are.
+inline uint32_t AeDiagValue(const char* prop_name, uint32_t fallback = 0) {
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+  char buf[PROP_VALUE_MAX] = {};
+  if (__system_property_get(prop_name, buf) > 0 && buf[0]) {
+    char* end = nullptr;
+    const int base =
+        (buf[0] == '0' && (buf[1] == 'x' || buf[1] == 'X')) ? 16 : 16;
+    const unsigned long v = std::strtoul(buf, &end, base);
+    if (end != buf) {
+      return static_cast<uint32_t>(v);
+    }
+  }
+#endif
+  return fallback;
 }
 
 // For hot paths: samples the property once and remembers the answer.
