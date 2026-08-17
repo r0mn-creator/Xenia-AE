@@ -4785,3 +4785,66 @@ collapsing to a point means matrices going to ~zero, or all blend targets
 resolving to the same transform. That is a property checkable in **one build
 alone**, with no cross-emulator comparison and no scene-matching problem, which
 is what every measurement in §29-§62 struggled with.
+
+## 64. ⛔ Bone matrix VALUES are clean in gameplay — degeneracy refuted too
+
+§63.4's step, done. Added `debug.canary.bonevalues`: at draw time it reads
+c144-c151 (the same 32 floats §29 hashed) and counts draws whose matrices are
+all-zero, all-rows-identical, or non-finite, plus a periodic dump of the actual
+values.
+
+### 64.1 The counters FREEZE before gameplay
+
+```
+draws=1148928  allzero=5431  equalrows=5431  nonfinite=366983
+draws=1722368  allzero=5431  equalrows=5431  nonfinite=366983
+```
+
+All three are **identical across 600,000+ draws**. The 366,983 non-finite draws
+and 5,431 all-zero/equal-row draws happened during boot, menu and level load;
+**in gameplay there are zero new occurrences of any of them.**
+
+The values sampled in gameplay are healthy - proper rotation rows and plausible
+translations:
+
+```
+r0=[0.4673,-0.0152, 0.8840,   4.6416]
+r1=[0.8563,-0.2843,-0.4312,  -7.1337]
+r2=[-0.5060,-0.6293,-0.5899, 176.7584]
+```
+
+Unit-length rows, a consistent translation, `maxabs` stable around 176.8 across
+consecutive draws with the matrix changing smoothly - an animating skeleton, not
+a degenerate one.
+
+### 64.2 So the bone constants are NOT the defect
+
+Combined with §63 (2,147+ distinct poses and climbing), the bone-matrix constant
+range c144-c151 is, in gameplay: **plentiful, varied, finite, non-degenerate,
+and smoothly animating.** Nothing about it can explain a collapsed mesh.
+
+### 64.3 ⚠️ The assumption underneath §29, §63 and this section
+
+All three read **c144-c151** because §29 chose that range, and §29 inherited it.
+**That choice has never been verified against Halo 3's actual skinning setup.**
+If the game's bone matrices live elsewhere - or do not come through shader
+constants at all - then §29, §63 and §64 have been measuring a healthy but
+irrelevant register window, and none of their conclusions about "bones" apply.
+
+This matters because the surviving evidence points at the vertex path rather
+than constants: **single-bone parts render correctly while multi-bone parts
+collapse** (§59.1). Blend weights and indices arrive per-vertex, not per-draw,
+and Halo 3 processes skinned vertices through **memexport** - which this file
+already records as suspect ("Adreno underfills", and `readback_memexport=false`
+in AEX; see `docs/HALO3_MEMEXPORT_READBACK.md` and
+`project_xenia_ae_halo3_memexport_mechanism`).
+
+### 64.4 ▶️ NEXT
+
+1. **Verify where Halo 3's bone data actually is** before trusting any
+   constant-range result - check a skinned vertex shader's constant reads.
+2. **Test the vertex path**: run the existing `VTXDIST` probe in **gameplay**
+   with `readback_memexport=true` and measure the memexport fill fraction. An
+   underfilled skinned-vertex buffer is a per-vertex defect that would spare
+   single-bone rigid parts and static level geometry - which is exactly the
+   observed pattern, and which no constant-side explanation has matched.

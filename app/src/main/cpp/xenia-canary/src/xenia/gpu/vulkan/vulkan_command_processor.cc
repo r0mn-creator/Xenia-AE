@@ -2851,6 +2851,59 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   //
   // This counts distinct states at DRAW time by hashing c144-c151, so the two
   // builds can be compared directly. Same name and format in XDtester.
+  // DIAG(gpu/ball): section 64. Section 63 killed "too few poses" - the
+  // matrices are plentiful and varied. So look at their VALUES. A mesh
+  // collapsing toward a point means the transforms it blends are degenerate:
+  // all-zero, all-identical, or non-finite. Deliberately checkable in ONE
+  // build - no cross-emulator comparison and no scene matching, which is what
+  // sections 29-62 kept foundering on.
+  if (XE_AE_DIAG_ENABLED("debug.canary.bonevalues")) {
+    const uint32_t* breg = register_file_->values;
+    const uint32_t base = XE_GPU_REG_SHADER_CONSTANT_000_X + (144u << 2);
+    float v[32];
+    for (uint32_t i = 0; i < 32; ++i) {
+      std::memcpy(&v[i], &breg[base + i], sizeof(float));
+    }
+    uint32_t zeros = 0, nonfinite = 0;
+    float amax = 0.0f;
+    for (uint32_t i = 0; i < 32; ++i) {
+      if (!std::isfinite(v[i])) {
+        ++nonfinite;
+        continue;
+      }
+      if (v[i] == 0.0f) ++zeros;
+      amax = std::max(amax, std::fabs(v[i]));
+    }
+    // Are all eight vec4 rows identical to the first? That is the shape that
+    // makes every blend target resolve to one transform.
+    bool rows_all_equal = true;
+    for (uint32_t r = 1; r < 8 && rows_all_equal; ++r) {
+      for (uint32_t k = 0; k < 4; ++k) {
+        if (std::memcmp(&breg[base + k], &breg[base + r * 4 + k], 4) != 0) {
+          rows_all_equal = false;
+          break;
+        }
+      }
+    }
+    static std::atomic<uint32_t> n{0};
+    static std::atomic<uint32_t> all_zero_draws{0};
+    static std::atomic<uint32_t> equal_row_draws{0};
+    static std::atomic<uint32_t> nonfinite_draws{0};
+    if (zeros == 32) all_zero_draws.fetch_add(1);
+    if (rows_all_equal) equal_row_draws.fetch_add(1);
+    if (nonfinite) nonfinite_draws.fetch_add(1);
+    uint32_t d = n.fetch_add(1) + 1;
+    if ((d & 2047u) == 0) {
+      XELOGI(
+          "BONEVALUES draws={} allzero={} equalrows={} nonfinite={} "
+          "this[zeros={} maxabs={:.4f}] r0=[{:.4f},{:.4f},{:.4f},{:.4f}] "
+          "r1=[{:.4f},{:.4f},{:.4f},{:.4f}] r2=[{:.4f},{:.4f},{:.4f},{:.4f}]",
+          d, all_zero_draws.load(), equal_row_draws.load(),
+          nonfinite_draws.load(), zeros, amax, v[0], v[1], v[2], v[3], v[4],
+          v[5], v[6], v[7], v[8], v[9], v[10], v[11]);
+    }
+  }
+
   if (XE_AE_DIAG_ENABLED("debug.canary.bonedistinct")) {
     const uint32_t* breg = register_file_->values;
     uint64_t h = 1469598103934665603ull;
