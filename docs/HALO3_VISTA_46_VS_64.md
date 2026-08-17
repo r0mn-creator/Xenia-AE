@@ -4933,3 +4933,77 @@ address the first ~45% of the buffer?** Candidates, in order:
 3. Compare the same VTXDIST histogram against XenDroid, which has the probe
    under the same name - if XenDroid fills all 10 bins, the delta is AEX-side
    and this becomes a direct A/B with a clean pass/fail.
+
+## 66. ⚠️ CORRECTION to §65, and why the underfill may be BENIGN
+
+### 66.1 §65's histogram was one unrepresentative sample
+
+§65 reported `hist = [11191, 12133, 11975, 12149, 4837, 0, 0, 0, 0, 0]` and read
+a "hard wall at ~45%, bins 5-9 exactly zero" off it. **That was a single sample
+line**, kept by accident because the analysis stored the last-seen histogram per
+buffer rather than aggregating. Aggregated properly over all 64,432 samples
+(bin capacity 14,336 dwords):
+
+| bin | max fill | mean fill | samples with any data |
+|---|---|---|---|
+| 0 | 12,181 | 11,493 | 100.0% |
+| 1 | 12,186 | 10,038 | 85.0% |
+| 2 | 12,152 | 9,591 | 82.5% |
+| 3 | 12,166 | 8,857 | 80.0% |
+| 4 | 11,541 | 6,361 | 67.5% |
+| 5 | 11,736 | 3,815 | 50.5% |
+| 6 | 1,553 | 462 | 29.9% |
+| **7** | **0** | **0** | **0.0%** |
+| **8** | **0** | **0** | **0.0%** |
+| **9** | **0** | **0** | **0.0%** |
+
+The real shape is a **progressive taper**, not a cliff at 45%: every bin from 0
+to 6 receives data in some draws, with the share of draws reaching each bin
+falling from 100% to 30%. The genuine hard limit is higher and sharper than
+stated - `lastnz` **never exceeds 88,318** of 143,360 (61.6%) across every
+sample, and **bins 7-9 (the last 30%) are never written at all**. No bin ever
+exceeds ~85% of its capacity either.
+
+`lastnz` values are also all of the form `k*320 - 2`, suggesting a 320-dword
+record stride, which is worth remembering when interpreting the layout.
+
+### 66.2 ⚠️ And the underfill may be entirely NORMAL
+
+More importantly: **a partially-filled buffer is not by itself a defect.** A game
+allocates a skinning buffer for the worst case and fills only as much as the
+current scene needs. A taper that tracks how many skinned vertices are on screen
+is exactly what a *correctly working* system looks like.
+
+§65 asserted "any skinned vertex whose record lands in the unwritten back half
+reads zero and collapses to the origin. That is the ball." **That does not
+follow**, and nothing measured supports it. To make the underfill mean anything,
+one has to show the **consumer reads past what the producer wrote** - and no
+measurement here does. `VTXDIST` reports the consuming draw's vertex count
+(`consumervtx=`, typically 5-16) but not the range of records it fetches.
+
+This is the same error as §51 (a real, reproducible difference asserted as the
+cause without checking it could produce the symptom) and §59 (a mechanism built
+on a number that turned out to be the instrument's cap). **Third time. The
+pattern is asserting causation from a suggestive measurement instead of testing
+the causal link.**
+
+### 66.3 What is actually established
+
+* The bone-matrix constants are healthy in gameplay (§63, §64).
+* The memexport skinning buffer is partially filled, tapering, never written
+  past index 88,318 of 143,360, with the last 30% always untouched.
+* The source's domain/tessellation-skip hypothesis is refuted (§65.3,
+  `domain_draws=0`) - that stands, it was a direct measurement.
+* Whether the underfill is a defect **is unknown**.
+
+### 66.4 ▶️ NEXT — test the causal link, do not assume it
+
+1. **Does the consumer read unwritten records?** Instrument the consuming draw's
+   *fetch range* (not just its vertex count) and compare against the producer's
+   written extent. If reads stay inside `lastnz`, the underfill is benign and
+   this whole thread closes.
+2. If reads do exceed it, *then* the underfill matters, and the question becomes
+   why writes stop at 88,318.
+3. XenDroid **cannot** be used for an A/B here: it has neither the `VTXDIST`
+   probe nor a `readback_memexport` cvar (checked). §65.5 assumed it did. Any
+   comparison needs the probe ported into XDtester first.
