@@ -4581,3 +4581,59 @@ demonstration that the scheduler causes the ball. Do not record it as proven.
    natural next step regardless, and it is now aimed at the ball rather than the
    vista.
 3. Judge on the **characters** (§58.1).
+
+## 61. ⛔ SCHEDULER REFUTED for the ball — XenDroid renders characters PERFECTLY without it
+
+§60.6's owed test, finished. Ran XenDroid with `guest_scheduler=false` and let
+the campaign level load for as long as it needed.
+
+**It loads in ~11 minutes** (versus ~2 with the scheduler on) - slow, not hung,
+tracked by `VmRSS` climbing steadily (1.055 -> 1.089 -> 1.121 -> 1.424 GB) and
+the loading ring still animating throughout.
+
+**Then it renders the opening cinematic at 23.8 FPS with the characters
+COMPLETELY CORRECT** (`scratchpad/XD_NOSCHEDULER_CHARACTERS_PERFECT.png`):
+Sergeant Johnson's face, cap and cigar; Master Chief's helmet, visor, shoulder
+pauldron and chest plate - all properly shaped and skinned. **No ball.**
+
+### 61.1 What this kills
+
+**`guest_scheduler` is NOT the ball fix.** §38.1 established it is not the vista
+fix and explicitly left the ball open; that gap is now closed, with the same
+answer. The cooperative fiber scheduler is a **performance** feature - without
+it XenDroid is ~5x slower to load - but it has **no bearing on either visual
+defect**.
+
+By extension this also weakens the whole "starved guest worker threads" family
+of explanations from §60.4: XenDroid without the scheduler has *far worse* guest
+thread throughput than AEX (11 minutes to load a level) and still produces
+**perfect** skinned characters. **Whatever breaks skinning in AEX is not a
+matter of threads not getting enough time.**
+
+### 61.2 What survives
+
+§38.1's conclusion, now confirmed for the ball as well as the vista: the
+difference is in **portable GPU/emulation code, not the threading model**.
+
+The config diff's remaining divergences (§38.2) are the three JIT spin passes -
+`collapse_ctr_spin_loops`, `collapse_memory_delay_spins`, `park_memory_poll_loops`
+- ON in XenDroid, deliberately OFF in AEX since §34 recorded the transplant as a
+regression. These are also thread-progress features, and 61.1 has just shown
+thread progress is not the axis, so they are **low prior** - but they are cheap
+to test via `debug.canary.extra_args` and are the last config-level difference
+left.
+
+### 61.3 ▶️ NEXT
+
+The mechanism (§59) is solid and unchanged: too few draws -> bone writes batch
+-> draws observe ~142 saturated poses -> multi-bone vertices collapse. What is
+now excluded from *causing* it: the GPU backend (§31), zero-copy (§59.3,
+extension absent), readback/host-visible (§58.3, lighting only), the guest clock
+and video config (§60.1-2), and the scheduler (this section).
+
+So: **find the guest decision directly.** The dispatch loop `guest_821A8FF8`
+(§49) walks the objects that become draws. Instrument its iteration count and
+its per-iteration branch outcomes in AEX, and find the first branch whose
+outcome cannot be explained by the data it reads. That is the last unexplored
+axis, and unlike everything above it does not depend on guessing which feature
+matters.
