@@ -4203,3 +4203,95 @@ produce the observed symptom, which makes it the thing to test.
 ⚠️ Lesson for this file: "value X differs in sign between the builds" is not the
 same as "value X causes the symptom". Check that the magnitude of the effect can
 produce the magnitude of the symptom **before** committing sections to it.
+
+## 57. Blend hypothesis REFUTED - and `c3.x` is a different value from the quaternion, but the SAME producer
+
+### 57.1 The identity quaternions are never read - no blend exists
+
+§56.4 left one mechanism by which the quaternion's sign could matter: a
+sign-sensitive interpolation toward one of the six identity quaternions.
+Measured directly.
+
+| watched | LOAD | STORE |
+|---|---|---|
+| live camera slot (control) | **35,068** | 5,439 |
+| identity `+0x7688` | 0 (over 75 s) | 0 |
+| identity `+0x77F8` | 0 | 0 |
+| identity `+0x7A50` | 0 | 0 |
+| identity `+0x7BC0` | 0 | 0 |
+| identity `+0x7E18` | 0 | 0 |
+| identity `+0x7F88` | 0 | 0 |
+
+Target validity re-verified after the zero (§53.2's rule): the identity block
+still reads exactly `(1.0, 0, 0, 0)` and the live block still reads `-0.9958`,
+so the address was right and the zero is a measurement.
+
+One early 7 s window did show 948 loads on the first identity slot, but 75 s of
+continuous watching afterwards showed none - a transient, not a per-frame
+consumer.
+
+**The vista is flipped continuously, so its cause must run every frame. A blend
+that never executes cannot be it. The blend hypothesis is refuted, and with it
+the last mechanism by which the quaternion's `w` sign could produce the
+symptom.**
+
+### 57.2 `c3.x` is NOT the camera quaternion
+
+Sampled both at the same moment:
+
+```
+c3.x (CAMWRITE)          raw = 0xBF7F5924   (-0.997463)
+camera quaternion w      raw = 0xBF7F40CA   (-0.997082)
+```
+
+Similar magnitude, **different bit patterns**. Scanning 96 MB of guest RAM for
+the exact `c3.x` word finds **11 occurrences, all in `0xA514xxxx-0xA51Fxxxx`**
+(the per-draw constant staging buffers) and **none anywhere in the camera object
+at `0xA5AFFxxx`**, ~9 MB away. The two are distinct quantities.
+
+`c3.x` is the render-relevant one: §39/§43 measured it POSITIVE 254/254 in
+XenDroid against NEGATIVE 221/255 in AEX **at the same magnitude**. As a
+near-unit element of an uploaded constant register, a sign flip there is an
+**axis flip - a reflection**, which is exactly the symptom. The quaternion, by
+contrast, encodes only a 7-24 degree rotation (§56.2) and its sign is invisible
+to a matrix conversion (§56.3).
+
+### 57.3 ⭐ But both come from the SAME producer
+
+Probing a `c3.x` staging address (`0xA514CDD0`) for writers:
+
+```
+75  guest_lr=0x82203D20  caller=0x8212BDC4  grandcaller=0x821A91E0   <-- 82203D10
+68  guest_lr=0x8214EEA8  caller=0x8216E0FC  grandcaller=0x8216E044
+28  guest_lr=0x8214EEA8  caller=0x8214EB00  grandcaller=0x8214EA1C
+24  guest_lr=0x8214EEA8  caller=0x821725E0  grandcaller=0x82171E7C
+```
+
+The top writer is **the same `guest_82203D10` chain** that §55 identified as the
+quaternion's producer. So §56.5's fallback ("if not, §44-§56 tracked the wrong
+value and `c3.x`'s producer must be traced independently") is **half right**:
+
+* the specific *value* tracked since §51 (the quaternion `w`) was the wrong one -
+  it is a parallel output, not the render-relevant constant;
+* the *function* reached by tracking it, `guest_82203D10`, is correct and is
+  also the producer of `c3.x`. The trace direction was sound.
+
+This also explains why both quantities are negative in AEX: they are two outputs
+of one function whose inputs differ from XenDroid's.
+
+### 57.4 ▶️ NEXT
+
+`guest_82203D10` is confirmed as the producer of the render-relevant `c3.x`, and
+§55 showed its sign-relevant codegen is **identical** to XenDroid (`fneg` 7/7,
+`fabs` 3/3, `fdiv` 3/3, `fsqrt` 3/3, `fmadd` 20/20, `eor` 7/7). So the
+divergence is in its **inputs**.
+
+Use the LOAD watch (`debug.canary.jit_load_watch`, already built) to enumerate
+what `82203D10` reads, then compare those inputs against XenDroid. Prefer inputs
+that are **not animation-phase dependent** - static XEX addresses, or values
+whose magnitude can be matched across builds - because §56.1 showed
+phase-dependent comparison is unreliable.
+
+⚠️ Track `c3.x` from here, **not** the quaternion. Re-verify any candidate
+against the §39/§43 signature: a **same-magnitude** sign flip. The quaternion
+failed that test (its magnitudes differ between builds); `c3.x` passes it.
