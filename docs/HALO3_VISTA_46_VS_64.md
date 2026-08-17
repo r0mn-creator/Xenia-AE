@@ -4009,3 +4009,116 @@ shortest-path test (`if dot < 0 then negate`) remains the most likely origin.
   `+0x34`), and note the signature scan does NOT find every instance - probe
   candidates for load traffic to find the ACTIVE copy.
 * **Establish a positive control before believing any zero** (53.2).
+
+## 55. Walked up to the PRODUCER (`guest_82203D10`) - and a needed correction to §51's framing
+
+### 55.1 ⚠️ CORRECTION: "`w` is negated, therefore the inverse rotation" was too strong
+
+§51 concluded that a quaternion with only `w` negated is the inverse rotation.
+That reasoning does not hold for what is actually measured: **`q` and `-q` are
+the SAME rotation**, so a negative `w` on its own is not a defect at all - it is
+the other hemisphere of the same orientation.
+
+The measured invariant is still solid and still discriminating:
+
+* AEX's `w` is negative in every sample ever taken;
+* XenDroid's is positive in every sample ever taken.
+
+But "negative `w`" alone does not prove the camera points the wrong way. It only
+proves the two builds store the orientation in **opposite hemispheres**. That
+matters if - and only if - some consumer is sign-sensitive.
+
+Sign-pattern comparison of the other three components across the two builds is
+**not** reliable evidence either: the menu camera is animating, the components
+pass through zero, and samples from the two emulators are never at the same
+animation phase. Two such comparisons in this session gave contradictory answers
+(`-+-+` vs `--+-` on the AEX side) - which is exactly why they should not be
+used to infer a mirror.
+
+### 55.2 Buffer topology: the identity quaternions
+
+Scanning guest RAM for the `[FOV=1.221730][quaternion]` signature enumerates the
+whole camera pipeline. Per copy, 13 blocks, in a repeating 0x3C8-stride array:
+
+| offset (rel.) | `w` | meaning |
+|---|---|---|
+| `+0x6988`, `+0x6FC0`, `+0x7130` | **-0.996** | the live camera, three slots |
+| `+0x70DC`, `+0x74A4`, `+0x786C`, `+0x7C34` | 0.0 | zeroed slots |
+| `+0x7388`, `+0x74F8`, `+0x7750`, `+0x78C0`, `+0x7B18`, `+0x7C88` | **+1.000** | **identity quaternions** |
+
+The identity entries are a real, reproducible feature of the structure. If the
+guest blends the live orientation toward one of these (`dot < 0` against
+`w = -0.996`) without the standard shortest-path sign fix, the result travels
+the long way round - which is a coherent mechanism for a 180-degree-wrong
+camera. **This is a hypothesis, not a measurement** - it has not been confirmed
+that any such blend happens.
+
+### 55.3 ⭐ The producer is `guest_82203D10`
+
+Probing the primary live slot (`+0x7130`'s `w`) gives 11,131 `STORE_I32` writes,
+all from:
+
+```
+guest_lr=0x82203D20  caller=0x8212BDC4  grandcaller=0x821A91E0
+```
+
+That is precisely the chain §48 named, and the exact site where §48 caught the
+historical `0xBF7E5FB4`. Unlike the §53 write path (a block copy with no FP
+arithmetic at all), `guest_82203D10` **owns real floating-point work**:
+
+```
+fneg 7   fabs 3   fsub 2   fadd 2   fmul 40   fdiv 3   fsqrt 3
+fmadd 20   fnmsub 18   fcmp 323   fccmp 123
+```
+
+`fsqrt` + `fdiv` is a normalize; `fneg` is the sign-producing operation. This is
+the quaternion computer, and it is where the negative `w` originates.
+
+Note this **overturns §47's dismissal** of `82203D10` ("a generic
+array-iteration routine ... not confirmed as the bug"). It writes the camera
+quaternion.
+
+### 55.4 But its sign-relevant codegen is IDENTICAL to XenDroid
+
+Dumped XenDroid's `sub_82203D10` (host `0x6294`) against AEX's `guest_82203D10`
+(host `0x6b48`) and compared instruction mixes:
+
+| | AEX | XenDroid |
+|---|---|---|
+| **`fneg`** | **7** | **7** |
+| **`fabs`** | **3** | **3** |
+| **`fdiv`** | **3** | **3** |
+| **`fsqrt`** | **3** | **3** |
+| **`fmadd`** | **20** | **20** |
+| **`eor`** | **7** | **7** |
+| `fmul` | 40 | 49 |
+| `fnmsub` | 18 | 24 |
+| `fcmp` / `fccmp` | 323 / 123 | 377 / 145 |
+| `fmov` / `fcvt` | 558 / 237 | 841 / 307 |
+| total instructions | 6866 | 6309 |
+
+**Every sign-producing opcode matches exactly.** XenDroid has more FP
+instructions but *fewer* total - the signature of its `inline_leaf_calls`
+folding small leaves in (call overhead removed, leaf bodies added), which §41
+already showed is not load-bearing for the vista.
+
+Six of AEX's seven `fneg` sit in NaN-quieting sequences
+(`orr x0, x0, #0x8000000000000` sets double bit 51, the quiet-NaN bit, then
+`fneg`) - PowerPC NaN-propagation paths, not the camera sign.
+
+### 55.5 ▶️ NEXT
+
+`guest_82203D10`'s sign-relevant code is identical to the build that renders
+correctly, so - as at every previous level - the divergence is in its **input**.
+Its inputs come from its caller `guest_8212BCE0` and from guest memory.
+
+Concrete next step: the watch already records `r24`/`r26`/`r28` at this store
+(`r24=0xA5B072AC`, `r26=0xA5B07244`, `r28=0x82745EA4` - note `r28` is a **static
+XEX address**, so it is comparable between builds directly). Read what
+`82203D10` loads just before the `fneg`, and compare those inputs against
+XenDroid at the same point.
+
+⚠️ Do not repeat 55.1's mistake: compare **rotations**, canonicalised to `w > 0`,
+and only between samples known to be at the same animation phase - or better,
+compare the *inputs*, which are not animation-phase dependent when they come
+from static memory.
