@@ -10,14 +10,18 @@
 #include "xenia/base/ae_fix_toggle.h"
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 
+#include <atomic>
 #include <chrono>
+#include <cstddef>
 
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/threading.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
+#include "xenia/cpu/backend/a64/a64_jit_watch_diag.h"
 #include "xenia/cpu/backend/a64/a64_op.h"
 #include "xenia/cpu/backend/a64/a64_seq_util.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
@@ -267,6 +271,41 @@ struct CACHE_CONTROL
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_CACHE_CONTROL, CACHE_CONTROL);
+
+// DIAG(gpu/camera): see a64_jit_watch_diag.h for the full rationale. Struct
+// and ring buffer are written directly by JIT'd code (STORE_I32::Emit
+// below), no function call - only x0-x18 touched, never allocated to guest
+// values (a64_backend.cc: "GPR set: x22-x28"), so this cannot corrupt a
+// live guest register even while active.
+struct AeJitWatchEntry {
+  uint32_t guest_addr;
+  uint32_t value;
+  uint32_t guest_lr;
+};
+constexpr uint32_t kAeJitWatchRingSize = 64;
+AeJitWatchEntry g_ae_jit_watch_ring[kAeJitWatchRingSize];
+std::atomic<uint32_t> g_ae_jit_watch_ring_index{0};
+uint32_t g_ae_jit_watch_ring_dumped = 0;
+
+void DumpAeJitStoreWatch() {
+  uint32_t written = g_ae_jit_watch_ring_index.load(std::memory_order_acquire);
+  if (written <= g_ae_jit_watch_ring_dumped) {
+    return;
+  }
+  // If the ring wrapped more than once between polls, only the last
+  // kAeJitWatchRingSize entries are still valid - skip ahead to those.
+  uint32_t start = written > kAeJitWatchRingSize
+                       ? written - kAeJitWatchRingSize
+                       : g_ae_jit_watch_ring_dumped;
+  for (uint32_t seq = start; seq < written; ++seq) {
+    const AeJitWatchEntry& entry =
+        g_ae_jit_watch_ring[seq % kAeJitWatchRingSize];
+    XELOGI(
+        "JITWATCH seq={} guest_addr=0x{:08X} value=0x{:08X} guest_lr=0x{:08X}",
+        seq, entry.guest_addr, entry.value, entry.guest_lr);
+  }
+  g_ae_jit_watch_ring_dumped = written;
+}
 
 template <typename T, bool swap>
 static void MMIOAwareStore(void* _ctx, unsigned int guestaddr, T value) {
@@ -540,6 +579,62 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
       e.L(done);
     } else {
       auto addr = ComputeMemoryAddress(e, i.src1);
+      // DIAG(gpu/camera): see a64_jit_watch_diag.h. Compile-time gated
+      // (checked once per Emit call, not per execution) so this costs
+      // nothing when off. Only touches w12-w16/x1-x2/x12 - all in the a64
+      // backend's reserved scratch range (x0-x18), never allocated to guest
+      // values (a64_backend.cc: "GPR set: x22-x28") - so it cannot disturb
+      // the real store that follows, constant or register.
+      if (XE_AE_DIAG_ENABLED("debug.canary.jit_store_watch")) {
+        auto& watch_skip = e.NewCachedLabel();
+        // First cut (address-unfiltered) drowned in 594997 hits from a
+        // 0x400F41xx cluster (guest_lr=0x89411CD4, a math/audio library -
+        // far below any guest heap the game itself uses) within one 50s
+        // run. The camera constant's source is always in the physical-alias
+        // range (0xA0000000+, per CAMWRITE's src_phys samples translated
+        // through the alias), so exclude everything below that first - one
+        // extra compare, cheap, and it categorically can't drop a real hit.
+        e.mov(e.w11, 0xA0000000u);
+        e.cmp(WReg(addr.getIdx()), e.w11);
+        e.b(Xbyak_aarch64::LO, watch_skip);
+        if (i.src2.is_constant) {
+          e.mov(e.w16, static_cast<uint64_t>(
+                           static_cast<uint32_t>(i.src2.constant())));
+        } else {
+          e.mov(e.w16, i.src2);
+        }
+        // exponent byte == 126 (magnitude in [0.5, 1.0)) and sign set -
+        // matches every mirrored camera constant sampled so far (e.g.
+        // 0xBF7E5FB4, 0xBF268EE8, 0xBF2979F4).
+        e.lsr(e.w15, e.w16, 23);
+        e.and_(e.w15, e.w15, 0xFF);
+        e.cmp(e.w15, 126);
+        e.b(Xbyak_aarch64::NE, watch_skip);
+        e.tbz(e.w16, 31, watch_skip);
+        // Match - append {guest_addr, value, guest_lr} to the ring buffer.
+        // Non-atomic index increment: a lost entry under contention is
+        // acceptable for a diagnostic, an extra load/store/branch is not.
+        e.mov(e.x1,
+              reinterpret_cast<uint64_t>(&g_ae_jit_watch_ring_index));
+        e.ldr(e.w13, ptr(e.x1));
+        e.add(e.w14, e.w13, 1);
+        e.str(e.w14, ptr(e.x1));
+        e.and_(e.w13, e.w13, kAeJitWatchRingSize - 1);
+        e.mov(e.x2, reinterpret_cast<uint64_t>(&g_ae_jit_watch_ring[0]));
+        e.mov(e.w14, static_cast<uint32_t>(sizeof(AeJitWatchEntry)));
+        e.umull(e.x12, e.w13, e.w14);
+        e.add(e.x2, e.x2, e.x12);
+        e.str(WReg(addr.getIdx()),
+              ptr(e.x2, static_cast<uint32_t>(
+                            offsetof(AeJitWatchEntry, guest_addr))));
+        e.str(e.w16, ptr(e.x2, static_cast<uint32_t>(
+                                   offsetof(AeJitWatchEntry, value))));
+        e.ldr(e.w15, ptr(e.x20, static_cast<uint32_t>(
+                                    offsetof(ppc::PPCContext, lr))));
+        e.str(e.w15, ptr(e.x2, static_cast<uint32_t>(
+                                   offsetof(AeJitWatchEntry, guest_lr))));
+        e.L(watch_skip);
+      }
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
         if (i.src2.is_constant) {
           uint32_t val =

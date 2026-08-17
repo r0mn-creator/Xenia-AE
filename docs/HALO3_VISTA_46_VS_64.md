@@ -3013,3 +3013,137 @@ without a fundamentally different targeting strategy**, e.g.:
    JIT backend rather than staying in diagnostic-only code. Higher
    engineering cost, but the only approach in this list guaranteed not to
    depend on a write recurring.
+
+## 46. Built the JIT store-watch (idea 2 from 45.6) - found a MUCH stronger candidate, still not the bug
+
+Same day, continuation. Implemented 45.6's idea 2 instead of idea 1: an
+inline, address-independent, VALUE-based check baked directly into every
+JIT-compiled 32-bit guest store. New file
+`cpu/backend/a64/a64_jit_watch_diag.h`; instrumentation in `STORE_I32::Emit`
+(`a64_seq_memory.cc`); gated by `debug.canary.jit_store_watch`, must be set
+**before launch** to affect functions compiled during boot.
+
+### 46.1 Why value-based, not address-based
+
+45.3 exhausted three address-based redesigns because the target buffer is
+effectively single-use - watching "the address CAMWRITE already told us
+about" can't work when that exact byte is never written again. This
+sidesteps the problem entirely: every 32-bit store checks its **value**
+(sign bit set, exponent byte == 126, i.e. magnitude in [0.5, 1.0) - matches
+every mirrored camera sample so far: `0xBF7E5FB4`, `0xBF268EE8`,
+`0xBF2979F4`) and records `{guest_addr, value, guest_lr}` to a 64-entry ring
+buffer with **no function call** - only x0-x18 touched, which the a64
+register allocator never assigns to guest values (`a64_backend.cc`: "GPR
+set: x22-x28"), so this cannot corrupt a live guest register even while
+active. Verified safe in practice: baseline run with the flag off (new code
+compiled in but not emitted) behaved identically to before; with it on, the
+game still booted to the menu at comparable FPS, no crashes.
+
+### 46.2 First cut drowned in noise - fixed with an address floor
+
+Unfiltered, one 50s run produced **594,997 hits**, overwhelmingly
+`guest_addr=0x400F41xx`, `guest_lr=0x89411CD4` - almost certainly a
+math/audio library, far below any address range the game's own heaps use.
+Added one more compare: skip unless `guest_addr >= 0xA0000000` (the
+physical-alias range CAMWRITE's `src_phys` samples always translate
+into). Cheap (one extra `cmp`+branch) and categorically can't drop a real
+hit, since the camera constant's source has never been observed outside
+that range.
+
+### 46.3 ⭐⭐⭐⭐ Convergent evidence: `guest_82177870` is a real candidate
+
+Filtered run: 285,433 hits (still noisy - the value bracket also matches
+whatever *else* legitimately produces negative floats of that magnitude
+throughout the whole game, not just the camera). Top two `guest_lr`
+addresses: `0x82178360` (69,744 hits) and `0x8216A70C` (55,283 hits).
+
+**Both had already appeared independently in section 45's exact-byte-watch
+runs** (`guest_lr=0x82178360` at hit 13-14 of one page-chase run;
+`0x8216A70C`/`0x8214EEA8` in others) - two structurally different
+techniques (page-fault-triggered exact-byte watch vs. inline value-based
+check) converging on the same addresses is meaningfully stronger evidence
+than either alone.
+
+`0x82178360` resolves (nearest preceding perf-map entry) to
+**`guest_82177870`**, `+0xaf0` in. Disassembled it (same `dd` +
+`llvm-mc -triple=aarch64 -disassemble` technique as 45.2): **44 `fmov`, 28
+`fcvt`, 12 `fcmp`, 4 `scvtf`, 4 `fccmp`, 2 `fadd`, 2 `fsub`** - genuine
+floating-point work, unlike `825AD9F0`'s zero. This is the first real
+FP-computing candidate this whole investigation has found.
+
+### 46.4 AEX vs XenDroid comparison - close in size, one concrete gap found (not the bug)
+
+Pulled both trees' compiled bytes for `82177870` (XDtester:
+`sub_82177870` at `0xaa1799e80`/`0x4628`; AEX clean, `jit_store_watch` off
+during the dump to avoid contaminating the disassembly with the probe's own
+instructions: `0xaa07206d0`/`0x46bc`). Sizes are close this time - **4527
+(AEX) vs 4490 (XenDroid) instructions, ~0.8% apart** - nothing like
+`825AD9F0`'s 27% gap. Core FP-op counts **match exactly**: `fcvt`=28,
+`fcmp`=12, `scvtf`=4, `fccmp`=4, `fadd`=2, `fsub`=2, `eor`=1, `bic`=1.
+Structural counts differ: `fmov` 44 vs 58, `csel` 2 vs 14, unconditional
+`b` 25 vs 178, `b.ne` 26 vs 1.
+
+**Found the specific divergence.** Immediately after the first `fcvt d4,
+s4` (converting a value loaded from fixed guest constant-table address
+`0x82000AF8` from single to double, stored to `PPCContext+568` = `f[31]`),
+XenDroid inserts an explicit **NaN-payload-preservation fixup** AEX does
+not have:
+
+```
+and  w25, w23, #0x7fffffff      ; abs(original single-precision bits)
+cmp  w25, #0x7f800000            ; > +Infinity's bit pattern => was a NaN
+cset w25, hi
+lsr  w23, w23, #22
+and  w23, w23, #0x1              ; extract one payload bit from the original
+lsl  x23, x23, #51
+and  x26, x24, #0xfff7ffffffffffff  ; clear bit 51 of the converted double
+orr  x23, x26, x23                ; reinsert the preserved payload bit
+csel x23, x23, x24, ne            ; only apply the patch if it WAS a NaN
+```
+
+This is real - ARM64's native `FCVT` does not reproduce PowerPC's NaN
+payload-preservation rule across single/double precision changes, and
+XenDroid patches it in software; AEX does a bare `fcvt` and trusts the
+hardware. It very plausibly repeats at every `fcvt` site in a broadcast
+loop later in the function (`add x23, x22, #192/196/200/204...`, writing
+the same double into 4 consecutive constant slots - looks like a `splat`
+filling one vec4 constant with a scalar), which would account for most of
+the size/opcode-count gap.
+
+⚠️ **Not our bug, as far as verified**: the camera constant is a normal
+float (`0xBF7E5FB4` etc.), not a NaN - `cset w25, hi` would be 0 for it, so
+XenDroid's fixup collapses to a no-op (`csel` picks the unpatched `x24`)
+for this exact case. A **real, separate JIT correctness gap**, worth fixing
+independently, but doesn't explain the sign flip by itself. Checked the
+only other candidates (`eor`/`bic`, one each, identical in both trees at
+matching positions) - both are plain boolean-flag manipulation (`eor
+w22,w22,#0x1`), not sign-bit related. Ruled out.
+
+### 46.5 ▶️ NEXT
+
+`82177870` is the strongest candidate this investigation has produced -
+backed by convergent evidence from two independent techniques, and it does
+genuine float work unlike `825AD9F0`. The full function is ~4500
+instructions; only the region around the first `fcvt` cluster (broadcast
+loop, section 46.4) has been diffed in detail. Two more `fmov`/`fcvt`
+clusters exist further in (around line 3612 and 4341 in the AEX clean
+disassembly, `func_82177870_clean_mc.asm`) - not yet compared against
+XenDroid's equivalents. The early NaN-fixup divergence likely repeats at
+every `fcvt` site and needs to be mentally subtracted out before a
+line-for-line diff of the REST is meaningful - a raw `diff` on opcode-only
+sequences (`awk '{print $1}'` then `diff`) desyncs almost immediately
+because of it.
+
+### 46.6 Tooling added this round
+
+* `cpu/backend/a64/a64_jit_watch_diag.h` + instrumentation in
+  `STORE_I32::Emit` (`a64_seq_memory.cc`) - inline, no-function-call,
+  value-based store watch. Probe: `debug.canary.jit_store_watch` (must be
+  set before launch).
+* `debug.canary.camwatch_sweep` (`memory.cc`) - flips `EnableCamwatchDiag`
+  from "chase one address" to "re-arm on every call", for surveying many
+  different writers in one run. Superseded in practice by the JIT watch
+  (46.1) for this specific investigation, but kept as a general tool.
+* `Memory::EnableCamwatchDiag` gained an internal skip for sweep mode so
+  the two re-arm strategies (external per-call vs. internal chase-one-page)
+  don't fight each other.

@@ -15,6 +15,7 @@
 #include <random>
 
 #include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/ae_fix_toggle.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
@@ -820,7 +821,14 @@ std::pair<uint32_t, uint32_t> AeCamwatchInvalidationCallback(
   // global_critical_region_ from inside itself in production, so doing
   // real work (not just returning) from inside this callback is a proven
   // pattern here, not a new risk.
-  if (!g_ae_camwatch_found_exact.load(std::memory_order_relaxed) &&
+  //
+  // Skipped in sweep mode: chasing one page converges on whichever writer
+  // is fastest to re-trigger (always the same one - see EnableCamwatchDiag)
+  // which is the opposite of what a survey needs. Sweep mode wants each
+  // external CAMWRITE call to get its own single fault on its own address,
+  // for variety across DIFFERENT writers.
+  if (!XE_AE_DIAG_ENABLED("debug.canary.camwatch_sweep") &&
+      !g_ae_camwatch_found_exact.load(std::memory_order_relaxed) &&
       g_ae_camwatch_hits.load(std::memory_order_relaxed) < kAeCamwatchMaxHits) {
     reinterpret_cast<Memory*>(context_ptr)
         ->EnablePhysicalMemoryAccessCallbacks(page, 4096, true, false);
@@ -848,10 +856,18 @@ void Memory::EnableCamwatchDiag(uint32_t physical_address) {
   // buffer to be reused needs patience across many frames, not a smarter
   // gate - arm on the very first sample and let the (large) hit cap and a
   // long test run do the waiting.
+  // debug.canary.camwatch_sweep flips this off: instead of chasing one
+  // address, re-arm on every call so many DIFFERENT writers get sampled in
+  // one run (each still page-filtered, so this doesn't reintroduce the
+  // 45's original global-callback flood) - useful for surveying which
+  // guest functions touch this buffer class at all, e.g. to find one with
+  // FP/vector instructions worth checking as the actual computer.
   static std::atomic<bool> started{false};
-  bool expected_start = false;
-  if (!started.compare_exchange_strong(expected_start, true)) {
-    return;
+  if (!XE_AE_DIAG_ENABLED("debug.canary.camwatch_sweep")) {
+    bool expected_start = false;
+    if (!started.compare_exchange_strong(expected_start, true)) {
+      return;
+    }
   }
   if (g_ae_camwatch_found_exact.load(std::memory_order_relaxed) ||
       g_ae_camwatch_hits.load(std::memory_order_relaxed) >=

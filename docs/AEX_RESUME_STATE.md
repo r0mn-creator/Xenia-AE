@@ -41,11 +41,42 @@ translation on their side - fully explained by `guest_scheduler` being off
 in AEX's test config (`PreemptCheckInjectionPass` no-ops without it), not a
 miscompilation.
 
-**Net: the writer of the camera constant is still unidentified.** §45.6 has
-two untested ideas for whoever resumes this - scanning the perf map for
-FP/vector-heavy guest functions instead of chasing `825AD9F0` further, or
-instrumenting the JIT's store-emission path directly instead of Xenia's
-one-shot page watch.
+**Net: the writer of the camera constant is still unidentified**, but §46
+(same day, later) found a much stronger candidate.
+
+## ⭐⭐⭐⭐ NEWER: `guest_82177870` - real FP work, convergent evidence, still not proven
+
+Doc §46. Built §45.6's idea 2: an inline, **value-based** (not address-
+based) watch baked into every JIT-compiled 32-bit store
+(`debug.canary.jit_store_watch`, must be set before launch) - checks the
+store's VALUE against a sign+exponent bracket matching every mirrored
+camera sample seen so far, with no function call (only scratch registers
+the allocator never assigns to guest values are touched, so it can't
+corrupt a live register). This sidesteps §45.3's single-use-buffer dead end
+entirely - no more need to catch a specific address being rewritten.
+
+First cut drowned in 594,997 hits from an unrelated math/audio library
+(`guest_addr=0x400F41xx`, far below any game heap). Fixed with one more
+compare: skip unless `guest_addr >= 0xA0000000` (the physical-alias range).
+Filtered run: 285,433 hits, top two `guest_lr` values `0x82178360`
+(69,744×) and `0x8216A70C` (55,283×) - **both of which had already turned
+up independently in §45's exact-byte-watch runs**, a different technique
+converging on the same addresses.
+
+`0x82178360` resolves to **`guest_82177870`**. Unlike `825AD9F0`, it has
+**genuine FP instructions** (44 `fmov`, 28 `fcvt`, 12 `fcmp`, 4 `scvtf`, 2
+`fadd`, 2 `fsub`) - the first real float-computing candidate this
+investigation has found. Compared against XenDroid: much closer in size
+(4527 vs 4490 instructions, ~0.8% apart, vs. `825AD9F0`'s 27% gap) with FP
+op counts matching exactly. Found one concrete, real divergence - XenDroid
+adds NaN-payload-preservation logic around the first `fcvt` that AEX
+lacks - but it provably collapses to a no-op for non-NaN values, so it's a
+genuine separate JIT bug, **not** this one.
+
+**▶️ NEXT:** two more `fmov`/`fcvt` clusters in `82177870` haven't been
+diffed yet (see §46.5 for exact line numbers in the saved disassembly
+files). The NaN-fixup noise needs to be mentally subtracted before a
+straight opcode-sequence diff of the rest is useful.
 
 ## ⭐ WHERE WE ARE RIGHT NOW (start here)
 

@@ -14,7 +14,11 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/ae_fix_toggle.h"  // TESTRIG(probe)
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
+#if XE_ARCH_ARM64
+#include "xenia/cpu/backend/a64/a64_jit_watch_diag.h"
+#endif  // XE_ARCH_ARM64
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/packet_disassembler.h"
@@ -747,6 +751,14 @@ std::atomic<uint64_t> g_ae_reg_write_seq{0};
 std::atomic<uintptr_t> g_ae_last_reg_write_src_host{0};
 
 void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+#if XE_ARCH_ARM64
+  // DIAG(gpu/camera): poll the inline JIT store-watch ring buffer (see
+  // a64_jit_watch_diag.h, section 46) from an already-frequent host hook -
+  // cheap (one relaxed atomic load) when there is nothing new.
+  if (XE_AE_DIAG_ENABLED("debug.canary.jit_store_watch")) {
+    xe::cpu::backend::a64::DumpAeJitStoreWatch();
+  }
+#endif  // XE_ARCH_ARM64
   // DIAG(gpu/regtrace): sequence-numbered trace of the registers carrying the
   // vista's size. See docs/HALO3_VISTA_46_VS_64.md section 21.
   //
