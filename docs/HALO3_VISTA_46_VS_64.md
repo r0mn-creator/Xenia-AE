@@ -3838,3 +3838,122 @@ effectively single-use, so "wait for a repeat write" never paid off. **That
 objection does not apply here**: this address is written every frame, so a
 page-fault watch will re-trigger continuously. The technique was rejected for a
 target it did not suit, not because it is unsound.
+
+## 53. ⭐⭐⭐⭐⭐ THE WRITER, FOUND — and section 52's "host-side" conclusion RETRACTED
+
+**2026-08-17.** The host-side page-fault watch works, named the writer, and in
+doing so proved section 52 wrong.
+
+### 53.1 ⚠️ RETRACTION: section 52's "the writer is host-side" was an instrument bug
+
+Section 52 concluded the camera quaternion "is never written by guest JIT code"
+from zero hits on the vector-store watches. **That was a bug in the watch, not a
+property of the game** - exactly the failure 52.4 flagged as un-excluded.
+
+`ComputeMemoryAddress` returns **x0** on the STVL/STVR path, and the staging
+code overwrites x0 twice (first `membase+addr`, then the scratch pointer) before
+the watch ran. The watch therefore compared a *stack pointer* against the
+watched address and could never match, for any address. Moved the watch to
+immediately after `ComputeMemoryAddress`, while `addr` is still live.
+
+**Lesson, again**: a watch that has never been observed firing is not evidence.
+52.4 said so and the zeroes were reported anyway.
+
+### 53.2 A positive control, before trusting any zero
+
+Armed the page-fault watch on the object's page, took the two hottest faulting
+addresses it reported, and pointed the JIT store watch at them:
+
+* `0xA5AFC0C0` → **39,663 STORE hits**. The store watch works.
+* the quaternion → still 0 STOREs.
+
+So the store watch's zero at the quaternion is now a *measurement*, not an
+artefact. (`0xA5AFC0C0` turned out to hold the frame delta - values `0x3C888889`
+= 1/60, `0x3D4CCCCD` = 1/20 - i.e. the `dt` field of this same object family.)
+
+### 53.3 The missing opcode class was `STORE_I64`
+
+Sections 44-52 instrumented `STORE_I32`, `LOAD_I32`, `STVL`, `STVR`,
+`STORE_V128`, and later `STORE_F32` / `STORE_OFFSET_I32`. All returned zero.
+The quaternion is written by a **64-bit doubleword store**:
+
+| watched | LOAD | STORE_I32 | **STR64** | STRF32 | STVLX | STV128 |
+|---|---|---|---|---|---|---|
+| `0xA5AF95C4` (active copy) | 32,685 | 0 | **7,560** | 0 | 0 | 0 |
+| `0xA5EF95C4` (mirror) | 1,044 | 0 | 241 | 0 | 0 | 0 |
+
+(The `STORE_I64` watch had crashed the emulator on first attempt and was gated
+off; with the 53.1 x0 bug fixed it no longer reproduces, so that crash was
+almost certainly the broken vector watch, not this one.)
+
+### 53.4 ⭐ The write path, end to end
+
+```
+guest_8212BCE0 +0x8C
+   -> guest_82203438            (92 float compares, ~15 FP arith ops - a
+                                 selector/validator, not a computer)
+      -> +0x2C4 calls guest_8258E090
+                                 (284 str / 255 ldr / 103 strb, ZERO FP
+                                  arithmetic - a pure block-copy helper, and it
+                                  lives beside guest_8258DFCC___savegprlr_21
+                                  and the kernel exports)
+         -> one 64-bit store writes the pair
+```
+
+14,283 of the 14,288 captured writes come through this exact chain
+(`guest_lr=0x82203700, caller=0x82203700, grandcaller=0x8212BD6C`).
+
+### 53.5 What the stored doubleword actually is
+
+The captured register value decodes (after the guest byte swap) to **two
+adjacent floats written together**:
+
+```
+raw 0x001C7BBFAA619C3F -> 0x3F9C61AA , 0xBF7B1C00  =  1.221730 , -0.980896
+raw 0x043977BFAA619C3F -> 0x3F9C61AA , 0xBF773904  =  1.221730 , -0.965714
+```
+
+* `1.221730` rad = **exactly 70.0 degrees** - a field-of-view constant,
+  **identical in every sample**.
+* the second word is the quaternion `w` - **negative in every sample**.
+
+So the object's layout is `[+0x30] = FOV`, `[+0x34..0x43] = quaternion`, and the
+FOV and `w` are written as one pair. This matches the raw object dump from 51.3
+(`0x3F9C61AA 1.221730` immediately preceding `0xBF7F9138 -0.998310`).
+
+### 53.6 Where that leaves the sign
+
+Neither function in the write path can be the source:
+
+* `guest_8258E090` does **no floating-point arithmetic at all** - it cannot
+  create a sign.
+* `guest_82203438` has 92 float **comparisons** (71 `fcmp` + 21 `fccmp`) and
+  almost no arithmetic (6 `fmul`, 6 `fmadd`, 3 `fadd`, **no `fneg`, no `fsub`,
+  no `fdiv`, no `fsqrt`**). It selects and validates; it does not compute a
+  quaternion.
+
+**The `w` is already negative before it reaches this chain.** The producer is
+upstream of `guest_82203438`, i.e. inside or above `guest_8212BCE0` - the same
+function §48/§49 established as the consumer-side entry point, reached from
+`guest_821A8FF8`'s dispatch loop.
+
+### 53.7 Tooling added
+
+* `Memory::ArmCamwatchExact()` - arms §45's page-fault watch at a **runtime**
+  address (`debug.canary.camwatch_addr`, polled from `WriteRegister`), without
+  `EnableCamwatchDiag`'s arm-once guard, and re-armed continuously. §45 rejected
+  address watching because its target was single-use; this target is written
+  every frame, so the objection did not apply.
+* `xe::AeDiagValue()` - numeric diagnostic property reader.
+* `debug.canary.jit_watch_i64`, `STORE_F32` / `STORE_OFFSET_I32` watch kinds.
+* The page watch reports the **exact** faulting address (`si_addr`), not the
+  page - an earlier reading of "page-aligned" was a misread of one sample.
+
+### 53.8 ▶️ NEXT
+
+Watch the **source** side of `guest_8258E090`'s copy, or walk up from
+`guest_8212BCE0 +0x8C`, to find the function that first produces a negative `w`.
+Given 53.6, look for the first function on that path that owns real FP
+arithmetic - `fneg`, an `fsub` that could be operand-swapped, or an `fsel`/
+`fcmp`-driven select (a quaternion shortest-path test, `if dot < 0 then negate`,
+is the classic way a sign like this gets chosen).

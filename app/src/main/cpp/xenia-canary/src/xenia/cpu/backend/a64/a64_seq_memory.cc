@@ -321,7 +321,10 @@ void DumpAeJitStoreWatch() {
                             : entry.kind == 1 ? "LOAD "
                             : entry.kind == 2 ? "STVLX"
                             : entry.kind == 3 ? "STVRX"
-                                              : "STV128";
+                                              : entry.kind == 4 ? "STV128"
+                            : entry.kind == 5 ? "STR64"
+                            : entry.kind == 6 ? "STRF32"
+                                              : "STROFF";
     XELOGI(
         "JITWATCH {} seq={} guest_addr=0x{:08X} value=0x{:08X} "
         "guest_lr=0x{:08X} caller=0x{:08X} grandcaller=0x{:08X} "
@@ -806,9 +809,94 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
     }
   }
 };
+// DIAG(gpu/camera): section 53. 64-bit span variant of the exact-address
+// watch. A guest memcpy moves data with `std`, which lands here rather than in
+// STORE_I32 - section 52 wrongly concluded "no guest code writes this" purely
+// because this opcode class was never instrumented. Matches any 8-byte store
+// whose span covers the watched address and records the whole doubleword.
+static void EmitAeJitWatch64(A64Emitter& e, uint32_t addr_reg_idx,
+                             uint32_t value_reg_idx, uint32_t kind) {
+  auto& skip = e.NewCachedLabel();
+  e.mov(e.x1, reinterpret_cast<uint64_t>(&g_ae_jit_watch_addr));
+  e.ldr(e.w11, ptr(e.x1));
+  e.and_(e.w11, e.w11, ~7u);
+  e.and_(e.w12, WReg(addr_reg_idx), ~7u);
+  e.cmp(e.w12, e.w11);
+  e.b(Xbyak_aarch64::NE, skip);
+
+  e.mov(e.x1, reinterpret_cast<uint64_t>(&g_ae_jit_watch_ring_index));
+  e.ldr(e.w13, ptr(e.x1));
+  e.add(e.w14, e.w13, 1);
+  e.str(e.w14, ptr(e.x1));
+  e.and_(e.w13, e.w13, kAeJitWatchRingSize - 1);
+  e.mov(e.x2, reinterpret_cast<uint64_t>(&g_ae_jit_watch_ring[0]));
+  e.mov(e.w14, static_cast<uint32_t>(sizeof(AeJitWatchEntry)));
+  e.umull(e.x12, e.w13, e.w14);
+  e.add(e.x2, e.x2, e.x12);
+
+  e.str(WReg(addr_reg_idx),
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry,
+                                                 guest_addr))));
+  e.mov(e.w14, kind);
+  e.str(e.w14,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, kind))));
+  // Whole doubleword, exactly as it goes to memory (guest byte order).
+  e.str(XReg(value_reg_idx),
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry,
+                                                 arg_ctx328))));
+  e.ldr(e.w15,
+        ptr(e.x20, static_cast<uint32_t>(offsetof(ppc::PPCContext, lr))));
+  e.str(e.w15,
+        ptr(e.x2, static_cast<uint32_t>(offsetof(AeJitWatchEntry, guest_lr))));
+
+  e.ldr(e.w9, ptr(e.x19, 172));
+  auto& no_caller = e.NewCachedLabel();
+  auto& no_gc = e.NewCachedLabel();
+  auto& gc_done = e.NewCachedLabel();
+  e.cbz(e.w9, no_caller);
+  e.mov(e.w11, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
+  e.sub(e.w9, e.w9, 1);
+  e.ldr(e.x10, ptr(e.x19, 152));
+  e.umull(e.x12, e.w9, e.w11);
+  e.add(e.x12, e.x10, e.x12);
+  e.ldr(e.w14, ptr(e.x12, static_cast<uint32_t>(offsetof(
+                              A64BackendStackpoint, guest_return_address_))));
+  e.str(e.w14, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, caller_guest_addr))));
+  e.cbz(e.w9, no_gc);
+  e.sub(e.w9, e.w9, 1);
+  e.umull(e.x12, e.w9, e.w11);
+  e.add(e.x12, e.x10, e.x12);
+  e.ldr(e.w14, ptr(e.x12, static_cast<uint32_t>(offsetof(
+                              A64BackendStackpoint, guest_return_address_))));
+  e.str(e.w14, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, grandcaller_guest_addr))));
+  e.b(gc_done);
+  e.L(no_gc);
+  e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, grandcaller_guest_addr))));
+  e.L(gc_done);
+  e.b(skip);
+  e.L(no_caller);
+  e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, caller_guest_addr))));
+  e.str(e.wzr, ptr(e.x2, static_cast<uint32_t>(offsetof(
+                             AeJitWatchEntry, grandcaller_guest_addr))));
+  e.L(skip);
+}
+
 struct STORE_I64 : Sequence<STORE_I64, I<OPCODE_STORE, VoidOp, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddress(e, i.src1);
+    // NOTE: gated separately from jit_watch_exact, and OFF by default.
+    // STORE_I64 is far hotter than the other store classes, and enabling this
+    // watch crashed the emulator during boot - the fault is in this emit path,
+    // not yet diagnosed. Do not turn it on until that is understood; the
+    // host-side CAMWATCH (section 53) answers the same question and works.
+    if (!i.src2.is_constant &&
+        XE_AE_DIAG_ENABLED("debug.canary.jit_watch_i64")) {
+      EmitAeJitWatch64(e, addr.getIdx(), i.src2.reg().getIdx(), /*kind=*/5);
+    }
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       if (i.src2.is_constant) {
         uint64_t val = xe::byte_swap(static_cast<uint64_t>(i.src2.constant()));
@@ -830,6 +918,15 @@ struct STORE_I64 : Sequence<STORE_I64, I<OPCODE_STORE, VoidOp, I64Op, I64Op>> {
 struct STORE_F32 : Sequence<STORE_F32, I<OPCODE_STORE, VoidOp, I64Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddress(e, i.src1);
+    // DIAG(gpu/camera): section 53. A float store is its OWN sequence, not
+    // STORE_I32 - sections 51/52 measured "zero stores" to the camera
+    // quaternion without ever having instrumented this class. Value is
+    // recorded pre-byteswap (host order); only the address match matters.
+    if (!i.src2.is_constant &&
+        XE_AE_DIAG_ENABLED("debug.canary.jit_watch_exact")) {
+      e.fmov(e.w16, i.src2);
+      EmitAeJitWatchBody(e, addr.getIdx(), 16, /*kind=*/6, /*exact_addr=*/true);
+    }
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       if (i.src2.is_constant) {
         uint32_t val =
@@ -1148,6 +1245,14 @@ struct STORE_OFFSET_I32
       e.L(normal_access);
       {
         AddGuestMemoryOffset(e, ComputeMemoryAddress(e, i.src1), i.src2);
+        // DIAG(gpu/camera): section 53 - OPCODE_STORE_OFFSET is a DIFFERENT
+        // opcode from OPCODE_STORE, with its own sequences. AddGuestMemoryOffset
+        // leaves the guest address in x0, which the watch never writes.
+        if (!i.src3.is_constant &&
+            XE_AE_DIAG_ENABLED("debug.canary.jit_watch_exact")) {
+          e.mov(e.w16, i.src3);
+          EmitAeJitWatchBody(e, 0, 16, /*kind=*/7, /*exact_addr=*/true);
+        }
         if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
           if (i.src3.is_constant) {
             uint32_t val =

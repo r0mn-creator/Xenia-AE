@@ -12,6 +12,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/cvar.h"
+#include <chrono>
 #include "xenia/base/ae_fix_toggle.h"  // TESTRIG(probe)
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
@@ -759,6 +760,26 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
     xe::cpu::backend::a64::DumpAeJitStoreWatch();
   }
 #endif  // XE_ARCH_ARM64
+  // DIAG(gpu/camera): section 53 - arm the host-side page-fault watch at a
+  // RUNTIME address (debug.canary.camwatch_addr). The camera quaternion is
+  // heap-allocated, so its address is only known once the scene exists and it
+  // moves between runs; it is located by content signature and fed in here.
+  // Re-armed from this already-frequent hook because the target is written
+  // every frame, unlike section 45's single-use buffer.
+  if (memory_) {
+    static std::atomic<uint64_t> camwatch_next_ms{0};
+    const uint64_t now_ms =
+        uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now().time_since_epoch())
+                     .count());
+    if (now_ms >= camwatch_next_ms.load(std::memory_order_relaxed)) {
+      camwatch_next_ms.store(now_ms + 200, std::memory_order_relaxed);
+      uint32_t camwatch_addr = xe::AeDiagValue("debug.canary.camwatch_addr");
+      if (camwatch_addr) {
+        memory_->ArmCamwatchExact(camwatch_addr);
+      }
+    }
+  }
   // DIAG(gpu/regtrace): sequence-numbered trace of the registers carrying the
   // vista's size. See docs/HALO3_VISTA_46_VS_64.md section 21.
   //

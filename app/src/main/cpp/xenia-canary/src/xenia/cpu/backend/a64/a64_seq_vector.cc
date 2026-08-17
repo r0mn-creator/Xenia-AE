@@ -2116,24 +2116,23 @@ struct STVR_V128 : Sequence<STVR_V128, I<OPCODE_STVR, VoidOp, I64Op, V128Op>> {
     }
     int s = SrcVReg(e, i.src2, 0);
 
+    // Watch first - see STVL_V128 above: ComputeMemoryAddress returns x0 and
+    // the staging below overwrites it, so reading `addr` afterwards compares
+    // a stack pointer against the target and can never match.
+    auto addr = ComputeMemoryAddress(e, i.src1);
+    if (XE_AE_DIAG_ENABLED("debug.canary.jit_watch_exact")) {
+      EmitAeJitVecWatch(e, addr.getIdx(), s, /*kind=*/3);
+    }
+
     e.rev32(VReg(0).b16, VReg(s).b16);
     e.str(QReg(0),
           ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
 
     // x16 = aligned destination base, w17 = offset, x0 = stash base.
-    auto addr = ComputeMemoryAddress(e, i.src1);
     e.add(e.x0, e.GetMembaseReg(), addr);
     e.and_(e.w17, e.w0, 0xF);
     e.and_(e.x16, e.x0, ~0xFull);
     e.add(e.x0, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
-    if (XE_AE_DIAG_ENABLED("debug.canary.jit_watch_exact")) {
-      EmitAeJitVecWatch(e, addr.getIdx(), s, /*kind=*/3);
-      // The watch clobbers v0 and GUEST_SCRATCH, so re-stage both.
-      e.rev32(VReg(0).b16, VReg(s).b16);
-      e.str(QReg(0),
-            ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
-      e.add(e.x0, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
-    }
     e.mov(e.w6, 16);
     e.sub(e.w6, e.w6, e.w17);  // source tail starts at 16 - offset
 

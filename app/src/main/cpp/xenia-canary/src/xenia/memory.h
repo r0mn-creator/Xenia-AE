@@ -516,6 +516,18 @@ class Memory {
   // docs/HALO3_VISTA_46_VS_64.md section 43.
   void EnableCamwatchDiag(uint32_t physical_address);
 
+  // DIAG(gpu/camera): section 53. Arms the same page watch as
+  // EnableCamwatchDiag, but at an address supplied at RUNTIME
+  // (debug.canary.camwatch_addr) instead of one sampled from a CAMWRITE, and
+  // WITHOUT that function's arm-once-then-never-again guard - the target here
+  // is written every frame, so re-arming is what keeps it firing.
+  //
+  // The point is the HOST program counter recorded at the fault. Section 52
+  // measured ~92,000 guest loads and ZERO guest stores on this address, so
+  // whatever changes it is not JIT'd guest code; a host_pc inside the code
+  // cache versus inside libxenia settles that directly.
+  void ArmCamwatchExact(uint32_t physical_address);
+
   // Forces triggering of watch callbacks for a virtual address range if pages
   // are watched there and unwatching them. Returns whether any page was
   // watched. Must be called with global critical region locking depth of 1.

@@ -837,6 +837,43 @@ std::pair<uint32_t, uint32_t> AeCamwatchInvalidationCallback(
 }
 }  // namespace
 
+void Memory::ArmCamwatchExact(uint32_t physical_address) {
+  // Guest addresses come in as 0xA5xxxxxx / 0x85xxxxxx aliases; the watch and
+  // the callback's fault_phys both work in physical space.
+  physical_address &= 0x1FFFFFFFu;
+  static std::atomic<uint32_t> armed_target{0};
+  uint32_t previous = armed_target.load(std::memory_order_relaxed);
+  bool target_changed = previous != physical_address;
+  if (target_changed) {
+    // New target: clear the latch and the hit budget from the previous one.
+    armed_target.store(physical_address, std::memory_order_relaxed);
+    g_ae_camwatch_found_exact.store(false, std::memory_order_relaxed);
+    g_ae_camwatch_hits.store(0, std::memory_order_relaxed);
+    g_ae_camwatch_pages[0].store(0, std::memory_order_relaxed);
+    g_ae_camwatch_pages[1].store(0, std::memory_order_relaxed);
+  }
+  if (g_ae_camwatch_found_exact.load(std::memory_order_relaxed) ||
+      g_ae_camwatch_hits.load(std::memory_order_relaxed) >=
+          kAeCamwatchMaxHits) {
+    return;
+  }
+  bool expected = false;
+  if (g_ae_camwatch_registered.compare_exchange_strong(expected, true)) {
+    RegisterPhysicalMemoryInvalidationCallback(AeCamwatchInvalidationCallback,
+                                               this);
+  }
+  g_ae_camwatch_exact_target.store(physical_address, std::memory_order_relaxed);
+  uint32_t page = physical_address & ~uint32_t(0xFFF);
+  if (g_ae_camwatch_pages[0].load(std::memory_order_relaxed) != page) {
+    g_ae_camwatch_pages[0].store(page, std::memory_order_relaxed);
+  }
+  if (target_changed) {
+    XELOGI("CAMWATCH_ARMED_EXACT target=0x{:08X} page=0x{:08X}",
+           physical_address, page);
+  }
+  EnablePhysicalMemoryAccessCallbacks(page, 4096, true, false);
+}
+
 void Memory::EnableCamwatchDiag(uint32_t physical_address) {
   // DIAG(gpu/camera): arm ONCE (the very first call), then leave the target
   // alone. WriteALURangeFromMem calls WriteRegister in a tight host loop, so
