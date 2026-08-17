@@ -4848,3 +4848,88 @@ in AEX; see `docs/HALO3_MEMEXPORT_READBACK.md` and
    underfilled skinned-vertex buffer is a per-vertex defect that would spare
    single-bone rigid parts and static level geometry - which is exactly the
    observed pattern, and which no constant-side explanation has matched.
+
+## 65. ⭐⭐⭐⭐⭐ THE BALL, MEASURED: the memexport skinning buffer fills to a HARD WALL at ~45%
+
+§64.4's step. This is the first quantitative, one-build-checkable measurement of
+the ball's proximate cause.
+
+### 65.1 ⚠️ First, an instrument trap avoided (the 4th)
+
+With AEX's shipping settings, `VTXDIST` reports the skinning buffer as
+**`nonzero=0/143360` - completely empty** in 72,745 of 74,068 samples. That is
+**not** the game's behaviour: `VTXDIST` reads **guest RAM**, and AEX ships
+`readback_memexport=false`, so the GPU's memexport output never reaches the side
+the probe inspects. The probe was measuring the readback setting, not the buffer.
+
+Re-run with `--readback_memexport=true`. (This trap was written down in
+`project_xenia_ae_halo3_memexport_mechanism` - "VTXDIST reads GUEST RAM, needs
+readback_memexport=true" - and I still had to be reminded by it. The note earned
+its keep.)
+
+### 65.2 The wall
+
+Halo 3 gameplay, `readback_memexport=true`, 64,432 samples of the skinning
+buffer at `0x0574BB00` (143,360 dwords / 573 KB):
+
+| buffer | samples | min | max | mean | 10-bin fill histogram |
+|---|---|---|---|---|---|
+| **0x0574BB00 / 143360** | 64,432 | 0% | 50.9% | **35.3%** | **[11191, 12133, 11975, 12149, 4837, 0, 0, 0, 0, 0]** |
+| 0x0CA3CC60 / 1074 | 1,218 | 100% | 100% | 100% | [108,107,108,107,107,108,107,108,107,107] |
+| 0x0B671B60 / 7428 | 166 | 100% | 100% | 100% | [743,743,743,743,742,743,743,743,743,742] |
+
+**Bins 0-3 fill normally (~11-12k each), bin 4 partially (4,837), and bins 5-9
+are EXACTLY ZERO.** A hard structural cutoff at roughly 45% of the buffer, not a
+gradual falloff - while *small* memexport buffers fill 100% uniformly across
+every bin.
+
+**Any skinned vertex whose record lands in the unwritten back half reads zero and
+collapses to the origin. That is the ball**, and it explains the whole symptom
+pattern: static level geometry uses no memexport (perfect), single-bone rigid
+parts survive, multi-bone skinned meshes collapse.
+
+### 65.3 ⛔ The documented prime suspect is REFUTED
+
+`vulkan_command_processor.cc` has carried this hypothesis since 2026-07-24: the
+shortfall is caused by memexport draws arriving via the tessellation/domain
+shader path, which `!IsHostVertexShaderTypeDomain()` silently skips so they
+"write NOTHING", and "Halo 3 uses tessellation heavily".
+
+Ran its own `MEMEXPORT_PATHSPLIT` probe, in gameplay:
+
+```
+plain_draws=39424  plain_verts=763980  domain_draws=0  domain_verts=0  domain_vert_pct=0
+```
+
+**Zero domain-path memexport draws exist.** There are none to skip. The
+hypothesis is quantitatively refuted, and the fix it proposed (handling memexport
+on the tessellated path) would change nothing.
+
+### 65.4 What the producers actually do
+
+* 41,169 producer draws target `0x05750300`/`0x0574BB00`, 674,338 vertices,
+  2 distinct shaders - **producers and consumer agree on the address**, so it is
+  not a producer/consumer address mismatch.
+* Producer draws are small and numerous (vertex counts 1-16 dominate).
+* `MEMEXPORT_COHERENCY` shows 111,872 requests but only 451 uploads, with
+  `upload_ranges=0 CLOBBER=0`.
+
+The code's earlier note - that the unfilled slots "are not being targeted by ANY
+invocation", which is why raising `kMemExportDispatchMultiplier` did not help -
+is consistent with 65.2: the back half is not under-dispatched, it is **never
+addressed at all**.
+
+### 65.5 ▶️ NEXT
+
+The question is now sharp and scoped: **why do the producer draws only ever
+address the first ~45% of the buffer?** Candidates, in order:
+
+1. **A count/size clamp** on the memexport range or dispatch, capping records at
+   a fraction of the declared 573 KB. Compare the declared export size against
+   the record count actually dispatched per draw.
+2. **Missing producer draws** - whole exports the guest issues that AEX drops
+   before dispatch (the earlier suspicion, but now needing a cause other than
+   the refuted domain path).
+3. Compare the same VTXDIST histogram against XenDroid, which has the probe
+   under the same name - if XenDroid fills all 10 bins, the delta is AEX-side
+   and this becomes a direct A/B with a clean pass/fail.
