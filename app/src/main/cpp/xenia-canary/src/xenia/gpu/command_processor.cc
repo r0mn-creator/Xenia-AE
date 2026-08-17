@@ -492,6 +492,12 @@ void CommandProcessor::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {
 
   std::memset(kernel_state_->memory()->TranslatePhysical(primary_buffer_ptr_),
               0, primary_buffer_size_);
+  // DIAG(gpu/ball): section 62. The guest writes its PM4 stream, draw packets
+  // included, into this ring. Logging its address lets a write-watch be armed
+  // on it, which names the GUEST function emitting draws - the top of the
+  // pipeline whose ~7x deficit (section 31) is the ball's root.
+  XELOGI("RINGBUF primary_buffer_ptr=0x{:08X} size=0x{:X}", primary_buffer_ptr_,
+         primary_buffer_size_);
 }
 
 void CommandProcessor::EnableReadPointerWriteBack(uint32_t ptr,

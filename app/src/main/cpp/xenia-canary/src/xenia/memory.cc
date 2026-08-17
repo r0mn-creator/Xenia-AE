@@ -782,10 +782,46 @@ std::pair<uint32_t, uint32_t> AeCamwatchInvalidationCallback(
 #endif
   uint64_t host_pc = 0;
   uint64_t host_lr = 0;
+  uint32_t caller = 0, grandcaller = 0, great_caller = 0;
+  uint32_t chain[8] = {};
 #if XE_ARCH_ARM64
   if (tc) {
     host_pc = tc->pc;
     host_lr = tc->x[30];
+    // DIAG(gpu/ball): section 62 - walk Xenia's own guest stack from the fault
+    // context, exactly as A64Backend::PopulatePseudoStacktrace does, so a ring
+    // buffer write names the whole GUEST call chain above it rather than just
+    // the faulting function. x19 is the backend context register; the
+    // stackpoints array is at +152 and the depth at +172 (confirmed in
+    // section 48 against a64_backend.h and the prologue bytes).
+    const uint64_t backend_ctx = tc->x[19];
+    if (backend_ctx) {
+      auto sp_base = *reinterpret_cast<uint8_t* const*>(backend_ctx + 152);
+      uint32_t depth =
+          *reinterpret_cast<const uint32_t*>(backend_ctx + 172);
+      // The watch fires for ANY write to the page, including from threads
+      // that are not running guest code at all - there x19 is not a backend
+      // context and both fields are garbage. Walking that crashed the
+      // emulator once (an 8-frame walk read far out of bounds), so bound the
+      // depth by the same 0x10000 cap the JIT prologue enforces before
+      // dereferencing anything.
+      const bool sp_usable =
+          sp_base != nullptr && depth != 0 && depth <= 0x10000;
+      auto frame_ret = [&](uint32_t back) -> uint32_t {
+        if (!sp_usable || depth <= back) return 0u;
+        return *reinterpret_cast<const uint32_t*>(
+            sp_base + size_t(depth - 1 - back) * 16 + 12);
+      };
+      caller = frame_ret(0);
+      grandcaller = frame_ret(1);
+      great_caller = frame_ret(2);
+      // 3 frames only. An 8-frame walk crashed the emulator TWICE even with
+      // a depth bound: the watch fires on threads where x19 is not a backend
+      // context, and sp_base can then be a readable-looking but wrong
+      // pointer. Deeper call chains must be recovered by STATIC disassembly
+      // (the section 49 technique), not by walking further here.
+      for (int fi = 0; fi < 3; ++fi) chain[fi] = frame_ret(uint32_t(fi));
+    }
   }
 #endif
   // DIAG(gpu/camera): the EXACT faulting byte, not just the watched page -
@@ -808,9 +844,11 @@ std::pair<uint32_t, uint32_t> AeCamwatchInvalidationCallback(
   XELOGI(
       "CAMWATCH hit={} phys=0x{:08X} len={} fault_phys=0x{:08X} "
       "exact_match={} had_context={} x20=0x{:016X} guest_lr=0x{:08X} "
-      "host_pc=0x{:016X} host_lr=0x{:016X}",
+      "host_pc=0x{:016X} host_lr=0x{:016X} caller=0x{:08X} "
+      "chain=[{:08X},{:08X},{:08X},{:08X},{:08X},{:08X},{:08X},{:08X}]",
       hit, physical_address_start, length, fault_phys, exact_match,
-      had_context, ppc_ctx_ptr, guest_lr, host_pc, host_lr);
+      had_context, ppc_ctx_ptr, guest_lr, host_pc, host_lr, chain[0],
+      chain[1], chain[2], chain[3], chain[4], chain[5], chain[6], chain[7]);
   if (exact_match) {
     g_ae_camwatch_found_exact.store(true, std::memory_order_relaxed);
   }

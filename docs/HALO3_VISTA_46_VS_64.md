@@ -4637,3 +4637,81 @@ its per-iteration branch outcomes in AEX, and find the first branch whose
 outcome cannot be explained by the data it reads. That is the last unexplored
 axis, and unlike everything above it does not depend on guessing which feature
 matters.
+
+## 62. Instrumenting the draw path: a call-graph tool, the ring-write chain — and a problem with §31's premise
+
+### 62.1 New tool: guest call-graph by static `bl` scan (`scratchpad/callers.py`)
+
+Finds every guest PPC `bl` targeting a given address. PowerPC I-form branch:
+opcode 18, `LI` = bits 6-29 signed and `<<2`, `AA` = bit 30, `LK` = bit 31; a
+call is `AA=0, LK=1` (`insn & 3 == 1`) with target `pc + sext(LI<<2)`, big-endian.
+
+**Validated against runtime data before use**: every call site it reports matches
+a return address the page-fault watch independently observed (`bl` at
+`0x825AE210` vs observed return `0x825AE214`, `0x825AE824` vs `0x825AE828`,
+`0x825AE928` vs `0x825AE92C`). Two independent methods agreeing is what makes
+the tool trustworthy.
+
+### 62.2 The ring buffer's address, and who writes it
+
+Added a `RINGBUF` log line at `InitializeRingBuffer` - the guest writes its whole
+PM4 stream, draw packets included, into this ring, so a write-watch on it names
+the guest code emitting draws. Halo 3: `primary_buffer_ptr=0x1FC9D000`,
+size `0x8000`.
+
+Extended `AeCamwatchInvalidationCallback` to walk Xenia's own guest stack from
+the fault context (`x19` -> `stackpoints`, the §48 technique) so a ring write
+reports its guest **call chain**, not just the faulting function:
+
+```
+guest_825AE850 +0xDC -> guest_825AE538 +0x2F0 -> guest_825AE0D8 +0x13C
+                     -> guest_825ADCF8 +0x50  -> writes the ring
+```
+
+⚠️ **The walk is capped at 3 frames.** An 8-frame version crashed the emulator
+**twice**, even with a depth bound: the watch fires on threads that are not
+running guest code, where `x19` is not a backend context and `sp_base` can be a
+readable-looking but wrong pointer. Deeper chains must come from static analysis
+(62.1), not from walking further in a fault handler.
+
+### 62.3 `guest_825AE850` is entered indirectly
+
+`callers.py` finds **zero** direct `bl` sites for it anywhere in the module,
+while finding exactly one for each of the three functions below it. So the
+graphics layer is entered through an indirect call.
+
+⚠️ **Correction made mid-investigation**: `0x825AE850` appears exactly once as a
+data word, at `0x82076268`, flanked by other code addresses - which looks like a
+vtable. It is not. Walking the region's extent shows it runs
+`0x8205DA00-0x8207C8B8` as **15,831 `{address, packed-length}` pairs**: the
+XEX's **`.pdata` unwind table**, which lists every function in the module. Five
+words would have read as a dispatch table; the extent check is what
+distinguished them.
+
+### 62.4 ⚠️ A problem with §31's 7x premise
+
+While working on this I noticed the draw-deficit figure may not be comparable.
+§31 divides totals by frame counts (AE 73,728/836 = 88, XDtester 744,448/1,212 =
+614), which normalises for frame rate - but **not for what was on screen**.
+Halo 3's menu enters an attract-mode demo after idling, and the two builds run at
+very different speeds, so a longer-running or faster build can be rendering a
+completely different scene by the time the sample is taken. §29.1 already flagged
+that the totals "are not directly comparable"; the per-frame figures inherit the
+same risk.
+
+**Before more work is built on "7x fewer draws", re-measure it with both builds
+pinned to the same scene** - ideally a still, and ideally in gameplay rather than
+the menu, since the ball is a gameplay symptom (§58.1).
+
+### 62.5 ▶️ NEXT
+
+1. **Re-establish the deficit on solid ground**: `debug.canary.pm4draw` and
+   `debug.canary.bonedistinct` exist in *both* builds. Run both **in gameplay**,
+   same level, same moment, and confirm the draw and bone-state gap is real
+   there. §29/§31 measured only the menu.
+2. If it holds, the entry point above `guest_825AE850` has to come from a
+   4-frame runtime walk (risky, see 62.2) or from finding the indirect-call site
+   that loads its address.
+3. If it does *not* hold in gameplay, the ball's cause is elsewhere and the
+   draw-deficit thread should be dropped - §59's mechanism depends entirely on
+   that figure.
