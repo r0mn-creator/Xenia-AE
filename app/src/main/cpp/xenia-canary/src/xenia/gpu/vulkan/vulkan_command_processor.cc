@@ -2860,24 +2860,41 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         h *= 1099511628211ull;
       }
     }
-    static std::atomic<uint64_t> seen[512];
+    // DIAG(gpu/ball): section 63. The original probe was a 512-entry LINEAR
+    // scan, which both caps the answer and costs O(512) per draw. In gameplay
+    // BOTH builds saturate 512, so the cap - not the guest - was setting the
+    // number. Open-addressed hash set instead: 64K slots, indexed by the hash
+    // itself, bounded probe. Same semantics (cumulative distinct poses),
+    // comparable to the 512-slot builds up to 512, and honest above it.
+    constexpr uint32_t kBoneSlots = 65536;  // power of two
+    static std::atomic<uint64_t>* seen = [] {
+      auto* t = new std::atomic<uint64_t>[kBoneSlots];
+      for (uint32_t i = 0; i < kBoneSlots; ++i) t[i].store(0);
+      return t;
+    }();
     static std::atomic<uint32_t> distinct{0};
     static std::atomic<uint32_t> draws{0};
-    bool found = false;
-    for (auto& slot : seen) {
-      uint64_t v = slot.load(std::memory_order_relaxed);
-      if (v == h) { found = true; break; }
-      if (!v && slot.compare_exchange_strong(v, h)) {
-        distinct.fetch_add(1);
-        found = true;
-        break;
+    static std::atomic<uint32_t> overflow{0};
+    {
+      uint32_t idx = uint32_t(h ^ (h >> 32)) & (kBoneSlots - 1);
+      bool placed = false;
+      for (uint32_t probe = 0; probe < 64; ++probe) {
+        auto& slot = seen[(idx + probe) & (kBoneSlots - 1)];
+        uint64_t v = slot.load(std::memory_order_relaxed);
+        if (v == h) { placed = true; break; }
+        if (!v && slot.compare_exchange_strong(v, h)) {
+          distinct.fetch_add(1);
+          placed = true;
+          break;
+        }
       }
+      if (!placed) overflow.fetch_add(1);
     }
-    (void)found;
     uint32_t d = draws.fetch_add(1) + 1;
     if ((d & 1023u) == 0) {
-      XELOGI("BONEDISTINCT draws={} distinct_bone_states={} frame={}", d,
-             distinct.load(), frame_current_);
+      XELOGI(
+          "BONEDISTINCT draws={} distinct_bone_states={} frame={} overflow={}",
+          d, distinct.load(), frame_current_, overflow.load());
     }
   }
 

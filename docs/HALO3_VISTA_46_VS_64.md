@@ -4715,3 +4715,73 @@ the menu, since the ball is a gameplay symptom (§58.1).
 3. If it does *not* hold in gameplay, the ball's cause is elsewhere and the
    draw-deficit thread should be dropped - §59's mechanism depends entirely on
    that figure.
+
+## 63. ⛔ §59's MECHANISM REFUTED — measured in gameplay, AEX is not bone-starved and not draw-starved
+
+§62.4's doubt, tested. Both probes exist in both builds with identical output;
+run in **gameplay** (opening campaign cinematic) rather than the menu.
+
+### 63.1 The 512 figure was the CAP, not the guest
+
+| | distinct bone states | draws | frames | draws/frame |
+|---|---|---|---|---|
+| AEX, 512-slot probe | **512 (capped)** | 1,680,384 | 2,233 | 752 |
+| XenDroid, 512-slot probe | **512 (capped)** | 9,834,496 | 7,653 | 1,285 |
+
+**Both saturate the probe's own table.** The original probe was a 512-entry
+*linear scan*, so it both capped the answer and cost O(512) per draw. Replaced it
+with an open-addressed hash set (65,536 slots, bounded probe, `overflow`
+counter). Re-measured AEX in the same scene:
+
+```
+BONEDISTINCT draws=1030144 distinct_bone_states=1004 frame=1857 overflow=0
+BONEDISTINCT draws=1702912 distinct_bone_states=2147 frame=2250 overflow=0
+```
+
+**AEX observes 2,147 distinct bone poses in gameplay and is still climbing**,
+with zero overflow. Not 142, not saturated - the number was being set by the
+instrument.
+
+### 63.2 What this kills
+
+**§59's mechanism is refuted.** It held that too-few draws let bone writes batch,
+so draws observed only ~142 poses and multi-bone vertices collapsed. In gameplay
+- where the ball actually appears - AEX's draws observe **thousands** of distinct
+poses. There is no pose starvation to explain the collapse.
+
+§29's "AE plateaus at 142" was a **menu** measurement, and §31's "~7x fewer
+draws" likewise. Neither carries to gameplay: draws/frame there is 752 vs 1,285,
+i.e. **1.7x, not 7x** - and even that is not trustworthy, because the two runs
+sampled the level at very different points (2,233 vs 7,653 frames elapsed), which
+is exactly the scene-mismatch problem §62.4 raised.
+
+### 63.3 ⚠️ Instrument lesson (third time in this investigation)
+
+* §46's value filter could only ever report negatives (§51.1).
+* §52's vector watch never fired at all (§53.1).
+* §29's bone probe **reported its own table size as if it were a measurement.**
+
+A saturated counter looks exactly like a real plateau. §29.1 even noted XDtester
+"hit the probe's 512-slot cap" and said to raise it before quoting a ratio - and
+then §59 built a whole mechanism on the ratio anyway. **Check whether a number
+is the instrument's limit before treating it as the system's behaviour.**
+
+### 63.4 ▶️ Where the ball stands now
+
+Still true, and still the best-grounded facts:
+
+* the level renders perfectly while **skinned** characters collapse (§58.1);
+* **single-bone** parts (helmets, plates, weapons, crates) keep their shape while
+  **multi-bone** parts (torsos, limbs) collapse (§59.1).
+
+Now excluded: the GPU backend (§31), zero-copy (§59.3), readback/host-visible
+(§58.3, lighting only), the guest clock and video config (§60), the scheduler and
+thread progress (§61), and **bone-pose starvation** (this section).
+
+So the bone matrices are **plentiful and varied** - the defect must be in their
+**values**, or in how skinning consumes them. Concrete next step: sample the
+actual bone matrix contents at draw time in AEX and test for degeneracy - a mesh
+collapsing to a point means matrices going to ~zero, or all blend targets
+resolving to the same transform. That is a property checkable in **one build
+alone**, with no cross-emulator comparison and no scene-matching problem, which
+is what every measurement in §29-§62 struggled with.
