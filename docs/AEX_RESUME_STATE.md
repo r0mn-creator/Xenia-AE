@@ -73,10 +73,24 @@ adds NaN-payload-preservation logic around the first `fcvt` that AEX
 lacks - but it provably collapses to a no-op for non-NaN values, so it's a
 genuine separate JIT bug, **not** this one.
 
-**▶️ NEXT:** two more `fmov`/`fcvt` clusters in `82177870` haven't been
-diffed yet (see §46.5 for exact line numbers in the saved disassembly
-files). The NaN-fixup noise needs to be mentally subtracted before a
-straight opcode-sequence diff of the rest is useful.
+**All three FP-instruction clusters in `82177870` are now checked** (§46.5,
+§46.6) and each has a benign explanation - a second NaN-propagation fixup
+(for `fadd`, same shape as the first, structurally identical between trees
+just with inverted branch polarity), and a large register-restore
+difference at the function's exit that looked serious at first (XenDroid
+restores all 18 PPC non-volatile GPRs + lr before its tail-dispatch, AEX
+restores none) but cross-checks against **already-completed** testing -
+§39.6/§42.1 ran AEX with `disable_context_promotion=true` (which would
+force the always-memory-backed behavior this difference implies AEX
+already has) and the vista stayed broken, bit-identical. Ruled out.
+
+**▶️ NEXT (doc §46.7):** `82177870` is still the strongest candidate, but
+the FP-cluster-only search is exhausted. Try diffing the NON-FP bulk of the
+function (constant/register marshalling could still carry the bug), find
+what CALLS `82177870` and with what arguments (convergent evidence names it
+as involved, not necessarily as the place the value first goes wrong), or
+narrow the JIT store-watch's value bracket to one specific sample's
+mantissa to cut through the same-magnitude noise.
 
 ## ⭐ WHERE WE ARE RIGHT NOW (start here)
 

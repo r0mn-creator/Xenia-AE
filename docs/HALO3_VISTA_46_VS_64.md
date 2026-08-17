@@ -3119,20 +3119,78 @@ only other candidates (`eor`/`bic`, one each, identical in both trees at
 matching positions) - both are plain boolean-flag manipulation (`eor
 w22,w22,#0x1`), not sign-bit related. Ruled out.
 
-### 46.5 ▶️ NEXT
+### 46.5 Second cluster (~line 3596): NaN-propagating `fadd` - also equivalent
 
-`82177870` is the strongest candidate this investigation has produced -
-backed by convergent evidence from two independent techniques, and it does
-genuine float work unlike `825AD9F0`. The full function is ~4500
-instructions; only the region around the first `fcvt` cluster (broadcast
-loop, section 46.4) has been diffed in detail. Two more `fmov`/`fcvt`
-clusters exist further in (around line 3612 and 4341 in the AEX clean
-disassembly, `func_82177870_clean_mc.asm`) - not yet compared against
-XenDroid's equivalents. The early NaN-fixup divergence likely repeats at
-every `fcvt` site and needs to be mentally subtracted out before a
-line-for-line diff of the REST is meaningful - a raw `diff` on opcode-only
-sequences (`awk '{print $1}'` then `diff`) desyncs almost immediately
-because of it.
+Checked the `fadd d4, d6, d7` cluster (AEX line 3596, `func_82177870_clean_mc.asm`;
+XenDroid line 3564, `xd_82177870_mc.asm`). Both implement PowerPC's NaN-
+propagation rule for addition in software (check each operand for NaN via
+`fcmp x,x`+`fccmp`, do the add, canonicalize an unordered result to the
+quiet-NaN bit pattern, else quiet whichever operand was NaN and
+round-trip it through single precision) - the same shape of fixup as
+section 46.4's `fcvt` case, just for `fadd`. **Structurally identical
+control flow in both trees**, just compiled with inverted branch polarity
+(AEX: `b.vs` direct to the NaN path; XenDroid: `b.vc` skip-then-`b`,
+double-negated to the same effect) - a cosmetic codegen-style difference,
+not a behavioral one. Ruled out.
+
+### 46.6 Third cluster (~line 4341): a big one, but cross-checked against EARLIER testing and also ruled out
+
+The final `fmov`/return-sequence cluster (AEX line 4337-4364; XenDroid line
+4230-4359) looked like the biggest lead this round: both load the same two
+stack values into `PPCContext.f[30]`/`f[31]` (offsets 560/568, identical
+stack offsets, identical order - no swap), but **XenDroid then restores
+r14 through r31 (all 18 PPC non-volatile GPRs) plus `lr` from the guest
+stack before its tail-dispatch; AEX restores none of them** (goes straight
+from the two `fmov`s to closing the trace-log entry and branching away).
+Whole-function counts confirm this isn't just this one exit: `str x.., 
+[x20, #150-249]`-shaped restores appear 19× in XenDroid's disassembly vs
+6× in AEX's.
+
+This read at first like a serious, independent correctness gap (PowerPC's
+ABI treats r14-r31 as callee-saved; skipping their restore would corrupt
+whatever the caller stored there). But `a64_backend.cc` only ever discusses
+**host** ARM64 callee-saved registers (x19-x28) in this context - there is
+no mechanism in AEX for caching **guest** PPC registers in host registers
+across a call boundary, so there is nothing to spill back for AEX to skip.
+XenDroid's restore sequence reads as the mirror of an optimization AEX
+doesn't have (caching hot guest GPRs in host registers within a function,
+requiring an explicit spill-to-context before any call/dispatch) rather
+than an ABI requirement AEX forgot.
+
+**Cross-checked against already-completed testing, not just this
+session's reasoning:** doc §39.6/§42.1 already ran AEX with
+`disable_context_promotion=true` - which would force exactly the
+"everything always reads/writes context memory directly, nothing cached in
+host registers" behavior this hypothesis describes - and found the vista
+**stayed broken, bit-identical**. If a missing spill-before-call were the
+cause, forcing the always-memory-backed behavior (eliminating any need to
+spill in the first place) should have changed something. It didn't.
+Ruled out.
+
+### 46.7 ▶️ NEXT
+
+All three FP-relevant clusters in `82177870` are now checked and each has
+a benign explanation (NaN-fixup that's a no-op for non-NaN values, cosmetic
+branch-polarity differences, a caching-strategy difference cross-validated
+against prior `disable_context_promotion` testing). `82177870` remains the
+strongest candidate this investigation has produced - real FP work,
+convergent evidence from two independent techniques - but a full
+instruction-for-instruction diff of the ~4500-instruction function is not
+complete; only the three regions with the densest FP-instruction clusters
+have been examined. What hasn't been tried:
+
+1. **Diff the sections BETWEEN the FP clusters** - the bulk of the
+   function's instructions are `mov`/`str`/`ldr`/`rev` (constant/register
+   marshalling, not obviously FP-related), any of which could still carry
+   the actual bug even without an `fmov`/`fcvt` nearby.
+2. **Find what calls `82177870`** and what it's called WITH - the
+   convergent evidence names this function as *involved*, not necessarily
+   as the ONE place the sign is wrong; an input it receives could already
+   be wrong.
+3. Apply the JIT store-watch (46.1) with the value bracket narrowed to
+   match a SPECIFIC observed camera sample's mantissa (not just sign+
+   exponent) to see whether `82177870` is still implicated once the noise
+   from unrelated same-magnitude floats is removed.
 
 ### 46.6 Tooling added this round
 
