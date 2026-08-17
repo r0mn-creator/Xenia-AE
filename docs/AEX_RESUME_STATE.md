@@ -4,7 +4,43 @@
 Last updated 2026-08-17. **Vista still broken, but the search has a named
 target now.**
 
-## ⚠️⚠️ RESUME HERE (doc §56): the quaternion sign is NOT the cause - re-aim
+## ⭐ RESUME HERE (doc §57): track `c3.x`, produced by `guest_82203D10` - compare its INPUTS
+
+**Blend hypothesis REFUTED** (§57.1). Live camera slot: 35,068 loads. All six
+identity quaternions: **ZERO loads, ZERO stores over 75 s**. Target validity
+re-verified after the zero (identity still reads exactly `(1,0,0,0)`), so it is
+a measurement. The vista is flipped continuously, so its cause runs every frame -
+a blend that never executes cannot be it. That was the last mechanism by which
+the quaternion's `w` sign could matter, so **the quaternion thread is closed**.
+
+**`c3.x` is NOT the quaternion** (§57.2). Sampled at the same instant:
+`c3.x = 0xBF7F5924`, quaternion `w = 0xBF7F40CA` - different bit patterns.
+Scanning 96 MB finds the `c3.x` word **only** in the per-draw staging buffers
+(`0xA514xxxx-0xA51Fxxxx`), never in the camera object ~9 MB away.
+**`c3.x` is the render-relevant value**: §39/§43 measured it POSITIVE 254/254
+(XenDroid) vs NEGATIVE 221/255 (AEX) **at the same magnitude**, and as a
+near-unit element of an uploaded constant register a sign flip there is an
+**axis flip = a reflection** = the symptom.
+
+⭐ **But both share a producer** (§57.3): the top writer of a `c3.x` staging
+address is `guest_lr=0x82203D20 / caller=0x8212BDC4 / grandcaller=0x821A91E0` -
+the same **`guest_82203D10`** §55 named. So the value tracked since §51 was
+wrong, but **the function reached by tracking it is right**, and also produces
+`c3.x`. Two outputs of one function whose inputs differ.
+
+**▶️ DO THIS NEXT:** §55 showed `82203D10`'s sign-relevant codegen is IDENTICAL
+to XenDroid (`fneg` 7/7, `fabs` 3/3, `fdiv` 3/3, `fsqrt` 3/3, `fmadd` 20/20,
+`eor` 7/7), so the divergence is in its **INPUTS**. Use the LOAD watch
+(`debug.canary.jit_load_watch`) to enumerate what it reads, then compare against
+XenDroid. **Prefer phase-independent inputs** (static XEX addresses, or values
+whose magnitude can be matched) - §56.1 showed phase-dependent comparison is
+unreliable.
+
+⚠️ Track **`c3.x`**, not the quaternion. Re-verify any candidate against the
+§39/§43 signature: a **same-magnitude** sign flip. The quaternion FAILED that
+test (magnitudes differ between builds); `c3.x` passes it.
+
+## OLDER (doc §56): the quaternion sign is NOT the cause
 
 **§51's causal claim is REFUTED.** Compared `82203D10`'s inputs against XenDroid
 by aligning the two heaps (identical object layout, bases differing by a
