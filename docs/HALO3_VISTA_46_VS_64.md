@@ -4384,3 +4384,107 @@ vista stayed upside down in both.
    fixing the position path should move both. If the characters improve and the
    vista does not, they are two bugs and the vista needs its own trace - but
    started from the position/skinning path, not the camera.
+
+## 59. ⭐⭐⭐⭐⭐ THE BALL, MECHANISM CLOSED: too few draws -> bone writes batch -> skinned vertices collapse
+
+### 59.1 The ball is a SKINNING failure, and the screenshot proves which kind
+
+Loaded the opening campaign cinematic and looked at what survives versus what
+collapses (`scratchpad/uma_burst3.png`):
+
+* **helmets, individual armour plates, weapons, crates: correct shape.**
+* **torsos and limbs: collapsed into clumped masses.**
+
+That asymmetry is diagnostic. Vertices bound to a **single** bone transform
+correctly; vertices **blended across several** bones collapse toward a point.
+The rigid props are fine because they use one transform. **The bone matrices are
+wrong, not the geometry, not the camera, and not the textures.**
+
+This is exactly the user's framing (§58.1) confirmed visually: a per-vertex
+position defect that spares static level geometry.
+
+### 59.2 It joins §29 and §31 into one complete mechanism
+
+Three measurements already in this file, never connected:
+
+* **§29**: AEX's draws observe **142 distinct bone poses and PLATEAU there**
+  (identical across three samples 1024 draws apart). XDtester exceeds the
+  probe's 512 cap without saturating.
+* **§29**: bone-matrix constant **writes arrive in equal numbers** (434k vs
+  438k).
+* **§31**: AEX issues **~7x fewer draws** (88/frame vs 614/frame), and PM4
+  parsing is **proven lossless** (`packets == entered`, exactly equal), so
+  **the guest itself does not submit them**.
+
+Put together:
+
+```
+guest submits ~7x fewer draws
+        |
+        v
+bone-matrix writes (equal in number) pile up BETWEEN the few draws
+        |
+        v
+each draw observes only the accumulated/final pose - 142 states, saturated
+        |
+        v
+multi-bone skinned vertices are transformed by the wrong bones -> collapse
+        |
+        v
+                    THE BALL
+```
+
+Static level geometry has no bones, so it is untouched - which is precisely why
+**the level renders perfectly while only characters break.**
+
+### 59.3 What this rules OUT
+
+* **Not the GPU backend.** §31 proved parsing is lossless; nothing downstream of
+  the ring buffer can remove draws that were never submitted.
+* **Not zero-copy shared memory.** Verified from the live device: the enabled
+  Vulkan device extensions are only `VK_EXT_memory_budget`,
+  `VK_EXT_non_seamless_cube_map`, `VK_EXT_shader_stencil_export`,
+  `VK_KHR_swapchain` - **`VK_EXT_external_memory_host` is absent**, and
+  XenDroid's `TryInitializeZeroCopy()` requires it. Porting it would be dead
+  code on this hardware. (Its own log line would read "VK_EXT_external_memory_host
+  not available".)
+* **Not `readback_resolve=uma` + host-visible alone.** Tested in gameplay with
+  both on: lighting improves noticeably (user-confirmed) but **the ball
+  remains** (`uma_burst3.png`). Worth keeping for the lighting, not a fix.
+
+### 59.4 ⭐ Where the root cause must be
+
+The guest, running the same XEX under AEX, **submits ~7x fewer draw packets**.
+Nothing in the GPU backend can cause that. It is a **CPU-side guest execution
+divergence** - and it is the same conclusion §56/§57 kept reaching from the
+other end ("the code is identical, so the input differs").
+
+It also unifies the loose ends this file has collected:
+
+* ~7x fewer draws (§31)
+* the guest choosing a 368 scissor where XenDroid chooses 512 (§11), which §11
+  already concluded means "the guest *chooses* differently"
+* `c3.x` negative in 221/255 states rather than all 255 - **state-dependent, not
+  a uniform sign error** (§57)
+* the guest behaving non-deterministically run to run (§22)
+
+Four independent signs of the guest making different decisions. That is one
+upstream cause, not four bugs.
+
+### 59.5 ▶️ NEXT
+
+Stop looking for a wrong *value* and find the wrong *decision*. The guest takes
+a branch differently; find the first one.
+
+1. **Instrument draw submission on the guest side.** The draws are missing from
+   the ring buffer, so find the guest function that *should* emit them and does
+   not. The dispatch loop `guest_821A8FF8` (§49) and its callers are already
+   named and are the visible-object walk - a loop that iterates fewer objects
+   would produce exactly ~7x fewer draws.
+2. **Suspect what the emulator hands the guest**, since the XEX and its static
+   data are byte-identical (§57): kernel export return values, timing/clock,
+   thread scheduling, or uninitialised memory contents. §22's run-to-run
+   non-determinism points at timing or uninitialised state rather than a fixed
+   wrong constant.
+3. **Judge every candidate on the CHARACTERS** (§58.1), and prefer any
+   explanation that also predicts the 368-vs-512 scissor choice.
