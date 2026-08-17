@@ -1,9 +1,48 @@
 # AEX — RESUME STATE (single source of truth)
 
 **Read this first. It is written to be enough on its own.**
-Last updated 2026-08-16 (late evening). **Vista still broken.**
+Last updated 2026-08-17. **Vista still broken.**
 
-## ⭐⭐⭐⭐⭐ LATEST: `825AD9F0` is a DEAD END - ruled out, not confirmed
+## ⭐⭐⭐⭐⭐ LATEST: every FP computation checked so far is CORRECT - the JIT isn't miscompiling the arithmetic
+
+Doc §47. **Correction to §46**: the top `guest_lr` hits that named
+`guest_82177870` (`0x82178360`/`0x8216A70C`) turned out to be a constant
+`-0.5` (coincidentally matches the sign+exponent filter) spamming the
+ranking - not camera data. **Check the VALUE distribution behind a
+`guest_lr`, not just its hit count, before trusting it as signal** - a
+hot constant will always outrank a real but rarer varying value.
+
+Re-ranked by variance instead of frequency and found two cleaner
+candidates: `guest_82205690` (vector length/normalize - `fmul`, `fmadd`,
+`fnmsub`, `fdiv`, `fsqrt`) and `guest_82203D10` (much larger, has the
+first `fneg`/`fabs` this investigation has seen). Went past opcode-count
+comparison this time and checked the actual instructions and their
+register operands directly against XenDroid:
+
+* **`82205690`: PROVABLY IDENTICAL core computation.** The exact
+  `fnmsub`/`fmadd`/`fsqrt` sequence - same registers, same order, same
+  `PPCContext` offsets for both inputs and outputs - matches between AEX
+  and XenDroid instruction-for-instruction. Not "probably the same
+  algorithm" - the same registers were chosen by both compilers.
+* **`82203D10`: one real, large, precisely-localized divergence found**
+  (XenDroid does 15 more multiply/multiply-subtract instructions after a
+  shared loop-dispatch point) but tracing it revealed the function is a
+  generic array-iteration routine (968-byte element stride - bones/lights
+  shaped, not camera-specific), and the actual watched address
+  (`0x82203D20`) is nowhere near this divergence - it's the return point
+  of a nested call 4 guest instructions into the function. Not confirmed
+  as the bug.
+
+**Every function examined this session — `825AD9F0`, `82177870`,
+`82205690`, and most of `82203D10` — translates its floating-point
+arithmetic correctly and identically to XenDroid.** This rules out "the
+JIT miscompiles the arithmetic" as the explanation for any function found
+via convergent evidence so far, and redirects the search toward an INPUT
+that differs before this correctly-computed math runs, or toward a
+genuinely new, not-yet-examined function. Doc §47.5 has four concrete
+next steps.
+
+## OLDER: `825AD9F0` is a DEAD END - ruled out, not confirmed
 
 Doc `docs/HALO3_VISTA_46_VS_64.md` §45 (supersedes §44's tentative
 conclusion - §44 named `guest_825AD9F0` as "the writer" from address-only

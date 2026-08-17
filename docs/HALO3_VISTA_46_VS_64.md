@@ -3205,3 +3205,145 @@ have been examined. What hasn't been tried:
 * `Memory::EnableCamwatchDiag` gained an internal skip for sweep mode so
   the two re-arm strategies (external per-call vs. internal chase-one-page)
   don't fight each other.
+
+## 47. `-0.5` was a false positive; two more candidates checked, arithmetic still provably identical
+
+Same day, later. Re-examined section 46's "top hit" ranking with fresh eyes.
+
+### 47.1 ⭐⭐⭐⭐⭐ `guest_825AD9F0`/`guest_82177870` via `0x82178360`/`0x8216A70C` were noise, not signal
+
+Checked the actual *values* behind the two top `guest_lr` addresses from
+section 46.3 (`0x82178360`: 69,744 hits; `0x8216A70C`: 55,283 hits) - both
+turned out to be **the constant `0xBF000000` (exactly -0.5) on nearly every
+hit**, not varying camera data. `-0.5` has exponent byte 126 (0.5 = 1.0 ×
+2⁻¹), so it coincidentally satisfies the section 46.1 filter bracket
+(sign set, exponent 126) despite having nothing to do with the camera.
+Both addresses are almost certainly a rounding/clamp helper (`x + 0.5`
+pattern or similar) called extremely often - hot enough to dominate the
+hit ranking by sheer call frequency, drowning out the actual signal.
+
+⚠️ **This means section 46's identification of `guest_82177870` as
+involved was built on a contaminated top-of-list read.** The function
+itself remains a legitimate finding (46.3's convergence with section 45
+data still holds, and IS confirmed connected - see 47.3), but the
+*ranking* that made it look dominant was an artifact.
+
+**Lesson for next time: check the VALUE distribution behind a `guest_lr`
+before trusting hit count as a relevance signal.** A hot, constant,
+sign+exponent-matching value will always outrank a real but less frequent
+varying one.
+
+### 47.2 Two cleaner candidates found by filtering on variance, not frequency
+
+Re-ranked all `guest_lr` addresses by "how many DISTINCT values does this
+address write" instead of raw hit count. Four addresses -
+`0x82205790`/`0x822057A4`/`0x82205820`/`0x82205830` - all resolve into one
+function, **`guest_82205690`**, and share overlapping value pools across
+runs (e.g. `0xBF7E68D2` appears under multiple of the four) - consistent
+with one function writing several nearby fields of the same structure once
+per frame. A second, much larger function, **`guest_82203D10`**, was also
+implicated via `0x82203D20` (only 4 guest instructions/0x10 bytes into the
+function - resolves to the guest address right after its own first nested
+call, at line ~43 of the disassembly).
+
+### 47.3 `guest_82205690`: real vector-normalize math, provably identical to XenDroid
+
+1476 instructions (AEX), with genuine arithmetic density: 12 `fmul`, 4
+`fmadd`, 3 `fnmsub`, 3 `fdiv`, 1 `fsqrt`. XenDroid's version (2147
+instructions) matches **every one of those counts exactly** (`fcvt`=100/100,
+`fcmp`=87/87, `fccmp`=32/32, `fmul`=12/12, `fmadd`=4/4, `fsub`=3/3,
+`fnmsub`=3/3, `fdiv`=3/3, `fsqrt`=1/1).
+
+Went further than a count comparison this time: located the actual
+`fnmsub`/`fmadd`/`fsqrt` instructions by line and checked their operands
+directly. **Identical registers, identical order, identical relative
+position** in both disassemblies (`fnmsub d6, d7, d11, d8` at AEX line 683
+= XenDroid line 1006; `fmadd d5, d6, d6, d5` then `fmadd d4, d4, d4, d5`
+then `fsqrt d4, d4` - a textbook squared-length-then-sqrt sequence - at
+AEX 1280/1308/1331 = XenDroid 1911/1943/1969). Also confirmed the
+immediate inputs match: both store to the same `PPCContext` offsets (560,
+568, 408, 392, 328) from the same guest-stack source offsets. **This
+function's core computation is provably, not just statistically,
+identical between the two builds.**
+
+`guest_82205690` reads `PPCContext.f[30]` (offset 560) as its first real
+action; `guest_82177870` (section 46) *writes* `f[30]`/`f[31]` right before
+its own tail-dispatch. Strongly suggestive of a real pipeline connection
+between the two functions, though the exact call mechanism is an indirect
+dispatch through a shared resolver stub (`br x9` to a low, fixed code-cache
+address, not a direct jump) that wasn't confirmed by static address
+computation alone.
+
+### 47.4 `guest_82203D10`: large divergence found, but traces to a generic per-element loop, not confirmed camera-specific
+
+3306 instructions (AEX) vs 6309 (XenDroid) - the largest size gap of any
+function compared this session (~91% larger, not ~1-27% like the others).
+Has the first `fneg` (7×) and `fabs` (3×) instructions seen in this whole
+investigation - explicit sign manipulation, a strong prior for relevance.
+
+Aligned both disassemblies on the 10 `fneg`/`fabs` instructions as anchors
+(all in identical relative order, same register `d4`, in both trees) and
+bucketed the `fmul`/`fnmsub` instruction count between each pair of
+anchors: **every bucket matched exactly except the last one** (after the
+final `fabs`) - AEX has 3 there, XenDroid has 18. A precisely localized
+15-instruction gap.
+
+Traced both sides of that gap by hand. Through a `cmp`-and-branch
+(comparing two magnitudes, storing `lt`/`gt`/`eq`/`vs` flags, matching a
+"which is the larger" style decision) and a divide-then-multiply-by-3
+sequence (normalize-by-ratio, writing 3 consecutive guest words), AEX and
+XenDroid stay **logically equivalent** - same registers, same context
+offsets, only the by-now-familiar cosmetic branch-polarity and NaN-fixup
+differences. Past that point, both reach a `cmp w22, #6` / three-flag-store
+block, then a **backward branch** (`cbnz`/`cbz`+`b`, AEX `-3512` bytes,
+XenDroid `-5188` bytes) whose polarity also matches - a loop, sized
+proportionally larger in XenDroid by the same accumulated boilerplate
+factor as everything else found this session.
+
+Followed the loop-exit path (the "not looping back" case) in both: a call
+to another guest function at a constant address, then - only in
+XenDroid's stream at this point - the same 18-non-volatile-register-restore
+pattern from section 46.6, already cross-checked there against
+`disable_context_promotion=true` testing and ruled benign.
+
+**Traced what `0x82203D20` (the address that originally implicated this
+function) actually corresponds to**: guest offset 0x10 into the function -
+i.e. the return point of a nested call made almost immediately after the
+prologue, nowhere near the `fneg`/`fabs`/loop region examined above. The
+loop body indexes an array with a 968-byte element stride (`mul x24, x24,
+#968` at AEX line 77) - the shape of iterating bones, lights, or a similar
+per-object list, not a signature specific to "the camera." **Not confirmed
+as the source of the bug** - a real, large, well-localized divergence, but
+its relevance is unproven, unlike 47.3's clean result for `82205690`.
+
+### 47.5 Where this leaves the investigation
+
+Every floating-point computation examined and traced to instruction-level
+detail this session - across `guest_825AD9F0`, `guest_82177870`,
+`guest_82205690`, and most of `guest_82203D10` - has come back **correctly
+and identically translated** by AEX's JIT compared to XenDroid's. This is
+a substantive negative result: it is no longer plausible that "the JIT
+miscompiles the arithmetic" is the answer for any of the functions found
+via convergent evidence so far.
+
+**▶️ NEXT for whoever resumes this:**
+
+1. **The input, not the computation.** Since every checked computation is
+   correct, an input reaching it (a constant table value, a kernel-reported
+   quantity, or state set by a not-yet-examined earlier function) is the
+   remaining live hypothesis. Section 46.4 already noted a fixed
+   guest constant-table read at `0x82000AF8` inside `82177870` - comparing
+   its raw bytes between a live AEX and XenDroid process (should be pure
+   game data, so expected to match, but unverified) is a cheap next check.
+2. **Confirm or refute the `82177870` → `82205690` pipeline** (47.3) by
+   watching `PPCContext.f[30]`/`f[31]` writes specifically, or by resolving
+   the indirect dispatch stub's actual target at runtime, rather than by
+   static address computation.
+3. **`82203D10`'s loop body** (the part between the ring-log prologue and
+   the `fneg`/`fabs` region examined in 47.4) was never actually
+   disassembled/compared - only its trailing dispatch/exit logic was.
+4. Sections 44-46's candidates are exhausted for the "does this specific
+   function's arithmetic match" question. A genuinely new candidate would
+   need a different targeting method - e.g. narrowing the JIT watch to a
+   specific sample's exact mantissa (46.7's idea 3, still untried) to name
+   a function this session hasn't already ruled out.
