@@ -4,7 +4,30 @@
 Last updated 2026-08-17. **Vista still broken, but the search has a named
 target now.**
 
-## ⭐⭐⭐⭐⭐ LATEST (doc §49): named `8212BCE0`'s caller - it's a generic dispatch loop
+## ⭐⭐⭐⭐⭐ LATEST (doc §50): one hypothesis refuted, next watch needs re-aiming
+
+Captured two more live fields on the existing watch (no new mechanism -
+same struct, same site): `ctx328`/`ctx568` (the node-to-node data channel
+§49.3 spotted) and `r24`/`r26`/`r28` (§48.3's identified pointer-arithmetic
+inputs).
+
+**`ctx328` is a constant `4.0` across 19,292 samples, zero variance** -
+it's a fixed handler-selector value, not camera data, and since §49.4
+already showed the call sequence itself is baked into the (identical,
+same-XEX) guest binary, this can't be the source of a build-to-build
+divergence. **The "node channel" hypothesis from §49.3 is retracted.**
+
+**`r24`/`r26`/`r28` came back real and stable** (`0xA5AFE52C`,
+`0xA5AFE4C4`, `0x82745EA4`) but with an important caveat found while
+writing this up: the watch fires *inside* `82203D10`, not inside
+`8212BCE0` - and GPRs are shared context-global state, so these values may
+be `82203D10`'s OWN loop pointers (§47.2: it's its own generic
+array-iteration routine), not the `8212BCE0` pre-call values §48.3
+described. **Next watch needs to fire inside `8212BCE0` itself**, right
+after its `fsub d4,d4,d5` (already located in 48.3), to get the actual
+inputs unambiguously - see doc §50.3.
+
+## OLDER (doc §49): named `8212BCE0`'s caller - it's a generic dispatch loop
 
 Extended the caller-aware watch (§48.1) one frame further
 (`grandcaller_guest_addr`, `stackpoints[current_stackpoint_depth-2]` - same

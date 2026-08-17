@@ -3537,10 +3537,69 @@ far.
   values from a running AEX process at the watched moment and read the
   guest memory those pointers name, then repeat on XenDroid at the
   equivalent point, to compare the actual INPUT rather than more code.
-* Given 49.3's dispatch-table shape, comparing the **node list / handler
-  table contents** between AEX and XenDroid (not just this one node's
-  code) may be a shorter path than continuing to trace individual pointer
-  chains - if the two builds walk the same table in a different order, or
-  with a different node's data at this slot, that alone would explain a
-  mirrored-camera-only symptom without needing every downstream pointer
-  traced.
+* **Correction, checked immediately after writing 49.3**: the call targets
+  in `821A8FF8` are `mov`/`movk` **compile-time immediates**, not a value
+  loaded from a guest-memory table at runtime. This is a straight-line
+  sequence of `bl <fixed address>` calls baked into the original Xbox 360
+  binary itself - since AEX and XenDroid run the **same XEX**, this exact
+  call sequence is necessarily identical between builds by construction.
+  There is no runtime "table contents" to compare here - retracting that
+  half of 49.3's framing. The generic-handler-shape observation about
+  `8212BCE0` itself still stands; it's the caller that isn't a data table.
+* The real next step is still 48.5 step 2, unblocked now that a stable,
+  named watch point exists: capture the live `r24`/`r26`/`r28` context
+  register VALUES (not just the code reading them) at the moment
+  `8212BCE0` is entered from `821A8FF8`, then read the same slots from a
+  running XenDroid process at the equivalent point, to compare the actual
+  per-frame INPUT DATA.
+
+## 50. Captured live ctx328/568 and r24/r26/r28 - one hypothesis refuted, one lead needs re-aiming
+
+Extended the watch struct twice more (same mechanism, plain context reads
+at the existing watch site - no new infra): first `ctx328`/`ctx568` (the
+node-to-node data channel 49.3 spotted), then `r24`/`r26`/`r28`
+(48.3's identified pointer-arithmetic inputs, PPCContext offsets
+224/240/256).
+
+### 50.1 `ctx328` is a constant `4.0` - the node-channel hypothesis is REFUTED
+
+Across all 19,292 hits sampled, `ctx328` was `0x4010000000000000` (IEEE
+double `4.0`) and `ctx568` was always `0.0`, with zero variance. This is
+not per-frame camera data - it reads like a fixed type/case selector
+identifying which handler `821A8FF8`'s dispatch loop is invoking, constant
+because the call site itself is fixed (49.4 already established the call
+sequence is baked into the guest binary, identical between builds by
+construction). **Retracting the "node channel" as a source of the
+divergence** - it's the same fixed value in both builds by necessity, not
+a plausible carrier of a mirrored camera.
+
+### 50.2 `r24`/`r26`/`r28` are real, stable, plausible addresses - but likely belong to `82203D10`, not `8212BCE0`
+
+Live values (stable across a full 30s sample, same on every one of 7,219
+hits): `r24=0xA5AFE52C`, `r26=0xA5AFE4C4` (104 bytes apart, both in the
+physical-alias RAM range the rest of this investigation already uses),
+`r28=0x82745EA4` (sign-extended in the 64-bit slot - real 32-bit value -
+looks like a fixed table/object base pointer, not a per-frame address).
+
+**Important caveat, not yet resolved**: this watch fires *inside*
+`82203D10`, several instructions past where `8212BCE0` calls into it.
+`r24`/`r26`/`r28` are PowerPC GPRs - shared, global context slots, free to
+be reused by any function. §47.2 already characterized `82203D10` as its
+own generic array-iteration routine (968-byte stride). **These captured
+values may be `82203D10`'s own loop pointers, not the `r24`/`r26`/`r28`
+that fed `8212BCE0`'s pre-call pointer arithmetic described in 48.3** -
+the two are easy to conflate because they share register names but are
+almost certainly different call frames' data, and the register file
+doesn't distinguish them.
+
+### 50.3 ▶️ NEXT
+
+To get 48.3's ACTUAL inputs unambiguously, the watch needs to fire
+*inside `8212BCE0` itself*, immediately before its call to `82203D10` -
+not inside `82203D10`. Concretely: add a second, narrower watch keyed on
+`guest_lr`/caller `== 0x8212BDC4`'s containing function rather than the
+float-store filter, or simply add a one-off store-and-log right after the
+`fsub d4,d4,d5` this investigation already located in `8212BCE0`'s own
+disassembly (48.3) - that guarantees the captured `r24`/`r26`/`r28` are
+the actual pointer-arithmetic inputs, not a downstream function's reuse
+of the same register slots.

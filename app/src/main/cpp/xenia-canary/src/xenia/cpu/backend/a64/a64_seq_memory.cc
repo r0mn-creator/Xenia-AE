@@ -297,6 +297,23 @@ struct AeJitWatchEntry {
   // guest_8212BCE0 itself and set up r24/r26/r28 for it. Zero if fewer
   // than 2 frames are pushed.
   uint32_t grandcaller_guest_addr;
+  // DIAG(gpu/camera): section 49.4 - 821A8FF8's dispatch loop passes data
+  // node-to-node through two fixed PPCContext double slots (confirmed in
+  // its disassembly: "ldr d4,[x20,#568]; str d4,[x20,#328]" runs right
+  // before EVERY call in the sequence) - offset 328 is this call's
+  // argument, offset 568 is the previous call's result. Raw bit pattern,
+  // not reinterpreted as double host-side, so a mismatch is visible even
+  // if it's NaN.
+  uint64_t arg_ctx328;
+  uint64_t result_ctx568;
+  // DIAG(gpu/camera): section 48.5 step 2 - the actual pointer-arithmetic
+  // inputs 48.3 identified (PPCContext r24/r26/r28, offsets 224/240/256 -
+  // r[n] array starts at 0x20, each slot 8 bytes). Captures the raw
+  // register values so [r24+r28] can be read from guest RAM directly in a
+  // follow-up, on both trees, at this exact live moment.
+  uint64_t r24;
+  uint64_t r26;
+  uint64_t r28;
 };
 constexpr uint32_t kAeJitWatchRingSize = 64;
 AeJitWatchEntry g_ae_jit_watch_ring[kAeJitWatchRingSize];
@@ -318,9 +335,12 @@ void DumpAeJitStoreWatch() {
         g_ae_jit_watch_ring[seq % kAeJitWatchRingSize];
     XELOGI(
         "JITWATCH seq={} guest_addr=0x{:08X} value=0x{:08X} guest_lr=0x{:08X} "
-        "caller=0x{:08X} grandcaller=0x{:08X}",
+        "caller=0x{:08X} grandcaller=0x{:08X} ctx328=0x{:016X} "
+        "ctx568=0x{:016X} r24=0x{:016X} r26=0x{:016X} r28=0x{:016X}",
         seq, entry.guest_addr, entry.value, entry.guest_lr,
-        entry.caller_guest_addr, entry.grandcaller_guest_addr);
+        entry.caller_guest_addr, entry.grandcaller_guest_addr,
+        entry.arg_ctx328, entry.result_ctx568, entry.r24, entry.r26,
+        entry.r28);
   }
   g_ae_jit_watch_ring_dumped = written;
 }
@@ -651,6 +671,25 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
                                     offsetof(ppc::PPCContext, lr))));
         e.str(e.w15, ptr(e.x2, static_cast<uint32_t>(
                                    offsetof(AeJitWatchEntry, guest_lr))));
+        // ctx328/ctx568: section 49.4's node-to-node data channel - see
+        // AeJitWatchEntry's comment. Plain context reads, x20 is the
+        // PPCContext base register everywhere else in this file already.
+        e.ldr(e.x13, ptr(e.x20, 328));
+        e.str(e.x13, ptr(e.x2, static_cast<uint32_t>(
+                                   offsetof(AeJitWatchEntry, arg_ctx328))));
+        e.ldr(e.x13, ptr(e.x20, 568));
+        e.str(e.x13,
+              ptr(e.x2, static_cast<uint32_t>(
+                            offsetof(AeJitWatchEntry, result_ctx568))));
+        e.ldr(e.x13, ptr(e.x20, 224));
+        e.str(e.x13, ptr(e.x2, static_cast<uint32_t>(
+                                   offsetof(AeJitWatchEntry, r24))));
+        e.ldr(e.x13, ptr(e.x20, 240));
+        e.str(e.x13, ptr(e.x2, static_cast<uint32_t>(
+                                   offsetof(AeJitWatchEntry, r26))));
+        e.ldr(e.x13, ptr(e.x20, 256));
+        e.str(e.x13, ptr(e.x2, static_cast<uint32_t>(
+                                   offsetof(AeJitWatchEntry, r28))));
         // caller_guest_addr: read A64BackendStackpoint - x19's own fields,
         // offsets confirmed against a64_backend.h (152=stackpoints,
         // 172=current_stackpoint_depth), same struct
