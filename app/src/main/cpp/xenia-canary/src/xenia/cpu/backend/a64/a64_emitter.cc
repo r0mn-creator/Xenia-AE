@@ -123,9 +123,43 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
   fpcr_mode_ = FPCRMode::Unknown;
 
   // Try to emit.
+  //
+  // xbyak throws Xbyak_aarch64::Error("code is too big") when a single
+  // function's emitted code exceeds kMaxCodeSize, and an uncaught C++
+  // exception here kills the whole emulator process. Halo 4 did exactly that,
+  // 7 s into boot: SIGABRT on MAIN_THREAD with
+  //   'uncaught exception of type Xbyak_aarch64::Error: code is too big'
+  // and a backtrace of ResolveFunction -> Translate -> Assemble -> Emit.
+  //
+  // Catching it turns "the emulator vanishes" into "one guest function fails
+  // to compile", which the caller already knows how to report, and lets us log
+  // WHICH function and HOW big - the numbers needed to tell a legitimately
+  // enormous guest function apart from a codegen pathology on our side.
   EmitFunctionInfo func_info = {};
-  if (!Emit(builder, func_info)) {
+  bool emit_ok;
+  try {
+    emit_ok = Emit(builder, func_info);
+  } catch (const Xbyak_aarch64::Error& e) {
+    XELOGE(
+        "JITSIZE OVERFLOW guest={:08X} emitted>={} bytes limit={} bytes: {}",
+        current_guest_function_, getSize(), kMaxCodeSize, e.what());
+    // Emplace() is what normally calls reset(); it is not reached on this
+    // path, so the buffer would stay full and poison every later function
+    // compiled by this (per-thread, reused) emitter.
+    reset();
+    tail_code_.clear();
     return false;
+  }
+  if (!emit_ok) {
+    return false;
+  }
+
+  // Report any function that gets within reach of the limit, so the headroom
+  // is observable before it becomes another crash rather than after.
+  if (func_info.code_size.total > (kMaxCodeSize / 4)) {
+    XELOGW("JITSIZE large guest={:08X} emitted={} bytes ({}% of limit)",
+           current_guest_function_, func_info.code_size.total,
+           (func_info.code_size.total * 100) / kMaxCodeSize);
   }
 
   // Emplace the code into the code cache.

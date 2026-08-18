@@ -1497,7 +1497,17 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
       std::min(uint32_t(page_table_.size()) - 1, high_page_number);
 
   if (page_count > (high_page_number - low_page_number)) {
-    XELOGE("BaseHeap::Alloc page count too big for requested range");
+    // HEAPDIAG: Halo 4 dies during boot after eight failed
+    // MmAllocatePhysicalMemoryEx calls, the last of which asks for only 64 KB
+    // while the parent heap reports ~492 MB free. "Not enough room" cannot
+    // explain that, so log the actual bounds rather than guessing which of
+    // range, alignment or tracker state is at fault.
+    XELOGE(
+        "BaseHeap::Alloc page count too big for requested range "
+        "[HEAPDIAG lo={:08X} hi={:08X} size={} align={} pages={} "
+        "lo_pg={} hi_pg={} span_pg={} top_down={}]",
+        low_address, high_address, size, alignment, page_count, low_page_number,
+        high_page_number, high_page_number - low_page_number, top_down ? 1 : 0);
     return false;
   }
 
@@ -1590,7 +1600,29 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
 
   if (start_page_number == UINT_MAX || end_page_number == UINT_MAX) {
     // Out of memory.
-    XELOGE("BaseHeap::Alloc failed to find contiguous range");
+    // HEAPDIAG: report the bounds AND what the tracker actually holds. A
+    // 64 KB request failing against ~492 MB free means either the search
+    // range is wrong or the free-block tracker disagrees with reality, and
+    // the largest free block distinguishes the two immediately.
+    uint32_t largest_block = 0, largest_at = 0, blocks_in_range = 0;
+    for (const auto& b : free_blocks_) {
+      if (b.second > largest_block) {
+        largest_block = b.second;
+        largest_at = b.first;
+      }
+      if (b.first + b.second > low_page_number && b.first <= high_page_number) {
+        ++blocks_in_range;
+      }
+    }
+    XELOGE(
+        "BaseHeap::Alloc failed to find contiguous range "
+        "[HEAPDIAG lo={:08X} hi={:08X} size={} align={} pages={} stride={} "
+        "lo_pg={} hi_pg={} top_down={} blocks={} in_range={} "
+        "largest={}pg@{} ]",
+        low_address, high_address, size, alignment, page_count,
+        page_scan_stride, low_page_number, high_page_number, top_down ? 1 : 0,
+        uint32_t(free_blocks_.size()), blocks_in_range, largest_block,
+        largest_at);
     // assert_always("Heap exhausted!");
     return false;
   }
