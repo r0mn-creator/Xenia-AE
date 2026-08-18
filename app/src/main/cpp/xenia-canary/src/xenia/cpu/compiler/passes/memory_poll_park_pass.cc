@@ -11,6 +11,7 @@
 
 #include <unordered_set>
 
+#include "xenia/base/ae_fix_toggle.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/cpu/hir/hir_builder.h"
@@ -56,7 +57,13 @@ MemoryPollParkPass::MemoryPollParkPass() : CompilerPass() {}
 MemoryPollParkPass::~MemoryPollParkPass() {}
 
 bool MemoryPollParkPass::Run(HIRBuilder* builder) {
-  if (!cvars::park_memory_poll_loops) {
+  // Runtime A/B (Canary AEX): see the note in delay_countdown_collapse_pass.
+  //   setprop debug.canary.exp_park_memory_polls 1
+  // This is the RISKIEST of the three - it parks an indefinite poll loop and
+  // relies on something external to wake it, so it is the prime suspect for
+  // the s34 wedge. Test it last, and only on its own.
+  if (!cvars::park_memory_poll_loops &&
+      !XE_AE_EXPERIMENT_ENABLED("debug.canary.exp_park_memory_polls")) {
     return true;
   }
   for (auto block = builder->first_block(); block; block = block->next) {
@@ -165,9 +172,14 @@ bool MemoryPollParkPass::TryInstrumentLoop(HIRBuilder* builder, Block* block) {
       ++delay_count;
       continue;
     }
-    // (XenDroid also tolerates OPCODE_CHECK_PREEMPT here; that opcode belongs
-    // to PreemptCheckInjectionPass, which is not ported, so it never appears.)
-    if (op == &OPCODE_MEMORY_BARRIER_info ||
+    // OPCODE_CHECK_PREEMPT is a safepoint marker with no data effect, put at
+    // the head of every loop by PreemptCheckInjectionPass. Rejecting it would
+    // disqualify every candidate whenever the cooperative scheduler is on.
+    // Restored 2026-08-18: the note here said the opcode could never appear
+    // because that pass was not ported, which stopped being true when the
+    // scheduler landed.
+    if (op == &OPCODE_CHECK_PREEMPT_info ||
+        op == &OPCODE_MEMORY_BARRIER_info ||
         op == &OPCODE_LOAD_CONTEXT_info ||
         op == &OPCODE_STORE_CONTEXT_info) {
       continue;

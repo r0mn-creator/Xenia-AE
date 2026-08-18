@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "xenia/base/ae_fix_toggle.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/cpu/ppc/ppc_context.h"
@@ -64,7 +65,10 @@ SpinLoopBackoffPass::SpinLoopBackoffPass() : CompilerPass() {}
 SpinLoopBackoffPass::~SpinLoopBackoffPass() {}
 
 bool SpinLoopBackoffPass::Run(HIRBuilder* builder) {
-  if (!cvars::collapse_ctr_spin_loops) {
+  // Runtime A/B (Canary AEX): see the note in delay_countdown_collapse_pass.
+  //   setprop debug.canary.exp_collapse_ctr_spins 1
+  if (!cvars::collapse_ctr_spin_loops &&
+      !XE_AE_EXPERIMENT_ENABLED("debug.canary.exp_collapse_ctr_spins")) {
     return true;
   }
   for (auto block = builder->first_block(); block; block = block->next) {
@@ -252,12 +256,16 @@ bool SpinLoopBackoffPass::TryCollapseLoop(HIRBuilder* builder, Block* block) {
       delays.push_back(instr);
       continue;
     }
-    // NOTE (Xenia-AE port): XenDroid also tolerates OPCODE_CHECK_PREEMPT here,
-    // a safepoint marker their PreemptCheckInjectionPass puts at the head of
-    // every loop. We have not ported the cooperative guest scheduler, so that
-    // opcode does not exist in our HIR and no such marker can appear. If the
-    // scheduler is ever ported, re-add the skip here or this collapse will
-    // silently stop firing.
+    if (op == &OPCODE_CHECK_PREEMPT_info) {
+      // A safepoint marker with no data effect. PreemptCheckInjectionPass puts
+      // one at the head of every loop, so rejecting it here silently disables
+      // this collapse whenever the cooperative scheduler is on. Collapsing
+      // removes the loop and the safepoint with it.
+      //
+      // Restored 2026-08-18, doing what the note this replaces asked for: the
+      // scheduler has since been ported, so the marker can now appear.
+      continue;
+    }
     if (op == &OPCODE_LOAD_CONTEXT_info) {
       if (load_ctr || instr->src1.offset != kCtrOffset ||
           instr->dest->type != INT64_TYPE) {

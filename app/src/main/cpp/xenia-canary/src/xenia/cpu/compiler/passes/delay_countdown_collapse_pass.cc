@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "xenia/base/ae_fix_toggle.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/cpu/hir/hir_builder.h"
@@ -218,7 +219,19 @@ DelayCountdownCollapsePass::DelayCountdownCollapsePass() : CompilerPass() {}
 DelayCountdownCollapsePass::~DelayCountdownCollapsePass() {}
 
 bool DelayCountdownCollapsePass::Run(HIRBuilder* builder) {
-  if (!cvars::collapse_memory_delay_spins) {
+  // Runtime A/B (Canary AEX): the cvar still ships off, but the pass can be
+  // switched on for a session with
+  //   setprop debug.canary.exp_collapse_delay_spins 1
+  // and needs no rebuild. This exists because the 2026-08-13 attempt (s34)
+  // enabled this pass AND park_memory_poll_loops together, saw Halo 3 wedge,
+  // and defaulted both off without ever learning which one did it. The three
+  // passes have very different risk: this one and collapse_ctr_spin_loops
+  // collapse a BOUNDED, self-terminating countdown to a provable exit state,
+  // while park_memory_poll_loops parks an INDEFINITE poll that needs something
+  // external to wake it. Only the last of those depends on the scheduler, so
+  // they must be measured one at a time.
+  if (!cvars::collapse_memory_delay_spins &&
+      !XE_AE_EXPERIMENT_ENABLED("debug.canary.exp_collapse_delay_spins")) {
     return true;
   }
   for (auto block = builder->first_block(); block; block = block->next) {
@@ -308,8 +321,22 @@ bool DelayCountdownCollapsePass::TryCollapseDelayCountdown(HIRBuilder* builder,
       delays.push_back(instr);
       continue;
     }
-    // (XenDroid tolerates OPCODE_CHECK_PREEMPT here; that opcode belongs to
-    // PreemptCheckInjectionPass, which is not ported, so it never appears.)
+    if (op == &OPCODE_CHECK_PREEMPT_info) {
+      // A safepoint marker with no data effect. PreemptCheckInjectionPass runs
+      // before this pass and puts one at the head of every loop it finds, so
+      // rejecting it here would disqualify every candidate whenever the
+      // cooperative scheduler is on. Collapsing the loop removes the need for
+      // the safepoint; the one surviving body pass keeps its check.
+      //
+      // Restored 2026-08-18. The note this replaces said the opcode "never
+      // appears" because PreemptCheckInjectionPass was not ported - true when
+      // written, false since the scheduler landed. It also predicted exactly
+      // this: "if the scheduler is ever ported, re-add the skip here or this
+      // collapse will silently stop firing." It is currently dormant rather
+      // than harmful only because guest_scheduler defaults off, which makes
+      // the injection pass a no-op.
+      continue;
+    }
     if (op == &OPCODE_LOAD_OFFSET_info) {
       counter_loads.emplace_back(instr, counter_store != nullptr);
       continue;
