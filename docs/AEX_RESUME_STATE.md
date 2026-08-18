@@ -1,8 +1,62 @@
 # AEX — RESUME STATE (single source of truth)
 
 **Read this first. It is written to be enough on its own.**
-Last updated 2026-08-17. **Vista still broken, but the search has a named
-target now.**
+Last updated 2026-08-17.
+
+## ✅ HALO 3 IS SOLVED — vista upright, ball gone (doc §68)
+
+**Both symptoms were ONE defect, fixed in one line** (`7dcf62b73`).
+
+`EmitSHORT_4` (UNPACK path, `cpu/backend/a64/a64_seq_vector.cc`) reorders
+sign-extended lanes into PPC vector word order. It did `rev64` **followed by
+`ext(..., 8)`** — and that `ext` rotated the result by one 64-bit half, giving
+the right four values in the **wrong half order**. Via `vupkd3d128` type 4:
+
+```
+x64      : [4040512E 40402A47 4040568E 403FE95B]
+a64 (old): [4040568E 403FE95B 4040512E 40402A47]   <-- halves swapped
+```
+
+**SHORT_4 is a compressed vertex POSITION format**, so this fed wrong
+coordinates into every mesh using it. **Fix: delete the `ext`.**
+
+**Verified on device** (Odin 2 / Turnip R8, nothing else changed):
+* the menu **vista renders right side up** — sky above, ground below;
+* the character **"ball" is gone** — faces, helmets, armour, articulated fingers.
+
+Found in **XenDroid commit `82ec8977d`** "[A64] Fix SHORT_4 unpack lane order",
+credited there with the a64 visual bugs in **Halo 3, Halo 3: ODST, Halo: Reach,
+Halo 4 and Nier** — **those titles should be re-tested, they likely improve.**
+XenDroid's `UNPACK_SHORT_4` regression test is ported into
+`cpu/testing/unpack_test.cc`; the old sequence passes every other test and only
+that one catches the half swap.
+
+### ⚠️ Two process lessons, both expensive
+
+1. **Search the reference fork's COMMIT HISTORY first.**
+   `git -C /home/roman/xeniatest/xendroid-git log --all -i --grep=halo` found
+   this in minutes, after ~40 documented sections of on-device measurement did
+   not. Their commit message named the game, the instruction, the exact wrong
+   lane values and the fix. **Do this before building probes.**
+2. **When a diff is misaligned, RE-ALIGN it — do not discard what it showed.**
+   This exact difference was on screen earlier in the same session; the tool had
+   aligned AEX's UNPACK against XenDroid's PACK, and the misalignment was
+   (correctly) noticed and then the difference underneath it was thrown away.
+
+### ▶️ What is still open
+
+* **Performance**, not correctness: Halo 3 runs ~4-8 FPS in gameplay vs
+  XenDroid's ~20. See `project_xenia_ae_jit_hotspot` and
+  `project_xendroid_comparison`.
+* `debug.canary.shared_memory_host_visible` measurably improves **lighting**
+  (user-confirmed) and is still **default OFF**; worth a decision now that the
+  geometry is correct.
+* **Three in-tree probes decode guest memory little-endian and must be fixed or
+  deleted before anyone quotes them**: `RECFIELD0`, `RECFIELD2`, `VALSHAPE`
+  (doc §67). Use `scratchpad/recfield.py` instead.
+* AEX lacks `shared_memory_zero_copy` entirely, but `VK_EXT_external_memory_host`
+  is **absent on Turnip**, so porting it would be dead code on this hardware
+  (§59.3).
 
 ## ⭐ RESUME HERE (doc §57): track `c3.x`, produced by `guest_82203D10` - compare its INPUTS
 
