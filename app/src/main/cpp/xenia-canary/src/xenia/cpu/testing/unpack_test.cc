@@ -117,6 +117,36 @@ TEST_CASE("UNPACK_SHORT_2", "[instr]") {
       });
 }
 
+TEST_CASE("UNPACK_SHORT_4", "[instr]") {
+  // REGRESSION: the a64 backend's SHORT_4 unpack used to follow its rev64 with
+  // an ext(..., 8), which rotated the result by one 64-bit half and produced
+  // the right four values in the WRONG HALF ORDER. SHORT_4 is a compressed
+  // vertex POSITION format, so this fed wrong coordinates into every mesh
+  // using it - it is what made Halo 3's menu vista render upside down and its
+  // characters collapse into a "ball". Ported from XenDroid 82ec8977d.
+  TestFunction test([](HIRBuilder& b) {
+    StoreVR(b, 3, b.Unpack(LoadVR(b, 4), PACK_TYPE_SHORT_4));
+    b.Return();
+  });
+  test.Run([](PPCContext* ctx) { ctx->v[4] = vec128i(0); },
+           [](PPCContext* ctx) {
+             auto result = ctx->v[3];
+             REQUIRE(result ==
+                     vec128i(0x40400000, 0x40400000, 0x40400000, 0x40400000));
+           });
+  test.Run(
+      [](PPCContext* ctx) {
+        ctx->v[4] = vec128i(0xCDCDCDCD, 0xCDCDCDCD, 0x512E2A47, 0x568EE95B);
+      },
+      [](PPCContext* ctx) {
+        auto result = ctx->v[3];
+        // The two 64-bit result halves must keep THIS order; the old a64
+        // sequence returned them swapped.
+        REQUIRE(result ==
+                vec128i(0x4040512E, 0x40402A47, 0x4040568E, 0x403FE95B));
+      });
+}
+
 TEST_CASE("UNPACK_UINT_2101010", "[instr]") {
   TestFunction test([](HIRBuilder& b) {
     StoreVR(b, 3, b.Unpack(LoadVR(b, 4), PACK_TYPE_UINT_2101010));
