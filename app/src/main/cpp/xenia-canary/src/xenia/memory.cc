@@ -266,15 +266,75 @@ bool Memory::Initialize() {
       kMemoryAllocationReserve | kMemoryAllocationCommit,
       !cvars::protect_zero ? kMemoryProtectRead | kMemoryProtectWrite
                            : kMemoryProtectNoAccess);
-  heaps_.physical.AllocFixed(0x1FFF0000, 0x10000, 0x10000,
-                             kMemoryAllocationReserve, kMemoryProtectNoAccess);
+  // The last 64 KB of PHYSICAL memory was reserved as a guard. Halo 4 sizes
+  // its big allocation as "everything from the first free page up to
+  // 0x20000000" and so asks for this range too - it was the final 16 pages
+  // standing between the title and a successful boot. The virtual guard at
+  // 0x00000000 (above) is untouched; this only releases the physical top.
+  // Toggle: debug.canary.fix_free_physical_top_guard (default ON).
+  if (!XE_AE_FIX_ENABLED("debug.canary.fix_free_physical_top_guard")) {
+    heaps_.physical.AllocFixed(0x1FFF0000, 0x10000, 0x10000,
+                               kMemoryAllocationReserve,
+                               kMemoryProtectNoAccess);
+  }
 
   // GPU writeback.
   // 0xC... is physical, 0x7F... is virtual. We may need to overlay these.
-  heaps_.vC0000000.AllocFixed(
-      0xC0000000, 0x01000000, 32,
-      kMemoryAllocationReserve | kMemoryAllocationCommit,
-      kMemoryProtectRead | kMemoryProtectWrite);
+  //
+  // This reserves the first 16 MB of GUEST PHYSICAL memory, and that is what
+  // stopped Halo 4 booting. The title asks for ~492 MB of contiguous physical
+  // memory in the window [0x00FE0000, 0x1FC00000] - a window exactly the size
+  // of the request, so it has to start at page 4064. The reservation owns
+  // pages 0..4095, so the free block begins at 4096 and every one of the
+  // eight retries came up short by exactly 32 pages (128 KB). It then called
+  // RtlRaiseException and the process died.
+  //
+  // The reservation cannot be shrunk through vC0000000: that heap has 16 MB
+  // pages, so AllocFixed rounds any size up to the full 16 MB. Reserve in the
+  // parent physical heap instead, which has 4 KB pages.
+  //
+  // Why shrinking is safe: nothing writes to physical 0 unconditionally. GPU
+  // writeback is redirected to virtual 0x7F000000 + offset and bounded by the
+  // guest's WRITEBACK_SIZE register (see
+  // pm4_command_processor_implement.h, ExecutePacketType3 write-back path).
+  // That is the command-processor read-pointer writeback - kilobytes at most.
+  // Reserving all 16 MB was maximally defensive; keeping 15 MB leaves an
+  // enormous margin over anything a read-pointer writeback can use, while
+  // handing the top 1 MB back as ordinary guest RAM, which is what Halo 4
+  // needs 128 KB of.
+  //
+  // Toggle: debug.canary.fix_gpu_writeback_reserve (default ON; set 0 to
+  // restore the original full-16 MB reservation and bisect).
+  static constexpr uint32_t kGpuWritebackRegionSize = 0x01000000;  // 16 MB
+  // 14 MB. Sized so that after this reserve, the 3.4 MB "?" reservation and
+  // xenia's own system allocations, the guest's free block still begins low
+  // enough that rounding it up to the next 64 KB boundary (which is the
+  // granularity titles allocate in) leaves Halo 4's ~493 MB request room to
+  // fit. 15 MB left it 16 pages short. GPU writeback is bounded by the guest's
+  // WRITEBACK_SIZE register and is kilobytes, so 14 MB is still an enormous
+  // margin over anything that region can actually be used for.
+  static constexpr uint32_t kGpuWritebackReserveSize = 0x00E00000;  // 14 MB
+  if (XE_AE_FIX_ENABLED("debug.canary.fix_gpu_writeback_reserve")) {
+    heaps_.physical.AllocFixed(
+        0x00000000, kGpuWritebackReserveSize, 0x1000,
+        kMemoryAllocationReserve | kMemoryAllocationCommit,
+        kMemoryProtectRead | kMemoryProtectWrite);
+    // The reservation above is what used to host-commit the whole first 16 MB
+    // (BaseHeap::AllocFixed commits when kMemoryAllocationCommit is set). The
+    // pages we just handed back to the guest still have to be backed, or the
+    // first guest write to them faults - so commit the remainder explicitly,
+    // exactly as the loop below does for the rest of physical memory.
+    xe::memory::AllocFixed(
+        heaps_.physical.TranslateRelative(kGpuWritebackReserveSize),
+        kGpuWritebackRegionSize - kGpuWritebackReserveSize,
+        xe::memory::AllocationType::kCommit,
+        xe::memory::PageAccess::kReadWrite);
+  } else {
+    heaps_.vC0000000.AllocFixed(
+        0xC0000000, kGpuWritebackRegionSize, 32,
+        kMemoryAllocationReserve | kMemoryAllocationCommit,
+        kMemoryProtectRead | kMemoryProtectWrite);
+  }
 
   // TODO(Gliniak): Seems like GPU has access to whole physical memory range
   // without any restriction. This however needs some form of validation.
@@ -299,9 +359,35 @@ bool Memory::Initialize() {
   }
 
   // ?
+  //
+  // Upstream does not know what this 3.4 MB reservation is for either - hence
+  // the comment. What matters here is that it is allocated TOP-DOWN, so it
+  // lands at the very top of guest physical memory (0x1FCB0000-0x1FFF0000),
+  // and everything xenia itself later puts in physical memory is pushed BELOW
+  // it: the XMA context array (xma_decoder.cc, 320 * 64 = 20480 bytes) and a
+  // handful of single-page SystemHeapAlloc(kSystemHeapPhysical) allocations.
+  // Those nine pages land at 0x1FCA7000, i.e. inside the region a title
+  // expects to be free.
+  //
+  // That is what stops Halo 4 booting. It binary-searches for the largest
+  // contiguous physical block and asks for exactly [free_start, 0x1FCB0000) -
+  // the whole span up to this reservation - which our own nine pages sit
+  // inside, so every attempt fails and the title raises an exception and dies.
+  //
+  // Allocate it bottom-up instead. This is safe by construction: the returned
+  // address goes into a local that is never read, so nothing can depend on
+  // WHERE it lands - the reservation's only effect is to consume 3.4 MB. Doing
+  // it bottom-up leaves the top of physical memory to xenia's own system
+  // allocations and keeps the rest of the heap as one unbroken block.
+  //
+  // Toggle: debug.canary.fix_unk_phys_bottom_up (default ON; set 0 for the
+  // original top-down placement).
   uint32_t unk_phys_alloc;
+  const bool unk_phys_top_down =
+      !XE_AE_FIX_ENABLED("debug.canary.fix_unk_phys_bottom_up");
   heaps_.vA0000000.Alloc(0x340000, 64 * 1024, kMemoryAllocationReserve,
-                         kMemoryProtectNoAccess, true, &unk_phys_alloc);
+                         kMemoryProtectNoAccess, unk_phys_top_down,
+                         &unk_phys_alloc);
 
   uint32_t unknown_xex_range;  // Probably hypervisor?
   heaps_.v80000000.Alloc(0x40000, 4 * 1024, kMemoryAllocationCommit,
@@ -1496,7 +1582,16 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
   high_page_number =
       std::min(uint32_t(page_table_.size()) - 1, high_page_number);
 
-  if (page_count > (high_page_number - low_page_number)) {
+  // high_page_number is an INCLUSIVE bound (high_address is the last valid
+  // byte, and BaseHeap::AllocRange clamps it to heap_base_ + heap_size_ - 1),
+  // so the number of pages in [low, high] is the difference PLUS ONE. Without
+  // the +1 a request that exactly fills the range is rejected - Halo 4 hit
+  // this asking for 126640 pages against a computed span of 126639.
+  // Toggle: debug.canary.fix_allocrange_inclusive (default ON).
+  const uint32_t inclusive_span =
+      (high_page_number - low_page_number) +
+      (XE_AE_FIX_ENABLED("debug.canary.fix_allocrange_inclusive") ? 1u : 0u);
+  if (page_count > inclusive_span) {
     // HEAPDIAG: Halo 4 dies during boot after eight failed
     // MmAllocatePhysicalMemoryEx calls, the last of which asks for only 64 KB
     // while the parent heap reports ~492 MB free. "Not enough room" cannot
@@ -1542,8 +1637,16 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
       // Compute the highest aligned start within this block and range.
       // high_page_number is exclusive and rounded down to the stride, so
       // the top stride of pages is never returned.
+      // Same inclusive-bound correction as the span guard above: the top
+      // page of the range is usable, so convert to an exclusive end before
+      // aligning down. Treating it as exclusive threw away up to a full
+      // stride (64 KB) at the top of the heap.
+      const uint32_t high_exclusive =
+          high_page_number +
+          (XE_AE_FIX_ENABLED("debug.canary.fix_allocrange_inclusive") ? 1u
+                                                                      : 0u);
       uint32_t high_aligned =
-          high_page_number - QuickMod(high_page_number, page_scan_stride);
+          high_exclusive - QuickMod(high_exclusive, page_scan_stride);
       uint32_t usable_end = std::min(block_end, high_aligned);
       if (usable_end < page_count) {
         continue;
@@ -1589,8 +1692,12 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
       // high_page_number itself is never returned.
       uint32_t earliest = std::max(block_start, low_page_number);
       uint32_t aligned_start = xe::round_up(earliest, page_scan_stride, false);
+      const uint32_t up_high_exclusive =
+          high_page_number +
+          (XE_AE_FIX_ENABLED("debug.canary.fix_allocrange_inclusive") ? 1u
+                                                                      : 0u);
       if (aligned_start + page_count <= block_end &&
-          aligned_start + page_count <= high_page_number) {
+          aligned_start + page_count <= up_high_exclusive) {
         start_page_number = aligned_start;
         end_page_number = aligned_start + page_count - 1;
         break;
@@ -1623,6 +1730,16 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
         page_scan_stride, low_page_number, high_page_number, top_down ? 1 : 0,
         uint32_t(free_blocks_.size()), blocks_in_range, largest_block,
         largest_at);
+    // HEAPDIAG: the free block does not reach the top of the heap either, and
+    // whatever holds those pages now bounds the largest possible allocation.
+    // Dump the map once so the occupants are named rather than guessed at.
+    static std::atomic<bool> dumped_once{false};
+    bool expected = false;
+    if (dumped_once.compare_exchange_strong(expected, true)) {
+      XELOGE("HEAPDIAG dumping heap map (heap_base={:08X} pages={})",
+             heap_base_, uint32_t(page_table_.size()));
+      DumpMap();
+    }
     // assert_always("Heap exhausted!");
     return false;
   }
@@ -2121,7 +2238,30 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
 
   // Default top-down. Since parent heap is bottom-up this prevents
   // collisions.
-  top_down = true;
+  //
+  // This override is why Halo 4 could not boot. Memory::SystemHeapAlloc asks
+  // for bottom-up (it passes top_down=false) but the request was discarded
+  // here, so xenia's OWN physical allocations - the XMA context array
+  // (320 * 64 = 20480 bytes) and a few single-page SystemHeapAllocs - were
+  // placed at the top of guest physical memory, at 0x1FCA7000-0x1FCB0000,
+  // immediately below the 3.4 MB "?" reservation.
+  //
+  // Halo 4 binary-searches for the largest contiguous physical block and then
+  // asks for the whole span up to that reservation, [free_start, 0x1FCB0000).
+  // Those nine pages of ours sit inside it, so the request is nine pages
+  // larger than the free block and fails; after a fixed number of probes the
+  // title raises an exception and dies.
+  //
+  // Honour the caller instead. Guest allocations (MmAllocatePhysicalMemoryEx)
+  // still pass top_down=true and are unaffected; only xenia's own system
+  // allocations move, to the bottom of the heap where they are out of the
+  // guest's way and cannot break up its contiguous space.
+  //
+  // Toggle: debug.canary.fix_sysheap_bottom_up (default ON; set 0 to restore
+  // the unconditional top-down override).
+  if (!XE_AE_FIX_ENABLED("debug.canary.fix_sysheap_bottom_up")) {
+    top_down = true;
+  }
 
   // Adjust alignment size our page size differs from the parent.
   size = xe::round_up(size, page_size_);

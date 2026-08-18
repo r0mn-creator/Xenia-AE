@@ -760,6 +760,29 @@ void IoDeleteDevice_entry(dword_t device_ptr, const ppc_context_t& ctx) {
 
 DECLARE_XBOXKRNL_EXPORT1(IoDeleteDevice, kFileSystem, kStub);
 
+// Halo 4 calls this repeatedly during boot while it manages the cache
+// partition, and an undefined export returns nothing and logs
+// "undefined extern call to 832F2D7C IoDismountVolumeByFileHandle" - the
+// title then never submits a single GPU command and sits on a black screen.
+//
+// Dismounting is meaningful on real hardware, where the cache partition is a
+// real volume that can be unmounted and reformatted. Under emulation cache0:
+// and cache1: are plain host directories that are always present, so there is
+// nothing to tear down: reporting success is both the honest answer and the
+// one that lets the title continue. Returning a failure status here would be
+// worse than the stub - the title would treat the cache as unusable.
+dword_result_t IoDismountVolumeByFileHandle_entry(dword_t file_handle,
+                                                  dword_t unk) {
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(IoDismountVolumeByFileHandle, kFileSystem, kStub);
+
+dword_result_t IoDismountVolumeByName_entry(
+    pointer_t<X_ANSI_STRING> name, dword_t unk) {
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(IoDismountVolumeByName, kFileSystem, kStub);
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe

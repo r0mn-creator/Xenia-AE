@@ -76,7 +76,16 @@ DEFINE_path(
         "Storage");
 
 DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
-DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
+// Halo 4 needs cache0: to exist - without it the title gets
+// "ResolvePath(cache0:) failed - device not found" and never reaches a menu.
+// Desktop xenia (app/xenia_main.cc) has defaulted this to TRUE since 2024;
+// the Android entry point inherited a stale false. The cache0/cache1
+// directories are already created in the storage root, so mounting them costs
+// nothing. UPDATE_from_bool migrates configs that still carry the old false -
+// without it, existing installs keep the broken value and only fresh ones are
+// fixed (the exact shape of the sparse-shared-memory shipping bug).
+DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
+UPDATE_from_bool(mount_cache, 2026, 8, 18, 12, false);
 DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
             "Storage");
 
