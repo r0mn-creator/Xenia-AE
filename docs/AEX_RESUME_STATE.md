@@ -1,7 +1,77 @@
 # AEX — RESUME STATE (single source of truth)
 
 **Read this first. It is written to be enough on its own.**
-Last updated 2026-08-17.
+Last updated 2026-08-18.
+
+---
+
+## 📌 SESSION OF 2026-08-18 — START HERE
+
+Eight commits. Two things changed the ground under everything else.
+
+### 1. THE BUILD WAS `-O0` THE WHOLE TIME — now `-O2`, +251% FPS
+
+The NDK's CMake Debug config passes **no `-O` flag at all** and nothing in this
+repo set one. Halo 3 menu **4.93 → 17.34 FPS** back-to-back at 95 °C, p<1e-4.
+Fixed in `app/build.gradle` (debug build type keeps debug signing, `debuggable`,
+`-g` and `-fno-omit-frame-pointer`, so simpleperf still works). `NDEBUG` is
+deliberately still unset — that is a separate, unmeasured change.
+
+⚠️ **Every hotspot ranking taken before this date is void.** At `-O0` a
+`std::atomic` load is an out-of-line call, so wrapper overhead dominated
+whatever it wrapped.
+
+`-O2` immediately exposed a latent race: `XThread`'s start lambda set the host
+thread name without `thread_lock_`. Old bug, new timing. **Expect more.**
+
+### 2. THE SPIN LOOP WAS NOT THE BOTTLENECK — measured, not argued
+
+`guest_825A7EC8` was 33% of all process CPU and 63% of the RENDER thread. The
+`collapse_memory_delay_spins` pass removed it **completely** — RENDER fell
+52% → 4.6%, the function vanished from the profile — and the **frame rate did
+not move**. The freed CPU went straight into `guest_826C61C8` (5% → 36%), a
+pure load-test-branch **fence wait**.
+
+**AE is wait-latency bound, not CPU-throughput bound.** Ranking work by CPU
+share is the wrong function when guest threads spin. All three spin/poll passes
+stay OFF (`park_memory_poll_loops` also adds a 14% stall rate).
+
+### Current numbers
+
+**14.93 FPS** median (Halo 3 menu, 180 s, n=179). Goal 30 → needs **+101%**.
+The 17.34 figure was a 70 s run; between-run drift is ~15%, so **use 180 s runs
+with the control recorded in the same sitting**.
+
+### Where to pick up
+
+`docs/PERF_CHECKLIST.md` is the ranked list. Item 1 is closed (above). The live
+question replacing it: **what is `guest_826C61C8` waiting for, and what on our
+side is late to write that word?** Cheaper untouched items:
+`inline_gprlr_saverest` (4.08%), an a64 peephole (7-8% of emitted instructions
+are literal `mov wN,wN` no-ops), and the residual 5.36% `__kernel_clock_gettime`.
+
+### Also this session
+
+- **Front-end launching fixed** (`e07455ebd`). `ACTION_VIEW` was advertised but
+  never worked — nothing read `getData()` AND the filter had no `<data>`
+  element. A bare `ACTION_VIEW` + `content://` with no extras now boots Halo 3.
+  Spec for front-end authors: `docs/INTENT_API.md`.
+  ⚠️ **Beacon still cannot launch it** — Beacon recognises emulators by a
+  hard-coded package registry and falls back to a plain launcher intent with no
+  URI. Not fixable on our side; the Xbox 360 category IS set up and fully
+  scraped in Beacon, it just does not launch.
+- **Halo 4 boot crash fixed** (`c2ddc7096`, five bugs — see
+  `memory/project_xenia_ae_halo4_boot_crash.md`). ⚠️ **It still does not
+  render** and those five changes touch the physical allocator for EVERY title
+  and are **not regression-tested**. All behind `debug.canary.*` toggles.
+- **Halo 3 has inherited XenDroid's flickering faces** — logged, not chased.
+
+### ⚠️ Do this before trusting the next benchmark
+
+Halo 3 and NFS have **not** been re-checked since the Halo 4 allocator changes.
+Verify them first.
+
+---
 
 ## ✅ HALO 3 IS SOLVED — vista upright, ball gone (doc §68)
 
