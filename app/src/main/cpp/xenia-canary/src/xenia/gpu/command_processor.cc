@@ -772,14 +772,18 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   // moves between runs; it is located by content signature and fed in here.
   // Re-armed from this already-frequent hook because the target is written
   // every frame, unlike section 45's single-use buffer.
-  if (memory_) {
-    static std::atomic<uint64_t> camwatch_next_ms{0};
-    const uint64_t now_ms =
-        uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
-                     std::chrono::steady_clock::now().time_since_epoch())
-                     .count());
-    if (now_ms >= camwatch_next_ms.load(std::memory_order_relaxed)) {
-      camwatch_next_ms.store(now_ms + 200, std::memory_order_relaxed);
+  //
+  // PERF: this used to read steady_clock::now() on EVERY register write to
+  // rate-limit itself - the same defect the diagnostic gate itself had, and it
+  // left __kernel_clock_gettime at 28% of the GPU Commands thread even after
+  // that was fixed. WriteRegister runs millions of times per frame, so nothing
+  // unconditional belongs here. Now behind the (epoch-based, clock-free) diag
+  // gate, and re-armed on the epoch rather than on a timestamp.
+  if (XE_AE_DIAG_ENABLED("debug.canary.camwatch_arm") && memory_) {
+    static std::atomic<uint32_t> camwatch_epoch{0};
+    const uint32_t ep = xe::AeDiagEpoch().load(std::memory_order_relaxed);
+    if (ep != camwatch_epoch.load(std::memory_order_relaxed)) {
+      camwatch_epoch.store(ep, std::memory_order_relaxed);
       uint32_t camwatch_addr = xe::AeDiagValue("debug.canary.camwatch_addr");
       if (camwatch_addr) {
         memory_->ArmCamwatchExact(camwatch_addr);
