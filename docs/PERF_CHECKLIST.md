@@ -46,7 +46,48 @@ cannot deliver the 73%.
 
 ## The checklist
 
-### 1. Collapse guest spin/delay loops — up to ~33% of all CPU
+### 1. ~~Collapse guest spin/delay loops~~ — TRIED 2026-08-18, BUYS NOTHING
+
+**Result: no change to the frame rate. All three passes stay off.**
+
+The passes were already present and registered — this entry was wrong to call
+them missing. They never fired because all three cvars default false. They are
+now individually switchable at runtime (`debug.canary.exp_collapse_delay_spins`,
+`exp_collapse_ctr_spins`, `exp_park_memory_polls`), so this is cheap to re-test.
+
+| 180 s run, Halo 3 menu | median | p05 | stalls <10 FPS |
+|---|---|---|---|
+| control | 14.93 | 14.19 | 0% |
+| `collapse_memory_delay_spins` | 14.87 | — | — |
+| `park_memory_poll_loops` | 14.91 | 1.40 | **14%** |
+
+`collapse_memory_delay_spins` **worked perfectly and changed nothing.** It
+collapsed the loop at guest `825A7EE4` (sled=8), the RENDER thread fell from
+**52% → 4.6%** of process CPU, and `guest_825A7EC8` vanished from the profile.
+The frame rate did not move. The freed CPU went straight into `guest_826C61C8`,
+which rose **5% → 36%** — a pure load-test-branch with no store, i.e. the guest
+waiting for something external to zero a memory word. A fence wait.
+
+`park_memory_poll_loops` has the same median and adds a 14% stall rate.
+
+**The lesson, which invalidates how this list was ordered:** the 33% busy-wait
+was never the bottleneck — it was a *throttle*. This scene is bound by **wait
+latency, not CPU throughput**. Ranking work by CPU share is the wrong ranking
+function for an emulator whose guest threads spin: a spin loop is a *symptom* of
+something else being slow, and deleting it just moves the spin somewhere else.
+
+**What to ask instead of "what uses the most CPU":** what is `guest_826C61C8`
+waiting for, and what on our side is late to write that word? That is the
+bottleneck. Start there.
+
+The one untried configuration is parking **with `guest_scheduler=true`**, so
+parked loops have safepoints to wake them promptly — the restored
+`OPCODE_CHECK_PREEMPT` tolerance unblocks it, and it is what §34.2 step 4 was
+always about. Note the scheduler is itself untested on device.
+
+<details>
+<summary>Original entry (kept — the loop analysis is still accurate)</summary>
+
 **The single biggest item by a factor of three.**
 
 `guest_825A7EC8` is 32.77% of the process and 63% of the RENDER thread. Its
@@ -78,6 +119,8 @@ does nothing on an Adreno-class SoC.
 `collapse_memory_delay_spins`; it targets exactly this shape.
 **Verify first:** confirm the same loop dominates *in gameplay*, not only at the
 menu, before sizing the win.
+
+</details>
 
 ### 2. Inline `__savegprlr` / `__restgprlr` — 4.08%
 The PPC register save/restore helper thunks show up as real call frames.
@@ -141,7 +184,15 @@ frame rate is.
   matches** the crash/profile. The `cxx/<Config>/<hash>/obj` directory gets a
   new hash when build flags change, and the stale one silently resolves
   everything to `??`.
-- Benchmark with `fps_bench.sh record <name> 70` then `compare a b`. Never a
-  single reading — scene variation alone is ±25%.
+- Benchmark with `fps_bench.sh record <name> 180` then `compare a b`. Never a
+  single reading — scene variation alone is +/-25%.
+- **Use 180 s runs and a contemporaneous control.** Two 70 s runs of *identical
+  code* measured 17.34 and 14.93 here (-14%, p=0.26): between-run drift exceeds
+  within-run noise, so a baseline recorded an hour ago is not a control. This
+  cost a wrong "-14.3% significant regression" call on 2026-08-18 before the
+  proper control was run. Record the control in the same sitting, every time.
+- Read `p05` and the stall rate, not only the median. `park_memory_poll_loops`
+  matched the control's median exactly while putting 14% of frames under
+  10 FPS.
 - The Odin 2 reaches 94-95 °C in ~2 minutes and clamps cpu4. Compare runs at the
   same thermal equilibrium, back to back.
