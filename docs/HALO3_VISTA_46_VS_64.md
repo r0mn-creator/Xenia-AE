@@ -5092,3 +5092,67 @@ output".
 
 ⚠️ **Fix `RECFIELD0`/`RECFIELD2`/`VALSHAPE` to byte-swap before anyone quotes
 them again**, or delete them in favour of `recfield.py`.
+
+## 68. ✅ SOLVED — a64 `UNPACK SHORT_4` swapped the two 64-bit halves
+
+**Both** the upside-down vista and the character "ball" were **one defect**, in
+one line of the a64 backend.
+
+### 68.1 The bug
+
+`EmitSHORT_4` (the UNPACK path, `a64_seq_vector.cc`) sign-extends the upper 64
+bits of the source and reorders the lanes into PPC vector word order. It did:
+
+```cpp
+e.rev64(VReg(0).s4, VReg(0).s4);                  // pair reorder
+e.ext(VReg(0).b16, VReg(0).b16, VReg(0).b16, 8);  // <-- swaps the halves
+```
+
+That trailing `ext` rotated the result by one 64-bit half, giving **the right
+four values in the wrong half order**. Through `vupkd3d128` type 4:
+
+```
+x64      : [4040512E 40402A47 4040568E 403FE95B]
+a64 (old): [4040568E 403FE95B 4040512E 40402A47]   <-- halves swapped
+```
+
+**SHORT_4 is a compressed vertex POSITION format.** Swapped halves fed wrong
+coordinates into every mesh that uses it. Fix: delete the `ext`.
+
+### 68.2 Result, measured on device
+
+Odin 2 / Turnip R8, Halo 3, no other settings changed:
+
+* **Vista renders right side up** - sky above, ground below, wreck upright.
+* **The ball is gone** - Johnson's face, cap and cigar; the Chief's helmet,
+  visor, pauldron, chest plate and individually articulated fingers.
+
+### 68.3 Why the search took 40 sections
+
+The level-renders-perfectly / characters-collapse asymmetry pointed at a
+per-vertex position defect from the start (§58.1) - a format-specific one spares
+whatever does not use that format. Everything measured is consistent with this
+in hindsight: bone constants healthy (§63/§64), memexport contents correct
+(§67), NDC-Y identical (§37.2), no GPU-backend difference (§31).
+
+**I had this diff in front of me earlier in this session and dismissed it.**
+Comparing AEX's `EmitSHORT_4` against XenDroid's, the tool aligned AEX's UNPACK
+against XenDroid's PACK; I correctly spotted the misalignment, and then walked
+away from the `rev64`+`ext` vs `rev64` difference *underneath* it instead of
+re-diffing the matching functions. The misalignment was real; the difference was
+also real.
+
+**Lesson: when a diff is misaligned, re-align it - do not discard what it
+showed.**
+
+### 68.4 Credit and scope
+
+Found in XenDroid commit `82ec8977d` "[A64] Fix SHORT_4 unpack lane order",
+which credits it with the a64 visual bugs in **Halo 3, Halo 3: ODST, Halo:
+Reach, Halo 4 and Nier** - so other titles likely improve too. Its
+`UNPACK_SHORT_4` regression test is ported alongside the fix: the old sequence
+passes every other existing test, and only that one catches the half swap.
+
+The user's instinct - *"somewhere in XDTester is the answer"* - was right, and
+searching XenDroid's **commit history** for Halo 3 found in minutes what forty
+sections of measurement had not.
