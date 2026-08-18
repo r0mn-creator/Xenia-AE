@@ -53,6 +53,24 @@ class FpsCounter {
   // Costs one increment and one steady_clock read per frame when enabled, and
   // a cached property check when not.
   static void OnFrame() {
+    // Drive the diagnostic-toggle epoch from here: once per FRAME, not once
+    // per gate check. XE_AE_DIAG_ENABLED used to read the clock on every
+    // invocation and there are ~10 of those inside WriteRegister alone, which
+    // put __kernel_clock_gettime at 74.6% of the GPU Commands thread. One
+    // clock read per frame keeps the same ~500 ms re-sample responsiveness for
+    // a millionth of the cost. Must sit ABOVE the gate below, or turning the
+    // FPS counter off would freeze every other diagnostic toggle.
+    {
+      static std::atomic<uint64_t> next_ms{0};
+      const uint64_t now_ms =
+          uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now().time_since_epoch())
+                       .count());
+      if (now_ms >= next_ms.load(std::memory_order_relaxed)) {
+        next_ms.store(now_ms + 500, std::memory_order_relaxed);
+        xe::AeDiagTick();
+      }
+    }
     if (!XE_AE_DIAG_ENABLED("debug.canary.fps")) {
       // Reset so that toggling on mid-session starts a clean window rather
       // than reporting a huge frame count against a stale start time.

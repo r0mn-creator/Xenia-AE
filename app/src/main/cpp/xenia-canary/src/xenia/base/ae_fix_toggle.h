@@ -125,23 +125,37 @@ inline uint32_t AeDiagValue(const char* prop_name, uint32_t fallback = 0) {
 // probed by restarting and replaying everything up to it - which for NFS Carbon
 // meant driving an entire race again just to read one address.
 //
-// Re-reads at most every 500 ms, so hot paths (KeDelayExecutionThread runs
-// thousands of times a second at a stall) pay one clock read per call rather
-// than a property lookup, while a cold path still notices within half a second.
-#define XE_AE_DIAG_ENABLED(prop_name)                                        \
-  ([]() -> bool {                                                            \
-    static std::atomic<uint64_t> xe_diag_next_{0};                           \
-    static std::atomic<bool> xe_diag_on_{false};                             \
-    const uint64_t xe_diag_now_ =                                            \
-        uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(      \
-                     std::chrono::steady_clock::now().time_since_epoch())    \
-                     .count());                                              \
-    if (xe_diag_now_ >= xe_diag_next_.load(std::memory_order_relaxed)) {     \
-      xe_diag_next_.store(xe_diag_now_ + 500, std::memory_order_relaxed);    \
-      xe_diag_on_.store(xe::AeExperimentEnabled(prop_name),                  \
-                        std::memory_order_relaxed);                          \
-    }                                                                        \
-    return xe_diag_on_.load(std::memory_order_relaxed);                      \
+// Re-reads at most ~twice a second, while a cold path still notices quickly.
+//
+// PERF (2026-08-17): this used to call steady_clock::now() on EVERY
+// invocation to decide whether its 500 ms cache had expired - "one clock read
+// per call". Profiling Halo 3 showed __kernel_clock_gettime at 74.6% of the
+// GPU Commands thread and [vdso] at 22.2% of the WHOLE process: there are ~10
+// of these gates inside WriteRegister alone, which runs millions of times per
+// frame. Now compares a monotonic epoch bumped by AeDiagTick() instead, so a
+// disabled diagnostic costs one relaxed atomic load and a branch.
+// Bumped ~2x/second by AeDiagTick() (called from an already-periodic host
+// hook). Diagnostic gates compare against it instead of reading the clock.
+inline std::atomic<uint32_t>& AeDiagEpoch() {
+  static std::atomic<uint32_t> epoch{1};
+  return epoch;
+}
+inline void AeDiagTick() {
+  AeDiagEpoch().fetch_add(1, std::memory_order_relaxed);
+}
+
+#define XE_AE_DIAG_ENABLED(prop_name)                                       \
+  ([]() -> bool {                                                           \
+    static std::atomic<uint32_t> xe_diag_epoch_{0};                         \
+    static std::atomic<bool> xe_diag_on_{false};                            \
+    const uint32_t xe_diag_now_ =                                           \
+        xe::AeDiagEpoch().load(std::memory_order_relaxed);                  \
+    if (xe_diag_now_ != xe_diag_epoch_.load(std::memory_order_relaxed)) {   \
+      xe_diag_epoch_.store(xe_diag_now_, std::memory_order_relaxed);        \
+      xe_diag_on_.store(xe::AeExperimentEnabled(prop_name),                 \
+                        std::memory_order_relaxed);                         \
+    }                                                                       \
+    return xe_diag_on_.load(std::memory_order_relaxed);                     \
   }())
 
 }  // namespace xe

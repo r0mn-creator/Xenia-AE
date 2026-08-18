@@ -1668,6 +1668,15 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
     // Halo 3 ODST, Halo Reach, Halo 4 and Nier. Covered by the
     // UNPACK_SHORT_4 backend test.
     e.rev64(VReg(0).s4, VReg(0).s4);
+    // A/B toggle for measuring the fix's rendering cost. Correct geometry
+    // covers real screen area where the collapsed "ball" covered almost none,
+    // so some extra rasterisation cost is EXPECTED and legitimate. Setting
+    // debug.canary.fix_short4_lane_order=0 restores the old (wrong) sequence
+    // so the two can be compared under identical thermal conditions in one
+    // binary. Defaults to the FIX.
+    if (!XE_AE_FIX_ENABLED("debug.canary.fix_short4_lane_order")) {
+      e.ext(VReg(0).b16, VReg(0).b16, VReg(0).b16, 8);
+    }
     EmitMagicFloatOverflowCheck(e, d);
   }
   static void EmitUINT_2101010(A64Emitter& e, const EmitArgType& i) {
