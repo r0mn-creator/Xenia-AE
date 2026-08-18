@@ -36,6 +36,36 @@ android {
         }
     }
     buildTypes {
+        debug {
+            externalNativeBuild {
+                cmake {
+                    // Build the NATIVE side optimised even in the debug build type.
+                    //
+                    // AGP maps the debug build type to CMAKE_BUILD_TYPE=Debug, and the
+                    // NDK's Debug config passes no -O flag at all - so clang defaults to
+                    // -O0. Every AEX build ever installed and every FPS number ever
+                    // measured in this project (see docs/AEX_RESUME_STATE.md) has been an
+                    // UNOPTIMISED build of a JIT-based emulator.
+                    //
+                    // We cannot simply switch to the release build type: AEX *is* the
+                    // instrumented line, and it needs debug signing, debuggable=true (for
+                    // run-as, simpleperf and /proc/pid/mem), and its own applicationId.
+                    // So keep the debug build type and optimise only the C/C++.
+                    //
+                    // These land in CMAKE_C(XX)_FLAGS, which CMake emits BEFORE
+                    // CMAKE_CXX_FLAGS_DEBUG, so a later -O would still win - Debug simply
+                    // has none, which is why appending here is sufficient. -g and
+                    // -fno-omit-frame-pointer come from the NDK/CMakeLists and are kept:
+                    // symbols and frame pointers are what make simpleperf usable.
+                    //
+                    // NDEBUG is deliberately NOT set here: that would also strip every
+                    // assert_true/assert_always, which is a second, independent change.
+                    // Optimisation first, measured on its own.
+                    cppFlags '-O2'
+                    cFlags '-O2'
+                }
+            }
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'

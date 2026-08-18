@@ -460,10 +460,30 @@ X_STATUS XThread::Create() {
     xe::threading::set_current_thread_id(handle());
 
     // Set name immediately, if we have one.
-    thread_->set_name(thread_name_);
+    //
+    // This MUST hold thread_lock_. XThread::set_name() takes that lock to write
+    // thread_name_ and to call thread_->set_name(), because the guest can rename
+    // a thread at any moment - but this copy, on the newly started thread, used
+    // to run unlocked. Two threads then wrote the same std::string
+    // (threading::Thread::name_) at once and both freed its buffer, which Scudo
+    // reports as "race on chunk header" / "invalid chunk state when
+    // deallocating" and aborts the emulator during boot.
+    //
+    // The bug is old; only its timing is new. Until 2026-08-18 the native side
+    // was compiled -O0 (the NDK's CMake Debug config passes no -O at all), and
+    // the surrounding code was slow enough that the window essentially never
+    // opened. Turning on -O2 made it reproduce on the first Halo 3 launch.
+    // Take a copy under the lock and release it before running guest code -
+    // Execute() must never be entered holding thread_lock_.
+    std::string thread_name_copy;
+    {
+      std::lock_guard<std::mutex> lock(thread_lock_);
+      thread_->set_name(thread_name_);
+      thread_name_copy = thread_name_;
+    }
 
     // Profiler needs to know about the thread.
-    xe::Profiler::ThreadEnter(thread_name_.c_str());
+    xe::Profiler::ThreadEnter(thread_name_copy.c_str());
 
     // Execute user code.
     current_xthread_tls_ = this;
