@@ -58,9 +58,61 @@
                 <action android:name="org.xeniaae.intent.action.EMULATE" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+            <!--
+                Third-party front-end entry point (Daijishou, ES-DE, Beacon...).
+
+                This filter used to declare ACTION_VIEW with NO <data> element.
+                An intent-filter without <data> only matches intents that carry
+                no URI and no MIME type, so it could never match a real launch -
+                AEX simply did not appear in any front-end's emulator list, and
+                an explicit launch fell through to "Can't open game" because
+                nothing read getData() either. Both halves are fixed together;
+                see docs/INTENT_API.md.
+
+                Kept permissive on purpose. Front-ends differ: SAF-based ones
+                send content:// with application/octet-stream or */*, while
+                path-based ones send file:// often with no type at all. A filter
+                that only accepted one shape would silently exclude the other,
+                which is exactly the failure being fixed here.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <!--
+                Untyped content:// launches.
+
+                A filter that declares a mimeType only matches intents that
+                CARRY a type, so the filter above misses a front-end that sends
+                a bare content:// URI with no type - and several do. This filter
+                declares a scheme and no type, which is the complement: it
+                matches a URI with no type and nothing else. Verified with
+                `cmd package query-activities`: without this, an untyped
+                content:// VIEW resolved to two unrelated apps and not to us.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+            </intent-filter>
+            <!-- Untyped file:// launches, matched on extension instead. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.iso" />
+                <data android:pathPattern=".*\\.ISO" />
+                <data android:pathPattern=".*\\.xex" />
+                <data android:pathPattern=".*\\.XEX" />
+                <data android:pathPattern=".*\\.zar" />
+                <data android:pathPattern=".*\\.ZAR" />
             </intent-filter>
         </activity>
         <activity android:name="org.xeniaae.EmulatorSettings"

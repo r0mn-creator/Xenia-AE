@@ -259,9 +259,74 @@ public class EmulatorActivity extends Activity implements SurfaceHolder.Callback
             return true;
         }
     });
+    /**
+     * The game to boot, from either supported launch form.
+     *
+     * Two callers, deliberately: our own library sends
+     * {@code org.xeniaae.intent.action.EMULATE} with the URI in the
+     * {@link #EXTRA_GAME_URI} string extra, while a third-party front-end
+     * (Daijishou, ES-DE, Beacon...) sends {@code ACTION_VIEW} with the URI in
+     * the intent's DATA field, which is the universal convention and what Eden
+     * and every other emulator with front-end support accepts.
+     *
+     * The manifest has advertised an ACTION_VIEW filter since the activity was
+     * written, but nothing ever read getData(), so every front-end launch hit
+     * "Can't open game". The extra wins when both are present so our own
+     * library keeps its exact current behaviour.
+     */
+    private String intent_game_uri(){
+        String uri = getIntent().getStringExtra(EXTRA_GAME_URI);
+        if (uri != null && !uri.isEmpty()) {
+            return uri;
+        }
+        android.net.Uri data = getIntent().getData();
+        return data != null ? data.toString() : null;
+    }
+
+    /**
+     * Display name for the game, falling back to the file name.
+     *
+     * A front-end has no reason to know our EXTRA_GAME_TITLE, but the title is
+     * not cosmetic: GameUriResolver.resolve() searches by it when a stale
+     * MediaStore id no longer opens. Deriving it from the URI keeps that
+     * recovery path working for external launches instead of passing null.
+     */
+    private String intent_game_title(String uri){
+        String title = getIntent().getStringExtra(EXTRA_GAME_TITLE);
+        if (title != null && !title.isEmpty()) {
+            return title;
+        }
+        if (uri == null) {
+            return null;
+        }
+        try {
+            android.net.Uri parsed = android.net.Uri.parse(uri);
+            String name = null;
+            if ("content".equals(parsed.getScheme())) {
+                try (android.database.Cursor c = getContentResolver().query(
+                        parsed, null, null, null, null)) {
+                    if (c != null && c.moveToFirst()) {
+                        int i = c.getColumnIndex(
+                                android.provider.OpenableColumns.DISPLAY_NAME);
+                        if (i >= 0) name = c.getString(i);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            if (name == null) name = parsed.getLastPathSegment();
+            if (name == null) return null;
+            int slash = name.lastIndexOf('/');
+            if (slash >= 0) name = name.substring(slash + 1);
+            int dot = name.lastIndexOf('.');
+            return dot > 0 ? name.substring(0, dot) : name;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     void on_create(){
-        String uri=getIntent().getStringExtra(EXTRA_GAME_URI);
-        final String game_title = getIntent().getStringExtra(EXTRA_GAME_TITLE);
+        String uri=intent_game_uri();
+        final String game_title = intent_game_title(uri);
         // The library may hold a stale MediaStore URI: those are row ids, and
         // MediaStore reassigns them on re-index (reboot, media scan, file move).
         // The ISO is still there, the saved URI just points at nothing. Before
