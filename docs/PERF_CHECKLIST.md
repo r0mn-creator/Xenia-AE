@@ -1,7 +1,11 @@
 # Xenia-AE performance checklist
 
-**Baseline: 17.34 FPS** (Halo 3 main menu, Odin 2, ~95 °C, `fps_bench.sh`, n=69).
-**Goal: 30 FPS.** Needs **+73%**.
+**Baseline: 14.93 FPS** (Halo 3 main menu, Odin 2, ~95 °C, `fps_bench.sh`,
+180 s, n=179). **Goal: 30 FPS.** Needs **+101%**.
+
+> The earlier "17.34 FPS" headline came from a 70 s run; a 180 s run of the same
+> code gives 14.93. Between-run drift here is ~15%, so short runs overstate.
+> Use the 180 s figure.
 
 Everything below is ranked by *measured* cost in the profile of **2026-08-18**,
 the first profile taken after the `-O2` fix. Every ranking older than that date
@@ -172,8 +176,9 @@ frame rate is.
 - **Making the GPU backend faster.** 8.8% total for all of `libe.so`.
 - **Driver-level work.** Turnip is 1.1%.
 - **Frame skip.** Would raise the counter without making the game more
-  responsive; the guest spin loop burns the same core either way. Fix #1 first
-  and see what is actually left.
+  responsive; the guest spin loop burns the same core either way.
+- **Chasing guest spin loops by CPU share.** Measured and disproven — see #1.
+  Killing the 33% loop freed the core and the frame rate did not move.
 
 ## Method notes
 
