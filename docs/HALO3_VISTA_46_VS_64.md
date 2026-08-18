@@ -5007,3 +5007,88 @@ the causal link.**
 3. XenDroid **cannot** be used for an A/B here: it has neither the `VTXDIST`
    probe nor a `readback_memexport` cvar (checked). §65.5 assumed it did. Any
    comparison needs the probe ported into XDtester first.
+
+## 67. ⛔⛔ THE MEMEXPORT CONTENT IS HEALTHY — and RECFIELD0/RECFIELD2/VALSHAPE all read the wrong ENDIANNESS
+
+### 67.1 The oracle was the wrong instrument
+
+§65.5/§66.4 proposed rebuilding the desktop RADV oracle to get a reference.
+Wrong tool: **XDtester is a strictly better reference** - same device, same
+Turnip driver, same game, and it renders correctly - and on a **rooted** device
+the buffer can be read straight out of guest RAM with no probe inside either
+build. That also means both sides get analysed by **one** script instead of two
+separately-compiled probes. (The oracle port was attempted first, crashed the
+oracle with a heap error, and was abandoned. `scratchpad/recfield.py` replaces
+it.)
+
+### 67.2 ⚠️ The in-emulator probes decode the buffer LITTLE-ENDIAN. It is big-endian.
+
+`RECFIELD0`, `RECFIELD2` and `VALSHAPE` all do
+`reinterpret_cast<const float*>(&vd[r * kStrideDw])` - a **native little-endian**
+read of guest memory, which holds **big-endian** data. Decoding the same records
+both ways:
+
+| rec | big-endian (correct) | little-endian (what the probes read) |
+|---|---|---|
+| 32 | `(-12.3232, 2.0753, 7.1906)` | `(-9.5e-15, 2.08e+30, 2.9e+24)` |
+| 33 | `(6.7852, 0.9314, -11.8334)` | `(1.19e+22, -7.3e+25, 4.2e+30)` |
+| 34 | `(3.2094, -2.4754, 14.3330)` | `(4.78e+36, -2.98e-27, -8.9e+08)` |
+| 35 | `(-14.2351, -4.0944, -0.0767)` | `(-3.15e+34, 0.000127, -2.2e+06)` |
+
+Big-endian gives character-scale world positions (±15). Little-endian gives
+1e30-1e36 garbage and NaN.
+
+**Every "huge", "mid" and "nonfinite" figure those probes have ever reported is
+an endianness artifact**, including the RECFIELD2 numbers quoted earlier in this
+session (`plausible=378 (5.3%), huge=2581 (36%)`). The file already records
+`VALSHAPE` being retracted for reading non-float dwords as float - **the
+endianness is a second, independent bug in the same code, still present.**
+
+### 67.3 Decoded correctly, AEX's skinning buffer is FINE
+
+Same buffer, same moment, `recfield.py` on a guest-RAM dump:
+
+```
+recs=7168  zero=2907 (40.6%)  nonfinite=0 (0.0%)
+PLAUSIBLE=4260 (59.4%)  small=0 (0.0%)  mid=0 (0.0%)  huge=1 (0.0%)
+plaus xrange=[-50.15, 33.31]  absmax=222.5
+plaushist=[685, 717, 717, 717, 716, 695, 13, 0, 0, 0]
+```
+
+**Zero collapsed records. Zero garbage. Zero non-finite.** Every written record
+holds a plausible world-space position, and the 40.6% zeros are exactly the
+unwritten tail §66 measured. Within the written region the data is essentially
+perfect.
+
+**So the exported skinning positions are not the defect.** Combined with §66's
+finding that the fill level is a proven red herring (RADV renders correctly
+filling *less*), the memexport buffer - both its coverage and its contents - is
+now excluded.
+
+### 67.4 What this closes
+
+The memexport thread as a whole. The remaining live facts about the ball are
+unchanged and now quite constrained:
+
+* level geometry perfect, **skinned** characters collapse (§58.1);
+* **single-bone** parts keep shape, **multi-bone** parts collapse (§59.1);
+* bone-matrix constants healthy (§63, §64);
+* memexport coverage a red herring (§66) and its **contents correct** (this
+  section).
+
+### 67.5 ▶️ NEXT
+
+If the exported positions are right and the bone constants are right, the defect
+is in what happens **between** them and the screen: the consuming draw's vertex
+**fetch setup** (stride, offset, format, or which records it indexes), or the
+blend weights/indices themselves - not the data this file has spent §29-§66
+measuring.
+
+Concrete: decode the consuming draw's vfetch instruction operands (stride and
+offset) from shader `9EA48FC2B26C325D` and check they match the 20-dword/80-byte
+record layout the producer writes. A stride or offset mismatch would read
+correct data at wrong positions - which is exactly "correct inputs, collapsed
+output".
+
+⚠️ **Fix `RECFIELD0`/`RECFIELD2`/`VALSHAPE` to byte-swap before anyone quotes
+them again**, or delete them in favour of `recfield.py`.
