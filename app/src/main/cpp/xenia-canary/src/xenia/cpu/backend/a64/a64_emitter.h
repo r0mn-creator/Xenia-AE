@@ -111,6 +111,64 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   void MarkSourceOffset(const hir::Instr* i);
 
+  // ---- Branch islands -------------------------------------------------
+  //
+  // ARM64 conditional branches are short-range: b.cond, cbz and cbnz encode a
+  // 19-bit signed word offset, i.e. +/-1 MB. An unconditional b gets 26 bits,
+  // +/-128 MB. A guest function large enough to emit more than 1 MB of ARM64
+  // therefore cannot express a conditional branch that spans it, and xbyak
+  // throws "label is too far" when it backpatches the label.
+  //
+  // Halo 4 hits this: guest_8250A190 emits ~1.02 MB, the compile fails,
+  // ResolveFunction returns null and the resolve thunk's brk #0xF000 kills the
+  // process (see docs / memory for the full trace).
+  //
+  // The fix is the standard one - invert the condition, jump over an
+  // unconditional branch:
+  //     cbnz x, far          becomes     cbz  x, skip
+  //                                      b    far
+  //                                  skip:
+  // This costs one extra instruction and a not-taken branch, so it is only
+  // used when needed: the emitter compiles a function normally, and if xbyak
+  // reports a too-far label it resets and recompiles with force_long_branches_
+  // set. Ordinary functions never pay for it.
+  void set_force_long_branches(bool value) { force_long_branches_ = value; }
+  bool force_long_branches() const { return force_long_branches_; }
+
+  void CbzFar(const Xbyak_aarch64::WReg& rt, Xbyak_aarch64::Label& target);
+  void CbzFar(const Xbyak_aarch64::XReg& rt, Xbyak_aarch64::Label& target);
+  void CbnzFar(const Xbyak_aarch64::WReg& rt, Xbyak_aarch64::Label& target);
+  void CbnzFar(const Xbyak_aarch64::XReg& rt, Xbyak_aarch64::Label& target);
+  void BCondFar(Xbyak_aarch64::Cond cond, Xbyak_aarch64::Label& target);
+
+  // Shadow the base emitter's short-range conditional branches so that EVERY
+  // call site in the backend gets islands when force_long_branches_ is set,
+  // rather than only the ones converted by hand. Converting them individually
+  // was whack-a-mole: each round of "fix the ones I found" still left another
+  // branch out of range, because tail code (AddToTail) and the epilog sit at
+  // the end of the function and any branch into them is far by construction.
+  //
+  // The base overloads taking an integer offset are still reachable via the
+  // using-declarations; only the Label forms are intercepted.
+  using Xbyak_aarch64::CodeGenerator::b;
+  using Xbyak_aarch64::CodeGenerator::cbz;
+  using Xbyak_aarch64::CodeGenerator::cbnz;
+  void cbz(const Xbyak_aarch64::WReg& rt, Xbyak_aarch64::Label& l) {
+    CbzFar(rt, l);
+  }
+  void cbz(const Xbyak_aarch64::XReg& rt, Xbyak_aarch64::Label& l) {
+    CbzFar(rt, l);
+  }
+  void cbnz(const Xbyak_aarch64::WReg& rt, Xbyak_aarch64::Label& l) {
+    CbnzFar(rt, l);
+  }
+  void cbnz(const Xbyak_aarch64::XReg& rt, Xbyak_aarch64::Label& l) {
+    CbnzFar(rt, l);
+  }
+  void b(Xbyak_aarch64::Cond cond, Xbyak_aarch64::Label& l) {
+    BCondFar(cond, l);
+  }
+
   void DebugBreak();
   void Trap(uint16_t trap_type = 0);
   void UnimplementedInstr(const hir::Instr* i);
@@ -194,6 +252,7 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   std::vector<TailEmitter> tail_code_;
   std::vector<Xbyak_aarch64::Label*> label_cache_;
+  bool force_long_branches_ = false;
 
   // Map from HIR label IDs to xbyak_aarch64 Labels.
   std::unordered_map<uint32_t, Xbyak_aarch64::Label*> label_map_;

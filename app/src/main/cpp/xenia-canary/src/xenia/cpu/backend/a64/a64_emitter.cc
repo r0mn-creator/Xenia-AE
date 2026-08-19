@@ -147,30 +147,61 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
   // WHICH function and HOW big - the numbers needed to tell a legitimately
   // enormous guest function apart from a codegen pathology on our side.
   EmitFunctionInfo func_info = {};
-  bool emit_ok;
+  bool emit_ok = false;
+  force_long_branches_ = false;
   try {
     emit_ok = Emit(builder, func_info);
   } catch (const Xbyak_aarch64::Error& e) {
-    XELOGE(
-        "JITSIZE OVERFLOW guest={:08X} emitted>={} bytes limit={} bytes: {}",
-        current_guest_function_, getSize(), kMaxCodeSize, e.what());
-#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
-    // The failed compile makes ResolveFunction return null, which lands on
-    // brk #0xF000 and kills the process, so xe.log never flushes this line.
-    __android_log_print(ANDROID_LOG_ERROR, "XeniaAE",
-                        "JITSIZE OVERFLOW guest=%08X emitted>=%zu "
-                        "kMaxCodeSize=%zu maxSize_=%zu what=%s",
-                        current_guest_function_,
-                        static_cast<size_t>(getSize()),
-                        static_cast<size_t>(kMaxCodeSize),
-                        static_cast<size_t>(getMaxSize()), e.what());
-#endif
-    // Emplace() is what normally calls reset(); it is not reached on this
-    // path, so the buffer would stay full and poison every later function
-    // compiled by this (per-thread, reused) emitter.
+    const bool too_far =
+        static_cast<int>(e) == Xbyak_aarch64::ERR_LABEL_IS_TOO_FAR;
+
+    // Emplace() is what normally calls reset(); it is not reached on either of
+    // these paths, so the buffer would otherwise stay full and poison every
+    // later function compiled by this (per-thread, reused) emitter.
     reset();
     tail_code_.clear();
-    return false;
+
+    if (!too_far) {
+      XELOGE("JITSIZE guest={:08X} emitted>={} bytes limit={} bytes: {}",
+             current_guest_function_, getSize(), kMaxCodeSize, e.what());
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+      // A failed compile makes ResolveFunction return null, which lands on
+      // brk #0xF000 and kills the process - so xe.log never flushes this.
+      __android_log_print(ANDROID_LOG_ERROR, "XeniaAE",
+                          "JITSIZE guest=%08X emitted>=%zu limit=%zu what=%s",
+                          current_guest_function_,
+                          static_cast<size_t>(getSize()),
+                          static_cast<size_t>(kMaxCodeSize), e.what());
+#endif
+      return false;
+    }
+
+    // "label is too far": a conditional branch could not reach its target
+    // because this function emits more than ARM64's +/-1 MB conditional
+    // range. Recompile once with branch islands (CbzFar/CbnzFar/BCondFar);
+    // only the rare enormous function pays the extra instruction.
+    XELOGW(
+        "JITSIZE guest={:08X} exceeded conditional branch range - recompiling "
+        "with branch islands",
+        current_guest_function_);
+    force_long_branches_ = true;
+    try {
+      emit_ok = Emit(builder, func_info);
+    } catch (const Xbyak_aarch64::Error& e2) {
+      reset();
+      tail_code_.clear();
+      force_long_branches_ = false;
+      XELOGE("JITSIZE guest={:08X} failed even with branch islands: {}",
+             current_guest_function_, e2.what());
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+      __android_log_print(
+          ANDROID_LOG_ERROR, "XeniaAE",
+          "JITSIZE guest=%08X FAILED even with branch islands: %s",
+          current_guest_function_, e2.what());
+#endif
+      return false;
+    }
+    force_long_branches_ = false;
   }
   if (!emit_ok) {
     return false;
@@ -398,6 +429,82 @@ void A64Emitter::MarkSourceOffset(const hir::Instr* i) {
   entry->code_offset = static_cast<uint32_t>(getSize());
 }
 
+// ---- Branch islands ------------------------------------------------------
+// See the comment on these declarations in a64_emitter.h for why they exist.
+// Each emits the plain short-range instruction unless force_long_branches_ is
+// set, in which case the condition is inverted to skip over an unconditional
+// b, which reaches +/-128 MB instead of +/-1 MB.
+//
+// NewCachedLabel() is used rather than a stack-local Label because the label
+// cache owns the lifetime; the skip label is bound two instructions later, so
+// it always resolves within this function.
+
+void A64Emitter::CbzFar(const Xbyak_aarch64::WReg& rt,
+                        Xbyak_aarch64::Label& target) {
+  if (!force_long_branches_) {
+    CodeGenerator::cbz(rt, target);
+    return;
+  }
+  Xbyak_aarch64::Label& skip = NewCachedLabel();
+  CodeGenerator::cbnz(rt, skip);
+  b(target);
+  L(skip);
+}
+
+void A64Emitter::CbzFar(const Xbyak_aarch64::XReg& rt,
+                        Xbyak_aarch64::Label& target) {
+  if (!force_long_branches_) {
+    CodeGenerator::cbz(rt, target);
+    return;
+  }
+  Xbyak_aarch64::Label& skip = NewCachedLabel();
+  CodeGenerator::cbnz(rt, skip);
+  b(target);
+  L(skip);
+}
+
+void A64Emitter::CbnzFar(const Xbyak_aarch64::WReg& rt,
+                         Xbyak_aarch64::Label& target) {
+  if (!force_long_branches_) {
+    CodeGenerator::cbnz(rt, target);
+    return;
+  }
+  Xbyak_aarch64::Label& skip = NewCachedLabel();
+  CodeGenerator::cbz(rt, skip);
+  b(target);
+  L(skip);
+}
+
+void A64Emitter::CbnzFar(const Xbyak_aarch64::XReg& rt,
+                         Xbyak_aarch64::Label& target) {
+  if (!force_long_branches_) {
+    CodeGenerator::cbnz(rt, target);
+    return;
+  }
+  Xbyak_aarch64::Label& skip = NewCachedLabel();
+  CodeGenerator::cbz(rt, skip);
+  b(target);
+  L(skip);
+}
+
+void A64Emitter::BCondFar(Xbyak_aarch64::Cond cond,
+                          Xbyak_aarch64::Label& target) {
+  if (!force_long_branches_) {
+    CodeGenerator::b(cond, target);
+    return;
+  }
+  // Condition codes are the ARM encoding, so the inverse is the low bit
+  // flipped (EQ<->NE, CS<->CC, MI<->PL, VS<->VC, HI<->LS, GE<->LT, GT<->LE).
+  // AL/NV (0xE/0xF) have no meaningful inverse and are never emitted here.
+  assert_true(cond != Xbyak_aarch64::AL && cond != Xbyak_aarch64::NV);
+  const auto inverse =
+      static_cast<Xbyak_aarch64::Cond>(static_cast<int>(cond) ^ 1);
+  Xbyak_aarch64::Label& skip = NewCachedLabel();
+  CodeGenerator::b(inverse, skip);
+  b(target);
+  L(skip);
+}
+
 void A64Emitter::DebugBreak() { brk(0xF000); }
 
 void A64Emitter::Trap(uint16_t trap_type) { brk(trap_type); }
@@ -480,7 +587,7 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
     // Compare target guest address with our function's return address.
     ldr(w0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
     cmp(target_w, w0);
-    b(EQ, epilog_label());
+    BCondFar(Xbyak_aarch64::EQ, epilog_label());
   }
 
   // Load host code address from indirection table.
@@ -728,6 +835,26 @@ void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
                        StackLayout::GUEST_SAVED_STACKPOINT_DEPTH)));
   cmp(w17, w16);
 
+  if (force_long_branches_) {
+    // In a function large enough to need branch islands, the tail block below
+    // is more than 1 MB away from return_from_sync, and `adr` only reaches
+    // +/-1 MB - which is the "illegal immediate parameter (range error)" that
+    // appears once the branch islands have dealt with the too-far branches.
+    // adrp+add would reach further but xbyak cannot express the lo12 add
+    // against a label, so emit the sequence INLINE instead: return_from_sync
+    // is then a handful of instructions below the adr and trivially in range.
+    // Only the rare enormous function takes this path, so the inline cost is
+    // not paid by ordinary code.
+    CodeGenerator::b(Xbyak_aarch64::EQ, return_from_sync);
+    adr(x8, return_from_sync);
+    mov(x9, static_cast<uint64_t>(stack_size()));
+    mov(x10, reinterpret_cast<uint64_t>(
+                 backend()->synchronize_guest_and_host_stack_helper()));
+    br(x10);
+    L(return_from_sync);
+    return;
+  }
+
   auto& sync_label = AddToTail([&return_from_sync](A64Emitter& e, Label& lbl) {
     // Set up arguments for the sync helper:
     //   x8 = return address (where to resume after fixup)
@@ -738,7 +865,7 @@ void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
                      e.backend()->synchronize_guest_and_host_stack_helper()));
     e.br(e.x10);
   });
-  b(NE, sync_label);
+  BCondFar(Xbyak_aarch64::NE, sync_label);
 
   L(return_from_sync);
 }
