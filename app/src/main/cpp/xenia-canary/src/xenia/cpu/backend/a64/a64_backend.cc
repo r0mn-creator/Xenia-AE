@@ -9,6 +9,10 @@
 
 #include "xenia/cpu/backend/a64/a64_backend.h"
 
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+#include <android/log.h>
+#endif
+
 #include <cstddef>
 #include <cstring>
 
@@ -492,12 +496,28 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
       static_cast<uint32_t>(target_address));
   if (!fn) {
     // Unresolvable — return 0 which will fault.
+    //
+    // RESOLVEDIAG: returning 0 lands on `brk #0xF000` in the resolve thunk,
+    // which kills the process with SIGTRAP and no indication of WHICH guest
+    // address failed. Halo 4 dies here. XELOGE would not survive - the trap is
+    // immediate and xe.log's async writer loses its tail - so report straight
+    // to logcat, which outlives the crash.
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+    __android_log_print(ANDROID_LOG_ERROR, "XeniaAE",
+                        "RESOLVEDIAG ResolveFunction FAILED guest=%08X",
+                        static_cast<uint32_t>(target_address));
+#endif
     return 0;
   }
 
   auto guest_fn = static_cast<GuestFunction*>(fn);
   auto code = guest_fn->machine_code();
   if (!code) {
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+    __android_log_print(ANDROID_LOG_ERROR, "XeniaAE",
+                        "RESOLVEDIAG no machine_code guest=%08X",
+                        static_cast<uint32_t>(target_address));
+#endif
     return 0;
   }
   return reinterpret_cast<uint64_t>(code);

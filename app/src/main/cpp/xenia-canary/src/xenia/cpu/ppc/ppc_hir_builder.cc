@@ -9,6 +9,10 @@
 
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
 
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+#include <android/log.h>
+#endif
+
 #include <stddef.h>
 #include <cstring>
 
@@ -186,6 +190,16 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
           "developers; to skip, disable break_on_unimplemented_instructions",
           address, code, disasm_info.name);
       Comment("UNIMPLEMENTED!");
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+      // The XELOGE above never survives this on Android: the trap fires almost
+      // immediately, the process dies, and xe.log's async writer loses its
+      // final buffer - so the one line naming the instruction is exactly the
+      // line that goes missing. Write it straight to logcat, which is a
+      // separate daemon and outlives the crash.
+      __android_log_print(ANDROID_LOG_ERROR, "XeniaAE",
+                          "UNIMPL_INSTR addr=%08X code=%08X %s", address, code,
+                          disasm_info.name);
+#endif
       if (cvars::break_on_unimplemented_instructions) {
         DebugBreak();
       }

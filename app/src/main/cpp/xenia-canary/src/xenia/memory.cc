@@ -272,7 +272,7 @@ bool Memory::Initialize() {
   // standing between the title and a successful boot. The virtual guard at
   // 0x00000000 (above) is untouched; this only releases the physical top.
   // Toggle: debug.canary.fix_free_physical_top_guard (default ON).
-  if (!XE_AE_FIX_ENABLED("debug.canary.fix_free_physical_top_guard")) {
+  if (!XE_AE_EXPERIMENT_ENABLED("debug.canary.fix_free_physical_top_guard")) {
     heaps_.physical.AllocFixed(0x1FFF0000, 0x10000, 0x10000,
                                kMemoryAllocationReserve,
                                kMemoryProtectNoAccess);
@@ -314,7 +314,7 @@ bool Memory::Initialize() {
   // WRITEBACK_SIZE register and is kilobytes, so 14 MB is still an enormous
   // margin over anything that region can actually be used for.
   static constexpr uint32_t kGpuWritebackReserveSize = 0x00E00000;  // 14 MB
-  if (XE_AE_FIX_ENABLED("debug.canary.fix_gpu_writeback_reserve")) {
+  if (XE_AE_EXPERIMENT_ENABLED("debug.canary.fix_gpu_writeback_reserve")) {
     heaps_.physical.AllocFixed(
         0x00000000, kGpuWritebackReserveSize, 0x1000,
         kMemoryAllocationReserve | kMemoryAllocationCommit,
@@ -1590,7 +1590,7 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
   // Toggle: debug.canary.fix_allocrange_inclusive (default ON).
   const uint32_t inclusive_span =
       (high_page_number - low_page_number) +
-      (XE_AE_FIX_ENABLED("debug.canary.fix_allocrange_inclusive") ? 1u : 0u);
+      (XE_AE_EXPERIMENT_ENABLED("debug.canary.fix_allocrange_inclusive") ? 1u : 0u);
   if (page_count > inclusive_span) {
     // HEAPDIAG: Halo 4 dies during boot after eight failed
     // MmAllocatePhysicalMemoryEx calls, the last of which asks for only 64 KB
@@ -1643,7 +1643,7 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
       // stride (64 KB) at the top of the heap.
       const uint32_t high_exclusive =
           high_page_number +
-          (XE_AE_FIX_ENABLED("debug.canary.fix_allocrange_inclusive") ? 1u
+          (XE_AE_EXPERIMENT_ENABLED("debug.canary.fix_allocrange_inclusive") ? 1u
                                                                       : 0u);
       uint32_t high_aligned =
           high_exclusive - QuickMod(high_exclusive, page_scan_stride);
@@ -1694,7 +1694,7 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
       uint32_t aligned_start = xe::round_up(earliest, page_scan_stride, false);
       const uint32_t up_high_exclusive =
           high_page_number +
-          (XE_AE_FIX_ENABLED("debug.canary.fix_allocrange_inclusive") ? 1u
+          (XE_AE_EXPERIMENT_ENABLED("debug.canary.fix_allocrange_inclusive") ? 1u
                                                                       : 0u);
       if (aligned_start + page_count <= block_end &&
           aligned_start + page_count <= up_high_exclusive) {
@@ -2259,7 +2259,7 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
   //
   // Toggle: debug.canary.fix_sysheap_bottom_up (default ON; set 0 to restore
   // the unconditional top-down override).
-  if (!XE_AE_FIX_ENABLED("debug.canary.fix_sysheap_bottom_up")) {
+  if (!XE_AE_EXPERIMENT_ENABLED("debug.canary.fix_sysheap_bottom_up")) {
     top_down = true;
   }
 

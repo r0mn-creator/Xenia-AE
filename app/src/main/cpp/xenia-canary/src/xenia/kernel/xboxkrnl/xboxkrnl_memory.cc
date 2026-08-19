@@ -480,8 +480,13 @@ uint32_t xeMmAllocatePhysicalMemoryEx(uint32_t flags, uint32_t region_size,
            base_address, adjusted_size);
     return 0;
   }
-  XELOGD("MmAllocatePhysicalMemoryEx = {:08X} Size: {:08X}", base_address,
-         adjusted_size);
+  // ALLOCDIAG: XELOGD is compiled out (see base/logging.h - it expands to
+  // __XELOGDUMMY), so allocation SUCCESSES were invisible at every log level
+  // while failures logged at XELOGW. That asymmetry made a probe sequence that
+  // ends in success look identical to one that never succeeds - which is
+  // exactly the question Halo 4 turns on. Log the result where it can be seen.
+  XELOGI("ALLOCDIAG MmAllocatePhysicalMemoryEx OK addr={:08X} size={:08X}",
+         base_address, adjusted_size);
 
   return base_address;
 }

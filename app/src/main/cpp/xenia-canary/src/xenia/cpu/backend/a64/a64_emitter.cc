@@ -9,6 +9,10 @@
 
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+#include <android/log.h>
+#endif
+
 #include <cstring>
 
 #include "xenia/base/debugging.h"
@@ -54,7 +58,14 @@ static uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
   return 0;
 }
 
-static constexpr size_t kMaxCodeSize = 1_MiB;
+// Per-function JIT code buffer. Was 1 MiB, which Halo 4 exceeds: one of its
+// functions overflowed it, xbyak threw "code is too big", the compile failed,
+// ResolveFunction returned null and the resolve thunk's brk #0xF000 killed the
+// process. 1 MiB of ARM64 for a single guest function is already extreme, so
+// this is not about typical functions - it is headroom for the outliers, and
+// it costs nothing at runtime because the buffer is reset after each function
+// (see Emplace) and only what a function actually emits is copied out.
+static constexpr size_t kMaxCodeSize = 8_MiB;
 
 // Register maps:
 // GPR allocatable registers: x22, x23, x24, x25, x26, x27, x28
@@ -143,6 +154,17 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
     XELOGE(
         "JITSIZE OVERFLOW guest={:08X} emitted>={} bytes limit={} bytes: {}",
         current_guest_function_, getSize(), kMaxCodeSize, e.what());
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_AX360E
+    // The failed compile makes ResolveFunction return null, which lands on
+    // brk #0xF000 and kills the process, so xe.log never flushes this line.
+    __android_log_print(ANDROID_LOG_ERROR, "XeniaAE",
+                        "JITSIZE OVERFLOW guest=%08X emitted>=%zu "
+                        "kMaxCodeSize=%zu maxSize_=%zu what=%s",
+                        current_guest_function_,
+                        static_cast<size_t>(getSize()),
+                        static_cast<size_t>(kMaxCodeSize),
+                        static_cast<size_t>(getMaxSize()), e.what());
+#endif
     // Emplace() is what normally calls reset(); it is not reached on this
     // path, so the buffer would stay full and poison every later function
     // compiled by this (per-thread, reused) emitter.
