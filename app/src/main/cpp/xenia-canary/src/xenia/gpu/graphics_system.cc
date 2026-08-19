@@ -522,6 +522,21 @@ bool GraphicsSystem::Restore(ByteStream* stream) {
 }
 
 std::pair<uint16_t, uint16_t> GraphicsSystem::GetInternalDisplayResolution() {
+  // Measurement override. The Odin's GPU runs at 73-75% busy at its MAXIMUM
+  // clock (680 MHz) while frames take 50 ms, i.e. roughly 37 ms of GPU work
+  // per frame - already more than the 33.3 ms a 2-vblank (30 FPS) frame
+  // allows, so GPU cost is the binding constraint on the frame-rate target and
+  // no amount of CPU work removal can reach it. Internal resolution is the
+  // most direct lever on fragment cost, and this lets it be swept on device
+  // without a rebuild or a config edit:
+  //   adb shell setprop debug.canary.exp_display_res 5   # index into the table
+  // Index 8 is the 1280x720 default; 5 is 848x480, i.e. 44% of the pixels.
+  // Unset (or 0) leaves the configured value alone.
+  const uint32_t res_override = xe::AeDiagValue("debug.canary.exp_display_res");
+  if (res_override &&
+      res_override < internal_display_resolution_entries.size()) {
+    return internal_display_resolution_entries[res_override];
+  }
   if (cvars::internal_display_resolution >=
       internal_display_resolution_entries.size()) {
     return {cvars::internal_display_resolution_x,
