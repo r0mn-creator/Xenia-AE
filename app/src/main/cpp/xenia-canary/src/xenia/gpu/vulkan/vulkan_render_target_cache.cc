@@ -1718,6 +1718,16 @@ VkRenderPass VulkanRenderTargetCache::GetHostRenderTargetsRenderPass(
   }
 
   VkSampleCountFlagBits samples;
+  // THROWAWAY DIAGNOSTIC (debug.canary.exp_force_1x_msaa): force the HOST
+  // sample count to 1 while leaving every bit of guest EDRAM tile arithmetic
+  // alone. The image WILL be wrong - tile<->pixel mapping depends on the guest
+  // sample count - so this is only good for reading gpubusy and answering one
+  // question: does MSAA account for a meaningful share of the GPU's ~37 ms per
+  // frame? If it does not, the whole "bypass MSAA" design dies here for the
+  // cost of twenty minutes.
+  if (XE_AE_EXPERIMENT_ENABLED("debug.canary.exp_force_1x_msaa")) {
+    samples = VK_SAMPLE_COUNT_1_BIT;
+  } else
   switch (key.msaa_samples) {
     case xenos::MsaaSamples::k1X:
       samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1997,7 +2007,11 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
   image_create_info.extent.depth = 1;
   image_create_info.mipLevels = 1;
   image_create_info.arrayLayers = 1;
-  if (key.msaa_samples == xenos::MsaaSamples::k2X &&
+  if (XE_AE_EXPERIMENT_ENABLED("debug.canary.exp_force_1x_msaa")) {
+    // Must match the render pass above - Vulkan requires the framebuffer
+    // attachment and the render pass to agree on sample count.
+    image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+  } else if (key.msaa_samples == xenos::MsaaSamples::k2X &&
       !msaa_2x_attachments_supported_) {
     image_create_info.samples = VK_SAMPLE_COUNT_4_BIT;
   } else {
