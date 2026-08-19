@@ -756,7 +756,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
       // Wait.
       if (wait >= 0x100) {
         PrepareForWait();
-        if (!cvars::vsync) {
+        if (!(cvars::vsync &&
+              !XE_AE_EXPERIMENT_ENABLED("debug.canary.exp_no_vsync"))) {
           // User wants it fast and dangerous.
           // do nothing
         } else {

@@ -9,6 +9,7 @@
 #ifndef XENIA_BASE_AE_FPS_H_
 #define XENIA_BASE_AE_FPS_H_
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -87,7 +88,38 @@ class FpsCounter {
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                           now - s.window_start)
                           .count();
+    // FRAME TIME, not just FPS.
+    //
+    // vsync is on and the panel is 60 Hz, so presented FPS can only ever land
+    // on 60/n - measured: 83% of samples are exactly 14.9 (60/4) or 19.9
+    // (60/3), with almost nothing in between. That makes FPS a QUANTIZED
+    // metric and a bad optimisation target: a real 10% frame-time improvement
+    // shows as 0% until it crosses a vblank boundary, then jumps 33% at once.
+    // Frame time is continuous and shows progress as it happens.
+    if (s.last_frame.time_since_epoch().count() != 0) {
+      const int64_t dt_us =
+          std::chrono::duration_cast<std::chrono::microseconds>(now -
+                                                                s.last_frame)
+              .count();
+      if (dt_us > 0 && s.sample_count < State::kMaxSamples) {
+        s.samples[s.sample_count++] = static_cast<uint32_t>(dt_us);
+      }
+    }
+    s.last_frame = now;
+
     if (elapsed_ms >= kWindowMs) {
+      if (s.sample_count) {
+        std::sort(s.samples, s.samples + s.sample_count);
+        const auto pct = [&s](double q) {
+          size_t i = static_cast<size_t>(s.sample_count * q);
+          if (i >= s.sample_count) i = s.sample_count - 1;
+          return s.samples[i];
+        };
+        // Microseconds, so a sub-millisecond change is still visible.
+        XELOGI("XEFRAME n={} p50={}us p90={}us p99={}us min={}us",
+               s.sample_count, pct(0.50), pct(0.90), pct(0.99), s.samples[0]);
+        s.sample_count = 0;
+      }
       XELOGI("XEFPS {} {}", s.frames, elapsed_ms);
       current_fps_x100.store(
           static_cast<uint32_t>(s.frames * 100000.0 / double(elapsed_ms) + 0.5),
@@ -109,6 +141,13 @@ class FpsCounter {
   struct State {
     uint32_t frames = 0;
     Clock::time_point window_start = Clock::now();
+    // Per-frame deltas for this window. At 15-20 FPS a 1 s window holds ~20
+    // samples; the cap is generous so an unlocked/fast scene cannot overflow
+    // it, and overflow simply stops sampling rather than looping.
+    static constexpr size_t kMaxSamples = 512;
+    Clock::time_point last_frame{};
+    uint32_t samples[kMaxSamples] = {};
+    size_t sample_count = 0;
   };
 
   // Only ever touched from the GPU command thread, so no synchronisation.

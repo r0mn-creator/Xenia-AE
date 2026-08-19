@@ -69,6 +69,19 @@ DECLARE_bool(use_50Hz_mode);
 namespace xe {
 namespace gpu {
 
+namespace {
+// Measurement aid: vsync quantises presented frame time to multiples of the
+// 16.67 ms vblank, so FPS can only ever be 60/n (measured: 83% of samples are
+// exactly 60/4 or 60/3). That hides real optimisation progress until it
+// happens to cross a boundary. Turning vsync off exposes the true render time.
+//   adb shell setprop debug.canary.exp_no_vsync 1
+inline bool AeVsyncEnabled() {
+  return cvars::vsync &&
+         !XE_AE_EXPERIMENT_ENABLED("debug.canary.exp_no_vsync");
+}
+}  // namespace
+
+
 // Nvidia Optimus/AMD PowerXpress support.
 // These exports force the process to trigger the discrete GPU in multi-GPU
 // systems.
@@ -163,11 +176,11 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
 
             // If VSYNC is enabled, but frames are not limited,
             // lock framerate at default value of 60
-            if (normalized_framerate_limit == 0 && cvars::vsync)
+            if (normalized_framerate_limit == 0 && AeVsyncEnabled())
               normalized_framerate_limit = 60;
 
             const double vsync_duration_d =
-                cvars::vsync
+                AeVsyncEnabled()
                     ? std::max<double>(5.0,
                                        1000.0 / static_cast<double>(
                                                     normalized_framerate_limit))
@@ -180,7 +193,7 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
             // A real 360 raises it at the display rate (60 Hz, or 50 Hz in
             // PAL-50), and titles pace their own logic against it.
             //
-            // The original code only paced MarkVblank() on the cvars::vsync
+            // The original code only paced MarkVblank() on the AeVsyncEnabled()
             // path. With vsync off it called MarkVblank() then Sleep(1ms), so
             // the guest received vblanks at ~1000 Hz - about 16x real hardware.
             // That corrupts in-game timing: NFS Carbon's "press Y" prompt
@@ -201,7 +214,7 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
             uint64_t vblank_rate_mark = Clock::QueryGuestTickCount();
             if (vblank_fix) {
               XELOGI("Frame limiter: vblank target {} Hz (vsync={})", vblank_hz,
-                     cvars::vsync ? "on" : "off");
+                     AeVsyncEnabled() ? "on" : "off");
             }
 
             while (frame_limiter_worker_running_) {
@@ -257,7 +270,7 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                 continue;
               }
 
-              if (cvars::vsync) {
+              if (AeVsyncEnabled()) {
                 const uint64_t current_time = Clock::QueryGuestTickCount();
                 const uint64_t tick_freq = Clock::guest_tick_frequency();
                 const uint64_t time_delta = current_time - last_frame_time;
@@ -271,7 +284,7 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                   // vblank after MarkVblank, no idea how long the guest code
                   // normally takes
                   MarkVblank();
-                  if (cvars::vsync) {
+                  if (AeVsyncEnabled()) {
                     const uint64_t estimated_nanoseconds =
                         static_cast<uint64_t>(
                             (vsync_duration_d * 1000000.0) *
@@ -282,7 +295,7 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                 }
               }
 
-              if (!cvars::vsync) {
+              if (!AeVsyncEnabled()) {
                 MarkVblank();
                 if (normalized_framerate_limit > 0) {
                   // framerate_limit is over 0, vsync disabled
